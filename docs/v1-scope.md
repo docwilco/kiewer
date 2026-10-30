@@ -1,0 +1,81 @@
+# kiewer v1 scope
+
+The decisions behind v1, settled in the design grilling of 2026-10-30, grouped by area. Question codes (Q1, S3, N7) refer to that grilling. The four ADRs in `docs/adr/` carry the decisions that were hard to reverse; this file carries the rest. Vocabulary is in `GLOSSARY.md`.
+
+## Product
+
+- Name: kiewer. Hostname `kiewer.drwil.co`, staging `kiewer-staging.drwil.co`, both under the existing `*.drwil.co` certificate at Fastly. (Q1, Q54, Q60)
+- Audience: people sharing KiCad designs on Discord. Discord link embeds are a first-class output. (Q10, Q23)
+- Licence: MIT OR Apache-2.0. (Q15)
+- In v1: board and schematic viewing, uploads, branches and forks, three sign-in providers, public and unlisted designs, Markdown descriptions, per-file downloads, thumbnails, net highlight, reference-designator search. (Q5, Q6, Q45, Q46, Q48, Q49)
+- After v1: private designs, import from GitHub, Codeberg and gists, comparing revisions, named revisions (tags), zip download, search, zone filling, server-side geometry cache. (Q6, Q17, Q67, Q69, Q49, Q47, Q19, Q18)
+
+## Workspace
+
+- One Cargo workspace: `kicad-core` (parser, model, geometry, tessellation; compiles to wasm32 and native, no tokio, no web-sys), `viewer` (wasm-bindgen, wgpu on a canvas), `server` (axum). (S1)
+- Pages are server-rendered HTML (askama or maud) with a little plain JavaScript for forms and the upload flow; wasm runs only inside the viewer canvas. (Q9)
+
+## Rendering
+
+- wgpu, one code path at the WebGL2 floor, WebGPU when present. See ADR 0001. (S3)
+- Tessellation in the browser at load with lyon: arcs, round-capped tracks, zones with holes, stroke-font glyphs. (Q18)
+- Zone fills: stored fills only; an unfilled zone draws its outline hatched and the design page shows a warning. (Q19)
+- Views: the eight stacks from the hand-off README as presets, free per-layer toggles and opacity on top, state in the URL fragment. Per-design presets later. (Q37)
+- Schematic: sheet list in a side panel, click on a hierarchical sheet symbol enters it, sheet path in the URL fragment. (Q38)
+- Net interaction: hover names the net and dims everything else; click pins the highlight and lists the net's pads; Escape or a click on empty space clears. Same for wires and labels on the schematic. (Q45)
+- Search box: reference designator pans to the footprint or symbol. No measure, ruler or BOM tools. (Q46)
+- Zoom: world point under the cursor stays put (`t' = p - (p - t) * k`), exponential zoom from normalised wheel delta, non-passive wheel listener with `preventDefault`, trackpad pinch arrives as wheel with ctrlKey, two-pointer touch pinch with `touch-action: none`, camera in f64 on the CPU. Bindings follow KiCad: wheel zooms, ctrl+wheel pans horizontally, shift+wheel vertically, middle or right drag pans; keyboard plus and minus zoom at the view centre; fit-to-board; double-click zooms at the cursor. (S10)
+- Net labels: text height is 0.7 × track width, never shrunk to fit length; a run gets a label only when its length is at least 1.3 × the text length; a label draws when its text height on screen reaches about 7 px, fading in over the next 50%, with the threshold applied in the vertex shader; one label per run, repeated every ~8 text lengths; collisions resolved once at parse with priority pads, vias, zones, tracks (shift along the run, then drop); via labels capped to the via diameter and shown at higher zoom; one zone label at the pole of inaccessibility; pads show number first and net second only when both fit; angles in (-90, 90] with near-vertical reading bottom to top; mirrored back views flip x and negate angles. Toggles per class and a threshold slider. Constants tuned against `exports/png` in the hand-off. (S11)
+- Fonts: text naming no face renders in Newstroke. A design naming a face the browser lacks shows a warning and a picker; availability is detected by canvas text measurement against a fallback, since `document.fonts.check()` returns true for unknown system fonts and `queryLocalFonts()` is Chromium-only. The picker probes a fixed list of common faces per platform, offers free text, and defaults to the stroke font. The choice is kept per browser in localStorage keyed by font family. System faces render through a Canvas2D glyph atlas. (S9, Q12, Q50)
+- Telemetry: one `navigator.sendBeacon` per page load after adapter init with backend, whether `navigator.gpu` existed, outcome or failure reason, and adapter vendor when exposed; wasm panics go to the same endpoint. The server validates, rate-limits per IP, and emits one structured log line; a Cloud Logging log-based metric charts it. No identifiers, no cookie. Nothing else phones home: no email, no page analytics, no third-party error service. (S3, Q53)
+
+## Storage and history
+
+- Data model per ADR 0002: blobs, trees, revisions, branches, `design_revision`, `blocked_blob`. (Q42, Q62)
+- Hashes: SHA-256; short form is the first 8 hex characters, extended when ambiguous within a design. (Q30)
+- A revision records author (account id), time, optional message, parent, and parsed metadata. No diff. (Q31)
+- Default branch `main`, renamable by owner or admin. (Q32)
+- Fork: full default branch by default, or all branches; records the source design and revision. Forking your own design is allowed under a new slug. A fork points at existing revision rows. (Q33, Q55)
+- Push: the upload form selects a branch, defaulting to the branch of the page it was opened from, with a "new branch" entry. The parent is the head at write time, set by compare-and-set. If the head moved, the upload becomes a pending revision for an hour and the uploader chooses re-append (parent rewritten to the new head, hash recomputed) or branch (new branch at the old head). (Q63)
+- History page `/{handle}/{slug}/b/{branch}/history`: newest first, thumbnail, ordinal, short hash, author, time, message, metadata line. The viewer header has a branch dropdown and a revision dropdown with the last ten. Off the head, a one-line banner names the branch, the distance behind, and links to the head and "new branch here". (Q64, Q65, Q66)
+- Branches page `/{handle}/{slug}/branches`: head, ordinal, age, author; delete, rename, set-default by role; the default branch cannot be deleted while default. (Q68)
+- Delete: hard delete of the design's rows at once, Fastly purged; the collector runs nightly with a 24-hour grace. Account delete hard-deletes owned designs, removes role rows and sessions, reserves the handle 90 days; forks by others survive with the old handle as text. (Q35, Q43)
+- Compression: blobs stored gzip in GCS with `Content-Encoding: gzip`; hash and caps apply to uncompressed bytes. (Q20)
+
+## Uploads
+
+- Transport: one multipart POST per revision through Fastly to Cloud Run with HTTP/2; the server streams parts to temp files, parses, gzips, hashes, writes GCS, then writes rows in one transaction. (Q40)
+- Only `.kicad_pcb`, `.kicad_sch` and `.kicad_pro` are kept. Other files are dropped silently, at most a console warning. A KiCad-named file that fails to parse is rejected with the error. KiCad 9 and 10 formats (board `20241229` and later); older files are rejected naming the version and suggesting a re-save. (Q4, Q11)
+- Dropped files, dropped folders and zips. A zip's central directory is read first and only allowed entries are inflated; entry count and the 200 MB cap are checked against the directory before any inflate. Skipped: `*-backups/`, `*.lck`, `~*.lck`, `*-save.kicad_*`, `_autosave-*`, dot-directories, `__MACOSX/`. The tree is rooted at the project folder with relative paths kept. More than one project in one upload: the shallowest is taken and a warning names the others. (Q41, N3)
+- Caps: 50 MB per file, 200 MB per revision after extraction, 2 GB per account, 30 s parse timeout, 30 revisions per account per hour answered with 429 and Retry-After. (Q13, Q44)
+- Server-side parse with `kicad-core` at upload stores metadata: format version, layer count, board size, fonts used, net and footprint counts. (S8)
+
+## Accounts and access
+
+- Sign-in with GitHub, Discord and Google via the `oauth2` crate plus a userinfo call per provider (Discord `identify` and `email` scopes against `/users/@me`). One account; providers linked explicitly from settings; a first sign-in with an unknown provider makes a new account. (S6, Q7)
+- Sessions: Postgres rows, random id in an HttpOnly Secure SameSite=Lax cookie, 30-day sliding expiry, listed and revocable in settings. (Q36)
+- Handle chosen at first sign-in, prefilled from the provider, lowercase letters, digits and hyphens, no rename in v1. Slug derived from the name, editable by owner or admin, old slug redirects until reused. (Q28, Q29)
+- Roles: collaborator pushes revisions and manages own branches; admin does that on any branch and manages people, name and description; owner alone deletes, transfers and changes visibility. One owner per design. (Q8, Q34)
+- Visibility: public or unlisted. Unlisted appears in no listing. Authorisation only on writes. (Q6, S7)
+- Separate OAuth registrations per environment (production, staging, development). Production and staging secrets in Secret Manager mounted into Cloud Run; development in a git-ignored `.env`. (Q57)
+
+## Pages and URLs
+
+- `/{handle}/{slug}` head of the default branch; `/b/{branch}` branch head; `/r/{hash}` a revision checked against the design; `/r/{hash}/f/{path}` one file with its original filename and a `Content-Disposition`, cached under the revision hash; `/blob/{hash}` raw bytes; `/{handle}` a person's public designs; `/` recent public designs. No search. (Q27, Q47, Q49)
+- Description: Markdown via comrak (CommonMark plus GitHub tables and strikethrough); allowed output is headings, paragraphs, emphasis, lists, http and https links with `rel="nofollow noopener"`, inline code and code blocks, blockquotes, tables; no raw HTML, images or embeds; rendered HTML cached in the row. (Q48, Q56)
+- Thumbnails per ADR 0004. Open Graph tags on design, branch and revision pages. (Q10, Q21, Q22, Q23)
+
+## Caching
+
+- Fastly per ADR 0003: two origins, identical pages, `/api/me`, `Surrogate-Key` purges (design id, handle), `private, no-store` for settings and upload pages. (Q24, Q25, Q26)
+- Static assets: content hash in the filename, `Cache-Control: public, max-age=31536000, immutable`, brotli and gzip prebuilt. (Q39)
+- The server also serves `/blob/*` from its store so development works without Fastly; in production Fastly answers first. (N6)
+
+## Operations
+
+- GitHub Actions: fmt, clippy, tests and the wasm build on every push; every push to main deploys staging; a tag builds the image to Artifact Registry and deploys production; both via Workload Identity Federation with no stored keys; follows the operator's release conventions. (Q14, Q58)
+- Region europe-west4 for Cloud Run, Cloud SQL and buckets. (Q16)
+- Terraform in `infra/` for GCP and Fastly, state in a GCS bucket, applied by hand from a workstation; CI deploys only Cloud Run revisions. A deploy switches traffic after a health check; rollback is traffic back. (Q51, Q58)
+- Staging: own Cloud Run service, database `kiewer_staging` on the shared instance with its own migrations, own bucket. A script copies production in on demand: pg_dump and restore, server-side GCS copy of every blob the restored trees name, sessions and OAuth identities dropped, developers granted ownership of copied designs by a one-off grant in the script. (Q59, Q61)
+- Local development: a blob-store trait with a filesystem implementation for development and tests and the GCS implementation in production with one integration test; Postgres from docker compose; sqlx offline mode in CI. (Q52)
+- Postgres over the Cloud Run unix socket `/cloudsql/<instance>`, `sqlx` with migrations. (S4)
