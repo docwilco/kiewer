@@ -21,7 +21,19 @@ axum = { version = "0.8", default-features = false, features = ["form", "http1",
 # is compared with the provider's echo, so neither carries a claim.
 axum-extra = { version = "0.12", default-features = false, features = ["cookie"] }
 derive_more = { version = "2", features = ["display", "error", "from"] }
+# The GCS store's upload payload type (blob/gcs.rs); in the tree already.
+bytes = "1"
 flate2 = "1"
+# The GCS store (blob/gcs.rs): Google's own client. Its data path is the
+# JSON API, which the fake-gcs-server emulator speaks (object_store's XML
+# PUT it does not); application-default credentials and the metadata
+# server on Cloud Run come with it; with_endpoint reaches an emulator. Its
+# default feature is the rustls provider the TLS needs. google-cloud-auth
+# is for the anonymous credentials an emulator takes, google-cloud-gax
+# names the client builder's error type.
+google-cloud-auth = { version = "1.18", default-features = false }
+google-cloud-gax = { version = "1.15", default-features = false }
+google-cloud-storage = "1.21"
 # The authorization-code exchange with PKCE, over reqwest with rustls; the
 # reqwest line below is the same major so one client serves the token call
 # and the provider's user call.

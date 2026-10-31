@@ -8,6 +8,7 @@ use derive_more::{Display, Error, From};
 use crate::account::Handle;
 use crate::auth::Provider;
 use crate::blob::BlobHash;
+use crate::blob::gcs::BlobOp;
 
 /// Every way the library fails. Variants are failure kinds with context,
 /// never one per call site.
@@ -31,6 +32,24 @@ pub enum Error {
         hash: BlobHash,
         path: PathBuf,
         source: std::io::Error,
+    },
+    /// GCS refused or failed an operation on a blob: the bucket, the
+    /// credentials or the network.
+    #[display("{op} blob {hash} in bucket {bucket}: {source}")]
+    #[from(ignore)]
+    Gcs {
+        op: BlobOp,
+        hash: BlobHash,
+        bucket: String,
+        source: google_cloud_storage::Error,
+    },
+    /// The GCS client for a bucket could not be built: no credentials
+    /// found, or a configuration refused.
+    #[display("the GCS store for bucket {bucket}: {source}")]
+    #[from(ignore)]
+    GcsClient {
+        bucket: String,
+        source: google_cloud_gax::client_builder::Error,
     },
     /// The bytes read under a hash do not hash to it: the store is
     /// damaged or someone wrote around it.
@@ -84,11 +103,12 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Exit {
-    /// I/O, including the blob store's files.
+    /// I/O, including the blob store's files and objects.
     Io = 3,
     /// A blob that is corrupt or a hash that does not parse.
     Blob = 4,
-    /// The environment is missing or malformed.
+    /// The environment is missing or malformed, or a client cannot be
+    /// built from it.
     Config = 5,
     /// Postgres, including migrations.
     Db = 6,
@@ -159,9 +179,11 @@ impl Error {
     #[must_use]
     pub fn exit_code(&self) -> Exit {
         match self {
-            Error::Io(_) | Error::WriteBlob { .. } | Error::ReadBlob { .. } => Exit::Io,
+            Error::Io(_) | Error::WriteBlob { .. } | Error::ReadBlob { .. } | Error::Gcs { .. } => {
+                Exit::Io
+            }
             Error::CorruptBlob { .. } | Error::Malformed(_) => Exit::Blob,
-            Error::Env { .. } => Exit::Config,
+            Error::Env { .. } | Error::GcsClient { .. } => Exit::Config,
             Error::Db(_) | Error::Migrate(_) => Exit::Db,
             Error::Template(_) => Exit::Template,
             Error::Failed { .. } | Error::HandleTaken(_) => Exit::Failed,

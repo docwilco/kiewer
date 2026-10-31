@@ -3,11 +3,12 @@
 //! hash from bytes it holds; a store never trusts a hash from outside.
 //!
 //! [`BlobStore`] is the seam between the server and where the bytes live:
-//! [`fs::FsBlobStore`] for development and tests, the GCS store in
+//! [`fs::FsBlobStore`] for development and tests, [`gcs::GcsBlobStore`] in
 //! production. Both keep the same bytes under the same names, so the
 //! shared suite in `kiewer_test_support` holds for each.
 
 pub mod fs;
+pub mod gcs;
 
 use std::fmt;
 use std::io::{Read, Write};
