@@ -1,0 +1,17 @@
+[package]
+name = "kiewer_test_support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Dev-only: what the workspace's tests share. Never a dependency of a
+# shipped crate.
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+kiewer_lib = { path = "../kiewer_lib" }
+tempfile = "3"

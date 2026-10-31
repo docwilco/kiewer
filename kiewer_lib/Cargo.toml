@@ -10,3 +10,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+async-trait = "0.1"
+derive_more = { version = "2", features = ["display", "error", "from"] }
+flate2 = "1"
+sha2 = "0.11"
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+kiewer_test_support = { path = "../kiewer_test_support" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
