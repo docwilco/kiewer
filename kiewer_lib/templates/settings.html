@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings · kiewer</title>
+</head>
+<body>
+<nav><a href="/">kiewer</a> · <a href="/{{ handle }}">{{ handle }}</a> · <a href="/settings/sessions">Sessions</a></nav>
+<h1>Settings</h1>
+<h2>Sign-in methods</h2>
+{% if let Some(refused) = refused %}
+<p class="error" role="alert">That {{ refused.name() }} account already signs in to another kiewer account, so it was not linked here. Each sign-in belongs to one account.</p>
+{% endif %}
+<p>Any of these signs you in to this account. Linking is explicit: a sign-in with a provider not listed here makes a new account, even with the same email.</p>
+<ul>
+{% for identity in identities %}
+<li><strong>{{ identity.provider.name() }}</strong>: {{ identity.login }}{% if let Some(email) = identity.email %} ({{ email }}){% endif %}</li>
+{% endfor %}
+</ul>
+{% if !linkable.is_empty() %}
+<p>{% for provider in linkable %}<a href="/auth/{{ provider }}?intent=link" rel="nofollow">Link {{ provider.name() }}</a> {% endfor %}</p>
+{% endif %}
+<form method="post" action="/auth/sign-out"><button type="submit">Sign out</button></form>
+</body>
+</html>

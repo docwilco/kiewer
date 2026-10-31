@@ -1,8 +1,9 @@
-//! Sign-in, the welcome page, sign-out and `/api/me`: the only handlers
-//! that read the session (ADR 0003). Every other page renders the same
-//! for everyone and a script asks `/api/me` who is signed in. Every
-//! response here depends on the session or the browser, so every one
-//! carries `Cache-Control: private, no-store`.
+//! Sign-in and provider linking, the welcome page, sign-out and
+//! `/api/me`: with `web/settings.rs`, the only handlers that read the
+//! session (ADR 0003). Every other page renders the same for everyone and
+//! a script asks `/api/me` who is signed in. Every response here depends
+//! on the session or the browser, so every one carries
+//! `Cache-Control: private, no-store`.
 
 use askama::Template;
 use axum::Form;
@@ -14,7 +15,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
-use crate::account::{self, Handle};
+use crate::account::{self, Handle, Linked};
 use crate::auth::Provider;
 use crate::error::{Error, Result};
 use crate::session::{self, LIFETIME_DAYS, Session, SessionId};
@@ -45,14 +46,35 @@ fn session_cookie(id: SessionId, secure: bool) -> Cookie<'static> {
 }
 
 /// The session cookie as a removal: the browser forgets it.
-fn session_cookie_removal() -> Cookie<'static> {
+pub(super) fn session_cookie_removal() -> Cookie<'static> {
     Cookie::build(SESSION_COOKIE).path("/").build()
 }
 
-/// The state and the verifier in one cookie, dot-separated: both are
-/// base64url, which has no dot, and a dot needs no percent-encoding.
-fn oauth_cookie(state: &str, verifier: &str, secure: bool) -> Cookie<'static> {
-    Cookie::build((OAUTH_COOKIE, format!("{state}.{verifier}")))
+/// Why a browser went to a provider: to sign in, or, signed in already,
+/// to link the provider's identity to its account from settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Intent {
+    #[serde(skip)]
+    SignIn,
+    Link,
+}
+
+impl Intent {
+    /// The word the state cookie carries for a link; a sign-in carries
+    /// none, so a cookie from before linking existed still reads.
+    const LINK: &str = "link";
+}
+
+/// The state, the verifier and, for a link, the intent in one cookie,
+/// dot-separated: the first two are base64url, which has no dot, and a
+/// dot needs no percent-encoding.
+fn oauth_cookie(state: &str, verifier: &str, intent: Intent, secure: bool) -> Cookie<'static> {
+    let value = match intent {
+        Intent::SignIn => format!("{state}.{verifier}"),
+        Intent::Link => format!("{state}.{verifier}.{}", Intent::LINK),
+    };
+    Cookie::build((OAUTH_COOKIE, value))
         .http_only(true)
         .secure(secure)
         .same_site(SameSite::Lax)
@@ -65,6 +87,23 @@ fn oauth_cookie_removal() -> Cookie<'static> {
     Cookie::build(OAUTH_COOKIE).path("/auth").build()
 }
 
+/// What the state cookie said: the state, the verifier and the intent, or
+/// `None` for a value that is not the cookie's shape.
+fn parse_oauth_cookie(value: &str) -> Option<(String, String, Intent)> {
+    let mut parts = value.split('.');
+    let state = parts.next()?;
+    let verifier = parts.next()?;
+    let intent = match parts.next() {
+        None => Intent::SignIn,
+        Some(Intent::LINK) => Intent::Link,
+        Some(_) => return None,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((state.to_owned(), verifier.to_owned(), intent))
+}
+
 /// The session id the jar's cookie carries, when it carries one.
 fn cookie_session_id(jar: &CookieJar) -> Option<SessionId> {
     jar.get(SESSION_COOKIE)
@@ -75,7 +114,7 @@ fn cookie_session_id(jar: &CookieJar) -> Option<SessionId> {
 /// there is no cookie, it is not an id, or the row is gone or expired.
 /// The jar comes back with the cookie set again when this use slid the
 /// row's expiry, so every handler's response renews the Max-Age.
-async fn current(
+pub(super) async fn current(
     state: &AppState,
     jar: CookieJar,
 ) -> Result<(CookieJar, Option<(SessionId, Session)>)> {
@@ -95,9 +134,26 @@ async fn current(
 
 /// A response that depends on this browser: the jar's changes and
 /// `private, no-store`.
-fn personal(jar: CookieJar, response: impl IntoResponse) -> Response {
+pub(super) fn personal(jar: CookieJar, response: impl IntoResponse) -> Response {
     (jar, [NO_STORE], response).into_response()
 }
+
+/// The settings page's guard, shared with `web/settings.rs`: the session
+/// of a signed-in person with a handle, or where anyone else goes: home
+/// without a session, the welcome page without a handle.
+pub(super) async fn settled(
+    state: &AppState,
+    jar: CookieJar,
+) -> Result<std::result::Result<(CookieJar, SessionId, Session), Response>> {
+    let (jar, found) = current(state, jar).await?;
+    Ok(match found {
+        Some((id, session)) if session.handle.is_some() => Ok((jar, id, session)),
+        Some(_) => Err(personal(jar, Redirect::to("/welcome"))),
+        None => Err(personal(jar, Redirect::to("/"))),
+    })
+}
+
+const SIGN_IN_FIRST: &str = "sign in first, then link the provider from settings\n";
 
 fn not_found(what: &str) -> Response {
     (StatusCode::NOT_FOUND, [NO_STORE], format!("{what}\n")).into_response()
@@ -110,25 +166,47 @@ fn provider_named(segment: &str) -> Option<Provider> {
 
 const NO_SUCH_PROVIDER: &str = "no such sign-in provider";
 
-/// `GET /auth/{provider}`: start a sign-in. The state and verifier go in
-/// a cookie, the browser goes to the provider.
+/// The query a sign-in starts with: `?intent=link` from settings.
+#[derive(Debug, Deserialize)]
+pub struct Begin {
+    intent: Option<Intent>,
+}
+
+/// `GET /auth/{provider}`: start a sign-in, or with `?intent=link` and a
+/// signed-in browser, a link of the provider to that account. The state,
+/// verifier and intent go in a cookie, the browser goes to the provider.
 pub async fn begin(
     State(state): State<AppState>,
     Path(provider): Path<String>,
+    Query(query): Query<Begin>,
     jar: CookieJar,
-) -> Response {
+) -> Result<Response> {
     let Some(provider) = provider_named(&provider) else {
-        return not_found(NO_SUCH_PROVIDER);
+        return Ok(not_found(NO_SUCH_PROVIDER));
     };
     let Some(start) = state.auth.begin(provider) else {
-        return not_found("sign-in with this provider is not configured");
+        return Ok(not_found("sign-in with this provider is not configured"));
+    };
+    let intent = query.intent.unwrap_or(Intent::SignIn);
+    let jar = if intent == Intent::Link {
+        // A link without a session is refused here, not turned into a
+        // sign-in: that could end on another account than the one the
+        // person meant to add to.
+        let (jar, found) = current(&state, jar).await?;
+        if found.is_none() {
+            return Ok(personal(jar, (StatusCode::BAD_REQUEST, SIGN_IN_FIRST)));
+        }
+        jar
+    } else {
+        jar
     };
     let jar = jar.add(oauth_cookie(
         &start.state,
         &start.verifier,
+        intent,
         state.auth.secure_cookies(),
     ));
-    personal(jar, Redirect::to(&start.authorize_url))
+    Ok(personal(jar, Redirect::to(&start.authorize_url)))
 }
 
 /// What the provider sends the browser back with.
@@ -140,11 +218,14 @@ pub struct Callback {
     error: Option<String>,
 }
 
-/// `GET /auth/{provider}/callback`: finish a sign-in. The state has to be
-/// the one in this browser's cookie; then the code becomes a token, the
-/// token a provider user, the user an account, the account a session. A
-/// provider that refuses the code or cannot be reached is a 502 with a
-/// line to start again, not a 500: the server is fine.
+/// `GET /auth/{provider}/callback`: finish a sign-in or a link. The state
+/// has to be the one in this browser's cookie; then the code becomes a
+/// token, the token a provider user, and the user an account and a
+/// session (a sign-in) or one more identity of the signed-in account (a
+/// link, which settings reports: done, or refused because the identity
+/// signs in elsewhere). A provider that refuses the code or cannot be
+/// reached is a 502 with a line to start again, not a 500: the server is
+/// fine.
 pub async fn callback(
     State(state): State<AppState>,
     Path(provider): Path<String>,
@@ -157,21 +238,16 @@ pub async fn callback(
     // Read before the removal: a removed cookie is gone from the jar.
     let stored = jar
         .get(OAUTH_COOKIE)
-        .map(|cookie| cookie.value().to_owned())
-        .and_then(|value| {
-            value
-                .split_once('.')
-                .map(|(s, v)| (s.to_owned(), v.to_owned()))
-        });
+        .and_then(|cookie| parse_oauth_cookie(cookie.value()));
     // One sign-in per state cookie, whatever happens next.
     let jar = jar.remove(oauth_cookie_removal());
     if let Some(error) = query.error {
         tracing::info!(%provider, error, "sign-in declined or refused at the provider");
         return Ok(personal(jar, Redirect::to("/")));
     }
-    let (code, verifier) = match (query.code, query.state, stored) {
-        (Some(code), Some(echoed), Some((expected, verifier))) if echoed == expected => {
-            (code, verifier)
+    let (code, verifier, intent) = match (query.code, query.state, stored) {
+        (Some(code), Some(echoed), Some((expected, verifier, intent))) if echoed == expected => {
+            (code, verifier, intent)
         }
         _ => {
             return Ok(personal(
@@ -198,6 +274,9 @@ pub async fn callback(
         }
         Err(error) => return Err(error),
     };
+    if intent == Intent::Link {
+        return link(&state, jar, provider, &user).await;
+    }
     let signed_in = account::sign_in(&state.db, provider, &user).await?;
     let id = session::start(&state.db, signed_in.account_id).await?;
     tracing::info!(%provider, new_account = signed_in.is_new, "signed in");
@@ -208,6 +287,29 @@ pub async fn callback(
         "/welcome"
     };
     Ok(personal(jar, Redirect::to(next)))
+}
+
+/// The callback's link arm: the provider's `user` becomes an identity of
+/// the browser's account, and the browser goes to settings, which says
+/// what came of it. Without a live session (it ended during the trip to
+/// the provider) the link is refused rather than made a sign-in.
+async fn link(
+    state: &AppState,
+    jar: CookieJar,
+    provider: Provider,
+    user: &crate::auth::ProviderUser,
+) -> Result<Response> {
+    let (jar, found) = current(state, jar).await?;
+    let Some((_, session)) = found else {
+        return Ok(personal(jar, (StatusCode::BAD_REQUEST, SIGN_IN_FIRST)));
+    };
+    let linked = account::link(&state.db, session.account_id, provider, user).await?;
+    tracing::info!(%provider, ?linked, "provider link");
+    let next = match linked {
+        Linked::Now | Linked::Already => "/settings".to_owned(),
+        Linked::ToAnotherAccount => format!("/settings?refused={provider}"),
+    };
+    Ok(personal(jar, Redirect::to(&next)))
 }
 
 #[derive(Template)]

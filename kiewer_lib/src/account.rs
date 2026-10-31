@@ -1,7 +1,9 @@
 //! Accounts and handles: the person behind one or more provider
 //! identities, named once by a handle (GLOSSARY). A first sign-in with an
-//! unknown identity makes a new account; identities are never merged by
-//! login or email (docs/v1-scope.md, Accounts and access).
+//! unknown identity makes a new account; a second identity joins an
+//! account only when its signed-in holder links it from settings
+//! ([`link`]); identities are never merged by login or email
+//! (docs/v1-scope.md, Accounts and access).
 
 use std::fmt;
 use std::str::FromStr;
@@ -181,6 +183,92 @@ pub async fn sign_in(db: &PgPool, provider: Provider, user: &ProviderUser) -> Re
         provider_login: user.login.clone(),
         is_new,
     })
+}
+
+/// What linking an identity to an account came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Linked {
+    /// The identity is the account's from now on.
+    Now,
+    /// It was the account's already; the login and email were brought up
+    /// to date.
+    Already,
+    /// It signs in to another account, which keeps it: no identity moves
+    /// without that account's holder giving it up, and v1 has no way to.
+    ToAnotherAccount,
+}
+
+/// Attach `provider`'s `user` to `account`, the signed-in person's own,
+/// unless the identity signs in to another account.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses.
+pub async fn link(
+    db: &PgPool,
+    account: AccountId,
+    provider: Provider,
+    user: &ProviderUser,
+) -> Result<Linked> {
+    // One statement: the read (whose is this identity) is the write's own
+    // condition. The conflict arm updates only a row that is already this
+    // account's, so another account's row is untouched and the statement
+    // returns nothing; xmax tells an insert from an update.
+    let row: Option<(bool,)> = sqlx::query_as(
+        "INSERT INTO identity (provider, provider_user_id, account_id, provider_login, email)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (provider, provider_user_id)
+         DO UPDATE SET provider_login = EXCLUDED.provider_login, email = EXCLUDED.email
+         WHERE identity.account_id = EXCLUDED.account_id
+         RETURNING (xmax = 0) AS inserted",
+    )
+    .bind(provider.as_str())
+    .bind(&user.id)
+    .bind(account)
+    .bind(&user.login)
+    .bind(&user.email)
+    .fetch_optional(db)
+    .await?;
+    Ok(match row {
+        Some((true,)) => Linked::Now,
+        Some((false,)) => Linked::Already,
+        None => Linked::ToAnotherAccount,
+    })
+}
+
+/// One sign-in method of an account, as settings lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    pub provider: Provider,
+    /// What the provider showed for the person at the last sign-in.
+    pub login: String,
+    /// The email the provider vouched for then, when it gave one.
+    pub email: Option<String>,
+}
+
+/// The identities that sign in to `account`, oldest first.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
+/// names a provider the code no longer knows.
+pub async fn identities(db: &PgPool, account: AccountId) -> Result<Vec<Identity>> {
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT provider, provider_login, email FROM identity
+         WHERE account_id = $1 ORDER BY created_at, provider",
+    )
+    .bind(account)
+    .fetch_all(db)
+    .await?;
+    rows.into_iter()
+        .map(|(provider, login, email)| {
+            Ok(Identity {
+                provider: provider.parse()?,
+                login,
+                email,
+            })
+        })
+        .collect()
 }
 
 /// The handle to prefill the welcome page with: what the account's most

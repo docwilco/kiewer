@@ -1,7 +1,9 @@
 //! The HTTP side: the router, its handlers and the server loop. Sign-in,
-//! the welcome page, sign-out and `/api/me` are in `web/auth.rs`.
+//! the welcome page, sign-out and `/api/me` are in `web/auth.rs`; the
+//! settings pages in `web/settings.rs`.
 
 mod auth;
+mod settings;
 
 use std::future::Future;
 use std::sync::Arc;
@@ -37,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/{provider}", get(auth::begin))
         .route("/auth/{provider}/callback", get(auth::callback))
         .route("/welcome", get(auth::welcome).post(auth::choose_handle))
+        .route("/settings", get(settings::account))
         .with_state(state)
 }
 

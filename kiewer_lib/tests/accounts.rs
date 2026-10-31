@@ -5,7 +5,7 @@
 //! provider user id and handle.
 
 use kiewer_lib::Error;
-use kiewer_lib::account::{self, Handle};
+use kiewer_lib::account::{self, Handle, Linked};
 use kiewer_lib::auth::{Provider, ProviderUser};
 use kiewer_lib::session::{self, SessionId};
 use kiewer_test_support::db::{fresh, pool_from_env};
@@ -116,6 +116,82 @@ async fn two_accounts_sharing_an_email_stay_two_accounts() {
             .await
             .expect("select");
     assert_eq!(kept, [Some(email.clone())]);
+}
+
+#[tokio::test]
+async fn a_second_provider_is_linked_to_the_account_and_signs_in_to_it() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let alice = account::sign_in(&db, Provider::GitHub, &user(&fresh("gh"), "alice"))
+        .await
+        .expect("sign in with GitHub");
+    let discord = user_with_email(&fresh("dc"), "alice_d", "alice@example.com");
+    let linked = account::link(&db, alice.account_id, Provider::Discord, &discord)
+        .await
+        .expect("link");
+    assert_eq!(linked, Linked::Now);
+    // Linking the same identity again is nothing new.
+    let again = account::link(&db, alice.account_id, Provider::Discord, &discord)
+        .await
+        .expect("link again");
+    assert_eq!(again, Linked::Already);
+    // A sign-in with the linked provider lands on the same account.
+    let back = account::sign_in(&db, Provider::Discord, &discord)
+        .await
+        .expect("sign in with Discord");
+    assert!(!back.is_new);
+    assert_eq!(back.account_id, alice.account_id);
+    // Both identities are listed for the account, in link order.
+    let identities = account::identities(&db, alice.account_id)
+        .await
+        .expect("list");
+    let summary: Vec<(Provider, &str, Option<&str>)> = identities
+        .iter()
+        .map(|identity| {
+            (
+                identity.provider,
+                identity.login.as_str(),
+                identity.email.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (Provider::GitHub, "alice", None),
+            (Provider::Discord, "alice_d", Some("alice@example.com")),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_identity_on_another_account_cannot_be_linked() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let bob_google = user(&fresh("sub"), "Bob");
+    let bob = account::sign_in(&db, Provider::Google, &bob_google)
+        .await
+        .expect("bob signs in with Google");
+    let mallory = account::sign_in(&db, Provider::GitHub, &user(&fresh("gh"), "mallory"))
+        .await
+        .expect("mallory signs in with GitHub");
+    let refused = account::link(&db, mallory.account_id, Provider::Google, &bob_google)
+        .await
+        .expect("the refusal is an outcome, not an error");
+    assert_eq!(refused, Linked::ToAnotherAccount);
+    let still_bob = account::sign_in(&db, Provider::Google, &bob_google)
+        .await
+        .expect("bob again");
+    assert_eq!(still_bob.account_id, bob.account_id, "nothing moved");
+    assert_eq!(
+        account::identities(&db, mallory.account_id)
+            .await
+            .expect("list")
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

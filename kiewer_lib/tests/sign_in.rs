@@ -516,6 +516,174 @@ async fn the_front_page_links_only_the_registered_providers() {
     );
 }
 
+/// Sign in with GitHub as `login` and pick a fresh handle; the handle.
+async fn sign_up_with_github(browser: &mut http::Browser, github: SocketAddr) -> String {
+    let signed_in = sign_in_through(browser, github).await;
+    assert_eq!(signed_in.status, 303, "{}", signed_in.body);
+    let handle = fresh("h");
+    let chosen = browser
+        .post_form("/welcome", &format!("handle={handle}"))
+        .await;
+    assert_eq!(chosen.status, 303, "{}", chosen.body);
+    handle
+}
+
+#[tokio::test]
+async fn a_signed_in_person_links_discord_from_settings_and_signs_in_with_it() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (_github, github) = fake_github("Octo").await;
+    let email = format!("{}@example.com", fresh("octo"));
+    let (_discord, discord) = fake_provider(
+        Provider::Discord,
+        fresh_user(Provider::Discord, "octo_d", &email),
+    )
+    .await;
+    let (mut browser, _dir) = server_with(
+        db.clone(),
+        &[(Provider::GitHub, github), (Provider::Discord, discord)],
+        "https",
+    )
+    .await;
+    let handle = sign_up_with_github(&mut browser, github).await;
+
+    let settings = browser.get("/settings").await;
+    assert_eq!(settings.status, 200, "{}", settings.body);
+    assert_eq!(settings.header("cache-control"), Some("private, no-store"));
+    assert!(settings.body.contains(&handle), "{}", settings.body);
+    assert!(
+        settings.body.contains("GitHub") && settings.body.contains("Octo"),
+        "the linked identity is listed: {}",
+        settings.body
+    );
+    assert!(
+        settings
+            .body
+            .contains(r#"href="/auth/discord?intent=link""#),
+        "Discord is registered and not linked: offered: {}",
+        settings.body
+    );
+    assert!(
+        !settings.body.contains(r#"intent=link">Link GitHub"#),
+        "GitHub is linked already: not offered: {}",
+        settings.body
+    );
+    assert!(
+        !settings.body.contains("/auth/google"),
+        "Google has no app: absent: {}",
+        settings.body
+    );
+
+    let linked = drive(
+        &mut browser,
+        "/auth/discord?intent=link",
+        Provider::Discord,
+        discord,
+    )
+    .await;
+    assert_eq!(linked.status, 303, "{}", linked.body);
+    assert_eq!(linked.header("location"), Some("/settings"));
+    assert!(browser.cookie("kiewer_oauth").is_none());
+    let settings = browser.get("/settings").await;
+    assert!(
+        settings.body.contains("Discord")
+            && settings.body.contains("octo_d")
+            && settings.body.contains(&email),
+        "the new identity is listed with its login and email: {}",
+        settings.body
+    );
+    assert!(
+        !settings.body.contains("intent=link"),
+        "every registered provider is linked: nothing to offer: {}",
+        settings.body
+    );
+    assert_eq!(
+        me(&mut browser).await["handle"],
+        handle,
+        "linking kept the session"
+    );
+
+    // A sign-in with the linked provider lands on the same account.
+    browser.post_form("/auth/sign-out", "").await;
+    assert_eq!(me(&mut browser).await["signed_in"], false);
+    let back = sign_in_with(&mut browser, Provider::Discord, discord).await;
+    assert_eq!(back.status, 303, "{}", back.body);
+    assert_eq!(back.header("location"), Some("/"), "a handle already");
+    assert_eq!(me(&mut browser).await["handle"], handle);
+}
+
+#[tokio::test]
+async fn an_identity_that_signs_in_elsewhere_is_not_linked_and_the_page_says_so() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (_github, github) = fake_github("mallory").await;
+    let (_google, google) = fake_provider(
+        Provider::Google,
+        fresh_user(Provider::Google, "Bob", "bob@example.com"),
+    )
+    .await;
+    let (mut mallory, _dir) = server_with(
+        db.clone(),
+        &[(Provider::GitHub, github), (Provider::Google, google)],
+        "https",
+    )
+    .await;
+    // Bob signs in with Google in his own browser: his account.
+    let mut bob = http::Browser::new(mallory.addr());
+    let bobs = sign_in_with(&mut bob, Provider::Google, google).await;
+    assert_eq!(bobs.status, 303, "{}", bobs.body);
+
+    sign_up_with_github(&mut mallory, github).await;
+    let refused = drive(
+        &mut mallory,
+        "/auth/google?intent=link",
+        Provider::Google,
+        google,
+    )
+    .await;
+    assert_eq!(refused.status, 303, "{}", refused.body);
+    assert_eq!(refused.header("location"), Some("/settings?refused=google"));
+    let settings = mallory.get("/settings").await;
+    assert_eq!(settings.status, 200);
+    let settings = mallory.get("/settings?refused=google").await;
+    assert_eq!(settings.status, 200, "{}", settings.body);
+    assert!(
+        settings.body.contains("another kiewer account"),
+        "the refusal is said: {}",
+        settings.body
+    );
+    assert!(
+        !settings.body.contains("Bob"),
+        "nothing of bob's is on mallory's page: {}",
+        settings.body
+    );
+    assert_eq!(me(&mut bob).await["signed_in"], true, "bob is untouched");
+}
+
+#[tokio::test]
+async fn a_link_needs_a_signed_in_browser_and_settings_need_a_session() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (_github, github) = fake_github("nobody").await;
+    let (mut browser, _dir) = server_with_github(db, github, "https").await;
+    let cold = browser.get("/auth/github?intent=link").await;
+    assert_eq!(cold.status, 400, "{}", cold.body);
+    assert!(cold.body.contains("sign in"), "{}", cold.body);
+    assert!(browser.cookie("kiewer_oauth").is_none(), "no flow started");
+    let settings = browser.get("/settings").await;
+    assert_eq!(settings.status, 303, "{}", settings.body);
+    assert_eq!(settings.header("location"), Some("/"));
+    assert_eq!(settings.header("cache-control"), Some("private, no-store"));
+    // Signed in without a handle: the welcome page comes first.
+    sign_in_through(&mut browser, github).await;
+    let settings = browser.get("/settings").await;
+    assert_eq!(settings.status, 303, "{}", settings.body);
+    assert_eq!(settings.header("location"), Some("/welcome"));
+}
+
 #[tokio::test]
 async fn a_callback_without_this_browsers_state_is_refused() {
     let Some(db) = pool_from_env().await else {
