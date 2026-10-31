@@ -1,9 +1,11 @@
 //! The HTTP side: the router, its handlers and the server loop. Sign-in,
 //! the welcome page, sign-out and `/api/me` are in `web/auth.rs`; the
-//! settings pages in `web/settings.rs`.
+//! settings pages in `web/settings.rs`; the viewer page and its assets
+//! in `web/viewer.rs`.
 
 mod auth;
 mod settings;
+pub mod viewer;
 
 use std::future::Future;
 use std::sync::Arc;
@@ -46,6 +48,7 @@ pub fn router(state: AppState) -> Router {
             "/settings/sessions/revoke-others",
             post(settings::revoke_others),
         )
+        .merge(viewer::routes())
         .with_state(state)
 }
 

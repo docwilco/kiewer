@@ -15,4 +15,27 @@ crate-type = ["cdylib", "rlib"]
 workspace = true
 
 [dependencies]
+kicad_core = { path = "../kicad_core" }
+# Vertex and uniform structs as the bytes the GPU reads; derive for
+# Pod and Zeroable on them.
+bytemuck = { version = "1", features = ["derive"] }
 wasm-bindgen = "0.2"
+# wgpu (ADR 0001) with no native backend yet: natively this crate is its
+# tests and, later, the thumbnail renderer (#7), which adds one. wgsl is
+# the shader language; std for the types the API hands out.
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl"] }
+
+# The browser: WebGPU when the browser has it, WebGL2 otherwise, one code
+# path at the WebGL2 limits (render.rs). The canvas comes in as a web-sys
+# element; the adapter request is a promise, hence the futures bridge; a
+# panic's message goes to the console instead of an opaque "unreachable".
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "webgpu", "webgl"] }
+
+[dev-dependencies]
+# The shader is validated natively, where no GPU is: naga's WGSL front
+# end is what wgpu runs at pipeline creation. Same major as wgpu.
+naga = { version = "30", default-features = false, features = ["wgsl-in"] }

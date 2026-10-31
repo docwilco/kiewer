@@ -20,16 +20,18 @@ stage_clippy() { cargo clippy --workspace --all-targets -- -D warnings; }
 # feature set, another hash and a second compile under `cargo test`.
 stage_test()   { cargo build --workspace --all-targets && cargo test --workspace; }
 stage_docs()   { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps; }
-# The viewer and the parser for the browser. Named packages, not the workspace:
-# the server does not build for wasm32. The feature-unification concern
-# behind "never -p" (rust-conventions) is about duplicate artifacts under
-# one target directory; a --target build has a directory of its own. The
-# target comes from rustup (README, Development; the CI workflow's wasm
-# job), so a missing one is named rather than left to cargo's error.
+# The viewer for the browser: the wasm32 build of kiewer_viewer (and so
+# of kicad_core) through scripts/build-viewer.sh, which also runs
+# wasm-bindgen over it, so the pinned tool is proved to read what the
+# crate wrote. The debug profile, into the target directory: the release
+# output under kiewer_viewer/dist is what the server embeds, and a check
+# never overwrites it. The target and the tool come from rustup and cargo
+# install (README, Development; the CI workflow's wasm job); the script
+# names what is missing.
 stage_wasm() {
-  rustup target list --installed | grep -qx wasm32-unknown-unknown \
-    || { echo "Run 'rustup target add wasm32-unknown-unknown' first." >&2; return 1; }
-  cargo build --target wasm32-unknown-unknown -p kiewer_viewer -p kicad_core --lib
+  local target_dir
+  target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+  scripts/build-viewer.sh debug "$target_dir/viewer-check"
 }
 
 run() {

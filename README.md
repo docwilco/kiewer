@@ -4,18 +4,26 @@ A site for uploading and sharing KiCad designs, rendered in the browser. The des
 
 ## Development
 
-One-time, after cloning: `git config core.hooksPath .githooks`, then
-`rustup target add wasm32-unknown-unknown` for the viewer's browser build.
-The hook runs `scripts/checks.sh` (the stages are listed in its usage line)
-before every commit against a snapshot of the index, so unstaged edits never
-reach the checks and the working tree stays usable while they run; it needs
-`rsync` and `cargo-sweep`. CI runs the same script. Run a single stage with
+One-time, after cloning: `git config core.hooksPath .githooks`, then for
+the viewer's browser build `rustup target add wasm32-unknown-unknown` and
+`cargo install wasm-bindgen-cli --version "$(scripts/wasm-bindgen-version.sh)" --locked`
+(the tool must be the version Cargo.lock names for the `wasm-bindgen`
+crate; the script prints it, and CI installs the same way). The hook runs
+`scripts/checks.sh` (the stages are listed in its usage line) before every
+commit against a snapshot of the index, so unstaged edits never reach the
+checks and the working tree stays usable while they run; it needs `rsync`,
+`jq` and `cargo-sweep`. CI runs the same script. Run a single stage with
 `scripts/checks.sh clippy`.
 
 Running the server: `docker compose up -d` starts Postgres (`compose.yaml`),
-`cp .env.example .env` and export it (`set -a; . ./.env; set +a`), then
-`cargo run`. The first line on stdout is the build line; the page is at
-http://localhost:8080/ and `/healthz` says `ok` once the database answers.
+`cp .env.example .env` and export it (`set -a; . ./.env; set +a`),
+`scripts/build-viewer.sh` once (and again after a change to `kiewer_viewer`
+or `kicad_core`: it writes the browser viewer to `kiewer_viewer/dist`, which
+`cargo run` embeds; without it the server runs and the viewer page says the
+viewer is not built in), then `cargo run`. The first line on stdout is the
+build line; the page is at http://localhost:8080/, the viewer at
+http://localhost:8080/viewer, and `/healthz` says `ok` once the database
+answers.
 `kiewer_lib::config` is the list of variables the server reads and their
 defaults; the blob store writes under `blobs/` (git-ignored) unless
 `BLOB_BUCKET` names a GCS bucket, which makes it the GCS store (with

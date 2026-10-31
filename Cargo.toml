@@ -5,8 +5,9 @@ members = ["kicad_core", "kiewer_viewer", "kiewer_lib", "kiewer", "kiewer_test_s
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# floor found with cargo msrv find, 2026-10-31
-rust-version = "1.85.1"
+# wgpu 30 (kiewer_viewer) needs 1.87; the workspace's own floor, found
+# with cargo msrv find on 2026-10-31, was 1.85.1
+rust-version = "1.87.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/docwilco/kiewer"
 

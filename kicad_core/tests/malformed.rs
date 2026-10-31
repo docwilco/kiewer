@@ -216,7 +216,7 @@ fn mutate_numbers(source: &str, every: usize, mutant: &str) -> String {
         let numeric = token.parse::<f64>().is_ok();
         if numeric {
             *ordinal += 1;
-            if *ordinal % every == 0 {
+            if ordinal.is_multiple_of(every) {
                 out.push_str(mutant);
                 token.clear();
                 return;

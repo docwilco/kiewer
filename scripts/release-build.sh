@@ -12,6 +12,12 @@
 # rustc records the variable and its value in the dep-info, so a change
 # of it rebuilds the crate that reads it and all that depends on it.
 #
+# The viewer for the browser comes first: scripts/build-viewer.sh
+# writes wasm-bindgen's output to kiewer_viewer/dist and kiewer_lib's
+# build script embeds it, so the one binary carries the viewer and the
+# image copies nothing else. KIEWER_VIEWER_REQUIRED makes a build without
+# it fail instead of shipping a server whose viewer answers 503.
+#
 # Usage: scripts/release-build.sh
 #   (then `docker build -t kiewer .`; a dev box runs the same two)
 set -euo pipefail
@@ -20,4 +26,5 @@ cd "$(dirname "$0")/.."
 export KIEWER_BUILD="${KIEWER_BUILD:-$(git rev-parse --short HEAD)}"
 
 echo "release-build: KIEWER_BUILD=$KIEWER_BUILD"
-cargo build --release --locked -p kiewer
+scripts/build-viewer.sh release
+KIEWER_VIEWER_REQUIRED=1 cargo build --release --locked -p kiewer

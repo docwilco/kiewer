@@ -128,8 +128,13 @@ jobs:
         with:
           run: ./scripts/checks.sh docs
 
-  # The viewer crate for the browser. The target comes with the toolchain
-  # step; a dev box adds it with rustup (README, Development).
+  # The viewer crate for the browser, through wasm-bindgen. The target
+  # comes with the toolchain step; a dev box adds it with rustup (README,
+  # Development). wasm-bindgen-cli is installed at the version Cargo.lock
+  # names for the wasm-bindgen crate (scripts/wasm-bindgen-version.sh),
+  # inside the cached step so the binary rides in the cached cargo bin
+  # and the install is a no-op after the first run; the release-build job
+  # does the same.
   wasm:
     name: Viewer for wasm32
     if: github.ref_type != 'tag'
@@ -141,7 +146,9 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: ./.github/actions/cargo-cached
         with:
-          run: ./scripts/checks.sh wasm
+          run: |
+            cargo install wasm-bindgen-cli --version "$(scripts/wasm-bindgen-version.sh)" --locked
+            ./scripts/checks.sh wasm
 
   msrv:
     name: MSRV
@@ -192,12 +199,19 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      # The wasm32 target and wasm-bindgen-cli as in the wasm job: the
+      # release build starts with the viewer for the browser, which the
+      # server binary embeds.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: ./.github/actions/cargo-cached
         with:
           shared-key: release
           save: ${{ github.event_name == 'push' }}
-          run: ./scripts/release-build.sh
+          run: |
+            cargo install wasm-bindgen-cli --version "$(scripts/wasm-bindgen-version.sh)" --locked
+            ./scripts/release-build.sh
       - run: sha256sum $(ls -d target/release/kiewer* | grep -v '\.d$')
       - uses: actions/upload-artifact@v4
         with:
