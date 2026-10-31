@@ -51,6 +51,9 @@ async fn health_is_ok_with_a_database() {
     let state = AppState {
         db: kiewer_lib::db::connect(&url).await.expect("connect"),
         blobs: Arc::new(FsBlobStore::new(dir.path())),
+        auth: Arc::new(
+            kiewer_lib::auth::Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth"),
+        ),
     };
     let addr = http::serve_on_free_port(state).await;
     let (status, body) = http::get(addr, "/healthz").await;

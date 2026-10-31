@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pick a handle · kiewer</title>
+</head>
+<body>
+<h1>Welcome to kiewer</h1>
+<p>Pick your handle: your name on kiewer and the first part of your design URLs. Lowercase letters, digits and hyphens, up to 39 characters, no hyphen at either end. It cannot be changed later.</p>
+<form method="post" action="/welcome">
+{% if let Some(error) = error %}
+<p class="error" role="alert">{{ error }}</p>
+{% endif %}
+<label>Handle <input name="handle" value="{{ handle }}" required maxlength="39" pattern="[a-z0-9]([a-z0-9\-]{0,37}[a-z0-9])?" autocomplete="username" autofocus></label>
+<button type="submit">Continue</button>
+</form>
+</body>
+</html>

@@ -20,11 +20,22 @@ http://localhost:8080/ and `/healthz` says `ok` once the database answers.
 defaults; the blob store writes under `blobs/` (git-ignored) until the GCS
 store exists. Ctrl-c or SIGTERM stops it after the requests in flight.
 
-The tests that need Postgres (`kiewer_lib/tests/db.rs`) run when
-`DATABASE_URL` is exported and skip when it is not, in the hook as in a
-shell; CI sets it against a service container that matches `compose.yaml`.
-The schema is `migrations/` (its README has the naming rule); it is empty
-until the first table.
+The tests that need Postgres (`kiewer_lib/tests/db.rs`, `accounts.rs`,
+`sign_in.rs`) run when `DATABASE_URL` is exported and skip when it is not,
+in the hook as in a shell; CI sets it against a service container that
+matches `compose.yaml`. The schema is `migrations/` (its README has the
+naming rule).
+
+Sign-in needs a GitHub OAuth app of your own, one per environment
+(docs/v1-scope.md, Q57): at https://github.com/settings/developers, New
+OAuth App, any name, homepage `http://localhost:8080`, callback URL
+`http://localhost:8080/auth/github/callback` (the path is fixed; the
+origin is `KIEWER_PUBLIC_URL`, which defaults to localhost on `PORT`).
+Generate a client secret and put both in `.env` as `GITHUB_CLIENT_ID` and
+`GITHUB_CLIENT_SECRET`. Without them the server runs with sign-in off and
+`/auth/github` answers 404. The sign-in tests use a fake GitHub on
+loopback and need no app. Production and staging get their registrations
+through Secret Manager, not `.env`.
 
 Clippy is pedantic with no blanket allows: every finding is fixed or carries a
 site-level `#[expect(..., reason = "...")]` naming the invariant that makes it safe.

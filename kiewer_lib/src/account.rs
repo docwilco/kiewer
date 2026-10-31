@@ -52,6 +52,27 @@ impl Handle {
         Self(text)
     }
 
+    /// The handle a provider's login suggests: lowercased, every run of
+    /// other characters a hyphen, cut to the length, or `None` when
+    /// nothing of it survives or what does is reserved.
+    #[must_use]
+    pub fn suggest(login: &str) -> Option<Self> {
+        let mut text = String::with_capacity(login.len());
+        for ch in login.chars().flat_map(char::to_lowercase) {
+            if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+                text.push(ch);
+            } else if !text.ends_with('-') {
+                text.push('-');
+            }
+        }
+        let mut text = text.trim_matches('-');
+        if text.len() > Self::MAX_LEN {
+            text = &text[..Self::MAX_LEN];
+            text = text.trim_end_matches('-');
+        }
+        text.parse().ok()
+    }
+
     /// Why `text` is not a handle, in the words the form shows, or `None`
     /// when it is one.
     fn fault(text: &str) -> Option<&'static str> {
@@ -165,6 +186,24 @@ pub async fn sign_in(
     })
 }
 
+/// The handle to prefill the welcome page with: what the account's most
+/// recent identity's login suggests, or `None` when nothing of it makes a
+/// handle.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses.
+pub async fn suggested_handle(db: &PgPool, account: AccountId) -> Result<Option<Handle>> {
+    let login: Option<String> = sqlx::query_scalar(
+        "SELECT provider_login FROM identity WHERE account_id = $1
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(account)
+    .fetch_optional(db)
+    .await?;
+    Ok(login.as_deref().and_then(Handle::suggest))
+}
+
 /// Give `account` its handle, once: the first sign-in's choice.
 ///
 /// # Errors
@@ -207,6 +246,19 @@ mod tests {
     fn a_valid_handle_parses(text: &str) {
         let handle: Handle = text.parse().expect("valid");
         assert_eq!(handle.as_str(), text);
+    }
+
+    #[test_case("octocat", Some("octocat"); "a handle already")]
+    #[test_case("Octo_Cat", Some("octo-cat"); "case folded and an underscore made a hyphen")]
+    #[test_case("--Octo..Cat--", Some("octo-cat"); "runs collapsed and the ends trimmed")]
+    #[test_case("api", None; "a reserved word")]
+    #[test_case("___", None; "nothing survives")]
+    #[test_case("a23456789b23456789c23456789d23456789e2-x", Some("a23456789b23456789c23456789d23456789e2"); "cut to the length without a trailing hyphen")]
+    fn a_login_suggests_a_handle(login: &str, suggested: Option<&str>) {
+        assert_eq!(
+            Handle::suggest(login).as_ref().map(Handle::as_str),
+            suggested
+        );
     }
 
     #[test]

@@ -1,4 +1,7 @@
-//! The HTTP side: the router, its handlers and the server loop.
+//! The HTTP side: the router, its handlers and the server loop. Sign-in,
+//! the welcome page, sign-out and `/api/me` are in `web/auth.rs`.
+
+mod auth;
 
 use std::future::Future;
 use std::sync::Arc;
@@ -9,7 +12,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use sqlx::PgPool;
 use tokio::net::TcpListener;
 
@@ -21,6 +24,7 @@ use crate::error::{Error, Result};
 pub struct AppState {
     pub db: PgPool,
     pub blobs: Arc<dyn BlobStore>,
+    pub auth: Arc<crate::auth::Auth>,
 }
 
 /// The routes over `state`.
@@ -28,6 +32,11 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
+        .route("/api/me", get(auth::me))
+        .route("/auth/sign-out", post(auth::sign_out))
+        .route("/auth/{provider}", get(auth::begin))
+        .route("/auth/{provider}/callback", get(auth::callback))
+        .route("/welcome", get(auth::welcome).post(auth::choose_handle))
         .with_state(state)
 }
 

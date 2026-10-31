@@ -23,6 +23,49 @@ pub struct Config {
     pub database_url: String,
     /// `KIEWER_BLOB_DIR`: the filesystem blob store's root.
     pub blob_dir: PathBuf,
+    /// `KIEWER_PUBLIC_URL`: the origin browsers reach the server at, with
+    /// no trailing slash; the sign-in callback URL is under it. Defaults
+    /// to `http://localhost:<port>`, a dev box.
+    pub public_url: String,
+    /// `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`: the GitHub OAuth app
+    /// (README, Development), or `None` with both unset, which turns
+    /// GitHub sign-in off.
+    pub github: Option<OAuthApp>,
+}
+
+/// One provider's OAuth app registration, as the environment gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthApp {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+/// The pair of variables for one provider's app: both, or neither.
+///
+/// # Errors
+///
+/// [`Error::Env`] naming the one of the pair that is unset.
+fn oauth_app(
+    var: &impl Fn(&str) -> Option<String>,
+    id_name: &'static str,
+    secret_name: &'static str,
+) -> Result<Option<OAuthApp>> {
+    let read = |name: &str| var(name).filter(|value| !value.is_empty());
+    match (read(id_name), read(secret_name)) {
+        (None, None) => Ok(None),
+        (Some(client_id), Some(client_secret)) => Ok(Some(OAuthApp {
+            client_id,
+            client_secret,
+        })),
+        (Some(_), None) => Err(Error::Env {
+            name: secret_name,
+            reason: format!("is not set while {id_name} is; see README, Development"),
+        }),
+        (None, Some(_)) => Err(Error::Env {
+            name: id_name,
+            reason: format!("is not set while {secret_name} is; see README, Development"),
+        }),
+    }
 }
 
 impl Config {
@@ -58,10 +101,19 @@ impl Config {
         let blob_dir = var("KIEWER_BLOB_DIR")
             .filter(|dir| !dir.is_empty())
             .map_or_else(|| PathBuf::from(DEFAULT_BLOB_DIR), PathBuf::from);
+        let public_url = var("KIEWER_PUBLIC_URL")
+            .filter(|url| !url.is_empty())
+            .map_or_else(
+                || format!("http://localhost:{port}"),
+                |url| url.trim_end_matches('/').to_owned(),
+            );
+        let github = oauth_app(&var, "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET")?;
         Ok(Self {
             port,
             database_url,
             blob_dir,
+            public_url,
+            github,
         })
     }
 }
@@ -89,6 +141,60 @@ mod tests {
         assert_eq!(config.port, DEFAULT_PORT);
         assert_eq!(config.blob_dir, PathBuf::from(DEFAULT_BLOB_DIR));
         assert_eq!(config.database_url, "postgres://x");
+        assert_eq!(config.public_url, "http://localhost:8080");
+        assert_eq!(config.github, None, "sign-in is off without the app");
+    }
+
+    #[test]
+    fn the_github_app_is_both_variables_or_neither() {
+        let config = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("KIEWER_PUBLIC_URL", "https://kiewer.example/"),
+            ("GITHUB_CLIENT_ID", "id"),
+            ("GITHUB_CLIENT_SECRET", "secret"),
+        ]))
+        .expect("valid");
+        assert_eq!(
+            config.public_url, "https://kiewer.example",
+            "no trailing slash"
+        );
+        assert_eq!(
+            config.github,
+            Some(OAuthApp {
+                client_id: "id".to_owned(),
+                client_secret: "secret".to_owned()
+            })
+        );
+        let err = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("GITHUB_CLIENT_ID", "id"),
+        ]))
+        .expect_err("half an app");
+        assert!(
+            matches!(
+                err,
+                Error::Env {
+                    name: "GITHUB_CLIENT_SECRET",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        let err = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("GITHUB_CLIENT_SECRET", "secret"),
+        ]))
+        .expect_err("half an app");
+        assert!(
+            matches!(
+                err,
+                Error::Env {
+                    name: "GITHUB_CLIENT_ID",
+                    ..
+                }
+            ),
+            "{err}"
+        );
     }
 
     #[test]
