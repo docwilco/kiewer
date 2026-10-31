@@ -1,6 +1,8 @@
 //! Sign-in, the welcome page, sign-out and `/api/me`: the only handlers
 //! that read the session (ADR 0003). Every other page renders the same
-//! for everyone and a script asks `/api/me` who is signed in.
+//! for everyone and a script asks `/api/me` who is signed in. Every
+//! response here depends on the session or the browser, so every one
+//! carries `Cache-Control: private, no-store`.
 
 use askama::Template;
 use axum::Form;
@@ -24,18 +26,18 @@ pub const SESSION_COOKIE: &str = "kiewer_session";
 /// under `/auth` only, for ten minutes.
 const OAUTH_COOKIE: &str = "kiewer_oauth";
 
-/// The value every personal response carries: a shared cache never
-/// keeps it (ADR 0003).
-const NO_STORE: &str = "private, no-store";
+/// The value every response here carries: a shared cache never keeps it
+/// (ADR 0003).
+const NO_STORE: (axum::http::HeaderName, &str) = (CACHE_CONTROL, "private, no-store");
 
 /// The session cookie for `id`, with the full lifetime: set at sign-in
 /// and again whenever a use slides the row's expiry, so the browser and
-/// the row agree. `Secure` throughout: browsers treat localhost as a
-/// secure context, so a dev box keeps the production attributes.
-fn session_cookie(id: SessionId) -> Cookie<'static> {
+/// the row agree. `secure` follows the public URL's scheme
+/// ([`crate::auth::Auth::secure_cookies`]).
+fn session_cookie(id: SessionId, secure: bool) -> Cookie<'static> {
     Cookie::build((SESSION_COOKIE, id.to_string()))
         .http_only(true)
-        .secure(true)
+        .secure(secure)
         .same_site(SameSite::Lax)
         .path("/")
         .max_age(time::Duration::days(i64::from(LIFETIME_DAYS)))
@@ -49,10 +51,10 @@ fn session_cookie_removal() -> Cookie<'static> {
 
 /// The state and the verifier in one cookie, dot-separated: both are
 /// base64url, which has no dot, and a dot needs no percent-encoding.
-fn oauth_cookie(state: &str, verifier: &str) -> Cookie<'static> {
+fn oauth_cookie(state: &str, verifier: &str, secure: bool) -> Cookie<'static> {
     Cookie::build((OAUTH_COOKIE, format!("{state}.{verifier}")))
         .http_only(true)
-        .secure(true)
+        .secure(secure)
         .same_site(SameSite::Lax)
         .path("/auth")
         .max_age(time::Duration::minutes(10))
@@ -63,23 +65,50 @@ fn oauth_cookie_removal() -> Cookie<'static> {
     Cookie::build(OAUTH_COOKIE).path("/auth").build()
 }
 
+/// The session id the jar's cookie carries, when it carries one.
+fn cookie_session_id(jar: &CookieJar) -> Option<SessionId> {
+    jar.get(SESSION_COOKIE)
+        .and_then(|cookie| cookie.value().parse::<SessionId>().ok())
+}
+
 /// The live session behind the jar's cookie, with its id, or `None` when
 /// there is no cookie, it is not an id, or the row is gone or expired.
-async fn current(state: &AppState, jar: &CookieJar) -> Result<Option<(SessionId, Session)>> {
-    let Some(id) = jar
-        .get(SESSION_COOKIE)
-        .and_then(|cookie| cookie.value().parse::<SessionId>().ok())
-    else {
-        return Ok(None);
+/// The jar comes back with the cookie set again when this use slid the
+/// row's expiry, so every handler's response renews the Max-Age.
+async fn current(
+    state: &AppState,
+    jar: CookieJar,
+) -> Result<(CookieJar, Option<(SessionId, Session)>)> {
+    let Some(id) = cookie_session_id(&jar) else {
+        return Ok((jar, None));
     };
-    Ok(session::find(&state.db, &id)
-        .await?
-        .map(|session| (id, session)))
+    let Some(session) = session::find(&state.db, &id).await? else {
+        return Ok((jar, None));
+    };
+    let jar = if session.refreshed {
+        jar.add(session_cookie(id, state.auth.secure_cookies()))
+    } else {
+        jar
+    };
+    Ok((jar, Some((id, session))))
+}
+
+/// A response that depends on this browser: the jar's changes and
+/// `private, no-store`.
+fn personal(jar: CookieJar, response: impl IntoResponse) -> Response {
+    (jar, [NO_STORE], response).into_response()
 }
 
 fn not_found(what: &str) -> Response {
-    (StatusCode::NOT_FOUND, format!("{what}\n")).into_response()
+    (StatusCode::NOT_FOUND, [NO_STORE], format!("{what}\n")).into_response()
 }
+
+/// The provider a path segment names; `None` is a 404.
+fn provider_named(segment: &str) -> Option<Provider> {
+    segment.parse::<Provider>().ok()
+}
+
+const NO_SUCH_PROVIDER: &str = "no such sign-in provider";
 
 /// `GET /auth/{provider}`: start a sign-in. The state and verifier go in
 /// a cookie, the browser goes to the provider.
@@ -87,15 +116,19 @@ pub async fn begin(
     State(state): State<AppState>,
     Path(provider): Path<String>,
     jar: CookieJar,
-) -> Result<Response> {
-    let Ok(provider) = provider.parse::<Provider>() else {
-        return Ok(not_found("no such sign-in provider"));
+) -> Response {
+    let Some(provider) = provider_named(&provider) else {
+        return not_found(NO_SUCH_PROVIDER);
     };
-    let Some(begun) = state.auth.begin(provider)? else {
-        return Ok(not_found("sign-in with this provider is not configured"));
+    let Some(start) = state.auth.begin(provider) else {
+        return not_found("sign-in with this provider is not configured");
     };
-    let jar = jar.add(oauth_cookie(&begun.state, &begun.verifier));
-    Ok((jar, Redirect::to(&begun.authorize_url)).into_response())
+    let jar = jar.add(oauth_cookie(
+        &start.state,
+        &start.verifier,
+        state.auth.secure_cookies(),
+    ));
+    personal(jar, Redirect::to(&start.authorize_url))
 }
 
 /// What the provider sends the browser back with.
@@ -109,15 +142,17 @@ pub struct Callback {
 
 /// `GET /auth/{provider}/callback`: finish a sign-in. The state has to be
 /// the one in this browser's cookie; then the code becomes a token, the
-/// token a provider user, the user an account, the account a session.
+/// token a provider user, the user an account, the account a session. A
+/// provider that refuses the code or cannot be reached is a 502 with a
+/// line to start again, not a 500: the server is fine.
 pub async fn callback(
     State(state): State<AppState>,
     Path(provider): Path<String>,
     Query(query): Query<Callback>,
     jar: CookieJar,
 ) -> Result<Response> {
-    let Ok(provider) = provider.parse::<Provider>() else {
-        return Ok(not_found("no such sign-in provider"));
+    let Some(provider) = provider_named(&provider) else {
+        return Ok(not_found(NO_SUCH_PROVIDER));
     };
     // Read before the removal: a removed cookie is gone from the jar.
     let stored = jar
@@ -132,34 +167,47 @@ pub async fn callback(
     let jar = jar.remove(oauth_cookie_removal());
     if let Some(error) = query.error {
         tracing::info!(%provider, error, "sign-in declined or refused at the provider");
-        return Ok((jar, Redirect::to("/")).into_response());
+        return Ok(personal(jar, Redirect::to("/")));
     }
     let (code, verifier) = match (query.code, query.state, stored) {
         (Some(code), Some(echoed), Some((expected, verifier))) if echoed == expected => {
             (code, verifier)
         }
         _ => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
+            return Ok(personal(
                 jar,
-                "this sign-in did not start in this browser, or took longer than ten minutes; start again\n",
-            )
-                .into_response());
+                (
+                    StatusCode::BAD_REQUEST,
+                    "this sign-in did not start in this browser, or took longer than ten minutes; start again\n",
+                ),
+            ));
         }
     };
-    let Some(user) = state.auth.finish(provider, code, verifier).await? else {
-        return Ok(not_found("sign-in with this provider is not configured"));
+    let user = match state.auth.finish(provider, code, verifier).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return Ok(not_found("sign-in with this provider is not configured")),
+        Err(error @ (Error::OAuth { .. } | Error::Http(_))) => {
+            tracing::warn!(%provider, %error, "sign-in failed at the provider");
+            return Ok(personal(
+                jar,
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("sign-in with {provider} did not complete; start again\n"),
+                ),
+            ));
+        }
+        Err(error) => return Err(error),
     };
     let signed_in = account::sign_in(&state.db, provider, &user.id, &user.login).await?;
     let id = session::start(&state.db, signed_in.account_id).await?;
     tracing::info!(%provider, new_account = signed_in.is_new, "signed in");
-    let jar = jar.add(session_cookie(id));
+    let jar = jar.add(session_cookie(id, state.auth.secure_cookies()));
     let next = if signed_in.handle.is_some() {
         "/"
     } else {
         "/welcome"
     };
-    Ok((jar, Redirect::to(next)).into_response())
+    Ok(personal(jar, Redirect::to(next)))
 }
 
 #[derive(Template)]
@@ -172,21 +220,33 @@ struct Welcome {
     error: Option<String>,
 }
 
-fn welcome_page(status: StatusCode, page: &Welcome) -> Result<Response> {
-    Ok((status, [(CACHE_CONTROL, NO_STORE)], Html(page.render()?)).into_response())
+fn welcome_page(jar: CookieJar, status: StatusCode, page: &Welcome) -> Result<Response> {
+    Ok(personal(jar, (status, Html(page.render()?))))
+}
+
+/// The welcome page's guard: the session of a signed-in person who has no
+/// handle yet, or the redirect home for anyone else.
+async fn without_handle(
+    state: &AppState,
+    jar: CookieJar,
+) -> Result<std::result::Result<(CookieJar, Session), Response>> {
+    let (jar, found) = current(state, jar).await?;
+    Ok(match found {
+        Some((_, session)) if session.handle.is_none() => Ok((jar, session)),
+        _ => Err(personal(jar, Redirect::to("/"))),
+    })
 }
 
 /// `GET /welcome`: the handle form, for a signed-in person without one.
 /// Anyone else goes to the front page.
 pub async fn welcome(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
-    let Some((_, session)) = current(&state, &jar).await? else {
-        return Ok(Redirect::to("/").into_response());
+    let (jar, session) = match without_handle(&state, jar).await? {
+        Ok(found) => found,
+        Err(response) => return Ok(response),
     };
-    if session.handle.is_some() {
-        return Ok(Redirect::to("/").into_response());
-    }
     let suggested = account::suggested_handle(&state.db, session.account_id).await?;
     welcome_page(
+        jar,
         StatusCode::OK,
         &Welcome {
             handle: suggested
@@ -210,15 +270,14 @@ pub async fn choose_handle(
     jar: CookieJar,
     Form(form): Form<HandleForm>,
 ) -> Result<Response> {
-    let Some((_, session)) = current(&state, &jar).await? else {
-        return Ok(Redirect::to("/").into_response());
+    let (jar, session) = match without_handle(&state, jar).await? {
+        Ok(found) => found,
+        Err(response) => return Ok(response),
     };
-    if session.handle.is_some() {
-        return Ok(Redirect::to("/").into_response());
-    }
     let attempt = form.handle.trim().to_owned();
-    let refused = |status: StatusCode, reason: String| {
+    let refused = |jar: CookieJar, status: StatusCode, reason: String| {
         welcome_page(
+            jar,
             status,
             &Welcome {
                 handle: attempt.clone(),
@@ -229,13 +288,14 @@ pub async fn choose_handle(
     let handle = match attempt.parse::<Handle>() {
         Ok(handle) => handle,
         Err(Error::Malformed(reason)) => {
-            return refused(StatusCode::UNPROCESSABLE_ENTITY, reason);
+            return refused(jar, StatusCode::UNPROCESSABLE_ENTITY, reason);
         }
         Err(error) => return Err(error),
     };
     match account::choose_handle(&state.db, session.account_id, &handle).await {
-        Ok(()) => Ok(Redirect::to("/").into_response()),
+        Ok(()) => Ok(personal(jar, Redirect::to("/"))),
         Err(Error::HandleTaken(_)) => refused(
+            jar,
             StatusCode::CONFLICT,
             format!("handle {attempt:?} is taken; pick another"),
         ),
@@ -247,14 +307,11 @@ pub async fn choose_handle(
 /// the cookie. A POST, so a cross-site link cannot sign anyone out; the
 /// cookie is `SameSite=Lax`, so a cross-site form does not carry it.
 pub async fn sign_out(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
-    if let Some(id) = jar
-        .get(SESSION_COOKIE)
-        .and_then(|cookie| cookie.value().parse::<SessionId>().ok())
-    {
+    if let Some(id) = cookie_session_id(&jar) {
         session::end(&state.db, &id).await?;
     }
     let jar = jar.remove(session_cookie_removal());
-    Ok((jar, Redirect::to("/")).into_response())
+    Ok(personal(jar, Redirect::to("/")))
 }
 
 /// What `/api/me` says.
@@ -269,27 +326,16 @@ pub struct Me {
 /// `GET /api/me`: who is signed in, never cached. The one request a
 /// cacheable page makes that depends on the session.
 pub async fn me(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
-    let (me, jar) = match current(&state, &jar).await? {
-        Some((id, session)) => {
-            let me = Me {
-                signed_in: true,
-                handle: session.handle.map(|handle| handle.to_string()),
-            };
-            // The row's expiry slid: the cookie's Max-Age follows it.
-            let jar = if session.refreshed {
-                jar.add(session_cookie(id))
-            } else {
-                jar
-            };
-            (me, jar)
-        }
-        None => (
-            Me {
-                signed_in: false,
-                handle: None,
-            },
-            jar,
-        ),
+    let (jar, found) = current(&state, jar).await?;
+    let me = match found {
+        Some((_, session)) => Me {
+            signed_in: true,
+            handle: session.handle.map(|handle| handle.to_string()),
+        },
+        None => Me {
+            signed_in: false,
+            handle: None,
+        },
     };
-    Ok((jar, [(CACHE_CONTROL, NO_STORE)], Json(me)).into_response())
+    Ok(personal(jar, Json(me)))
 }

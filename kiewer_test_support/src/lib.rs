@@ -4,6 +4,7 @@
 pub use tempfile::{TempDir, tempdir_in};
 
 pub mod blob_store_suite;
+pub mod db;
 pub mod http;
 
 /// A fresh directory under cargo's scratch directory, removed on drop.

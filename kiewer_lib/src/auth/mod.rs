@@ -38,14 +38,6 @@ impl Provider {
         }
     }
 
-    /// The name people see.
-    #[must_use]
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Provider::GitHub => "GitHub",
-        }
-    }
-
     /// The person the provider's user endpoint describes, from its JSON.
     ///
     /// # Errors
@@ -75,14 +67,29 @@ impl FromStr for Provider {
     }
 }
 
+/// What a provider issued when the app was registered there.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Credentials {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+impl fmt::Debug for Credentials {
+    /// The id, never the secret.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Credentials")
+            .field("client_id", &self.client_id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// One provider's OAuth app registration and endpoints. The endpoints are
 /// fields, not constants, so a test points them at a fake provider on
 /// loopback.
 #[derive(Debug, Clone)]
 pub struct App {
     pub provider: Provider,
-    pub client_id: String,
-    pub client_secret: String,
+    pub credentials: Credentials,
     pub auth_url: String,
     pub token_url: String,
     /// The endpoint that says who the token's owner is.
@@ -98,10 +105,10 @@ pub struct ProviderUser {
     pub login: String,
 }
 
-/// A sign-in under way: where to send the browser, and what the callback
-/// needs back from the browser's cookie to finish.
+/// A sign-in just started: where to send the browser, and what the
+/// callback needs back from the browser's cookie to finish.
 #[derive(Debug, Clone)]
-pub struct Begun {
+pub struct SignInStart {
     /// The provider's authorization page, with the state and the PKCE
     /// challenge in its query.
     pub authorize_url: String,
@@ -112,9 +119,16 @@ pub struct Begun {
     pub verifier: String,
 }
 
+/// An app with its oauth2 client, built once at startup so an endpoint
+/// that is not a URL fails there, not at the first sign-in.
+struct Registered {
+    app: App,
+    client: Client,
+}
+
 /// The sign-in flow over every configured provider.
 pub struct Auth {
-    apps: Vec<App>,
+    registered: Vec<Registered>,
     /// The origin browsers reach the server at, for the redirect URL the
     /// provider sends the browser back to.
     public_url: String,
@@ -136,8 +150,10 @@ impl Auth {
     ///
     /// # Errors
     ///
-    /// [`Error::Http`] when the HTTP client cannot be built.
+    /// [`Error::OAuth`] when an app's endpoint or the callback URL is not
+    /// a URL; [`Error::Http`] when the HTTP client cannot be built.
     pub fn new(apps: Vec<App>, public_url: impl Into<String>) -> Result<Self> {
+        let public_url = public_url.into();
         // No redirects: the token endpoint answers in place, and following
         // one would carry the client secret somewhere else (the oauth2
         // crate's own advice).
@@ -145,9 +161,16 @@ impl Auth {
             .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("kiewer/", env!("CARGO_PKG_VERSION")))
             .build()?;
+        let registered = apps
+            .into_iter()
+            .map(|app| {
+                let client = client(&app, &callback_url(&public_url, app.provider))?;
+                Ok(Registered { app, client })
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
-            apps,
-            public_url: public_url.into(),
+            registered,
+            public_url,
             http,
         })
     }
@@ -157,60 +180,48 @@ impl Auth {
     pub fn providers(&self) -> Vec<Provider> {
         Provider::ALL
             .into_iter()
-            .filter(|provider| self.app(*provider).is_some())
+            .filter(|provider| self.registered(*provider).is_some())
             .collect()
     }
 
-    fn app(&self, provider: Provider) -> Option<&App> {
-        self.apps.iter().find(|app| app.provider == provider)
+    fn registered(&self, provider: Provider) -> Option<&Registered> {
+        self.registered
+            .iter()
+            .find(|registered| registered.app.provider == provider)
     }
 
     /// Where the provider sends the browser back to.
     #[must_use]
     pub fn callback_url(&self, provider: Provider) -> String {
-        format!("{}/auth/{provider}/callback", self.public_url)
+        callback_url(&self.public_url, provider)
     }
 
-    fn client(&self, app: &App) -> Result<Client> {
-        let not_a_url = |what: &str, error: oauth2::url::ParseError| Error::OAuth {
-            provider: app.provider,
-            reason: format!("{what} is not a URL: {error}"),
-        };
-        Ok(BasicClient::new(ClientId::new(app.client_id.clone()))
-            .set_client_secret(ClientSecret::new(app.client_secret.clone()))
-            .set_auth_uri(AuthUrl::new(app.auth_url.clone()).map_err(|e| not_a_url("auth_url", e))?)
-            .set_token_uri(
-                TokenUrl::new(app.token_url.clone()).map_err(|e| not_a_url("token_url", e))?,
-            )
-            .set_redirect_uri(
-                RedirectUrl::new(self.callback_url(app.provider))
-                    .map_err(|e| not_a_url("the callback URL", e))?,
-            ))
+    /// Whether cookies carry `Secure`: yes under an `https` public URL,
+    /// which is every deployment; no on a dev box over `http`, where
+    /// Safari would drop a `Secure` cookie even from localhost.
+    #[must_use]
+    pub fn secure_cookies(&self) -> bool {
+        self.public_url.starts_with("https://")
     }
 
     /// Start a sign-in with `provider`: a fresh state and PKCE pair and the
     /// URL to send the browser to. `None` when the provider has no app
     /// registered.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::OAuth`] when an endpoint or the public URL is not a URL.
-    pub fn begin(&self, provider: Provider) -> Result<Option<Begun>> {
-        let Some(app) = self.app(provider) else {
-            return Ok(None);
-        };
+    #[must_use]
+    pub fn begin(&self, provider: Provider) -> Option<SignInStart> {
+        let registered = self.registered(provider)?;
         let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-        let (url, state) = self
-            .client(app)?
+        let (url, state) = registered
+            .client
             .authorize_url(CsrfToken::new_random)
-            .add_scopes(app.scopes.iter().cloned().map(Scope::new))
+            .add_scopes(registered.app.scopes.iter().cloned().map(Scope::new))
             .set_pkce_challenge(challenge)
             .url();
-        Ok(Some(Begun {
+        Some(SignInStart {
             authorize_url: url.to_string(),
             state: state.into_secret(),
             verifier: verifier.into_secret(),
-        }))
+        })
     }
 
     /// Finish a sign-in: trade `code` for a token with `verifier`, then ask
@@ -227,11 +238,11 @@ impl Auth {
         code: String,
         verifier: String,
     ) -> Result<Option<ProviderUser>> {
-        let Some(app) = self.app(provider) else {
+        let Some(registered) = self.registered(provider) else {
             return Ok(None);
         };
-        let token = self
-            .client(app)?
+        let token = registered
+            .client
             .exchange_code(AuthorizationCode::new(code))
             .set_pkce_verifier(PkceCodeVerifier::new(verifier))
             .request_async(&self.http)
@@ -242,7 +253,7 @@ impl Auth {
             })?;
         let body: serde_json::Value = self
             .http
-            .get(&app.user_url)
+            .get(&registered.app.user_url)
             .bearer_auth(token.access_token().secret())
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
@@ -252,6 +263,29 @@ impl Auth {
             .await?;
         provider.parse_user(&body).map(Some)
     }
+}
+
+fn callback_url(public_url: &str, provider: Provider) -> String {
+    format!("{public_url}/auth/{provider}/callback")
+}
+
+fn client(app: &App, callback: &str) -> Result<Client> {
+    let not_a_url = |what: &str, error: oauth2::url::ParseError| Error::OAuth {
+        provider: app.provider,
+        reason: format!("{what} is not a URL: {error}"),
+    };
+    Ok(
+        BasicClient::new(ClientId::new(app.credentials.client_id.clone()))
+            .set_client_secret(ClientSecret::new(app.credentials.client_secret.clone()))
+            .set_auth_uri(AuthUrl::new(app.auth_url.clone()).map_err(|e| not_a_url("auth_url", e))?)
+            .set_token_uri(
+                TokenUrl::new(app.token_url.clone()).map_err(|e| not_a_url("token_url", e))?,
+            )
+            .set_redirect_uri(
+                RedirectUrl::new(callback.to_owned())
+                    .map_err(|e| not_a_url("the callback URL", e))?,
+            ),
+    )
 }
 
 type Client = oauth2::Client<
@@ -269,21 +303,40 @@ type Client = oauth2::Client<
 
 #[cfg(test)]
 mod tests {
+    use test_case::test_case;
+
     use super::*;
 
+    #[test_case(Provider::GitHub, "github")]
+    fn a_provider_round_trips_through_its_wire_name(provider: Provider, wire: &str) {
+        assert_eq!(provider.as_str(), wire);
+        assert_eq!(wire.parse::<Provider>().unwrap(), provider);
+        assert_eq!(
+            serde_json::to_string(&provider).unwrap(),
+            format!("{wire:?}")
+        );
+    }
+
     #[test]
-    fn a_provider_round_trips_through_its_wire_name() {
-        for provider in Provider::ALL {
-            assert_eq!(provider.as_str().parse::<Provider>().unwrap(), provider);
-            assert_eq!(
-                serde_json::to_string(&provider).unwrap(),
-                format!("{:?}", provider.as_str())
-            );
-        }
+    fn a_wire_name_in_the_wrong_case_is_not_a_provider() {
         assert!(matches!(
             "GitHub".parse::<Provider>(),
             Err(Error::Malformed(_))
         ));
+    }
+
+    fn app(auth_url: &str) -> App {
+        App {
+            provider: Provider::GitHub,
+            credentials: Credentials {
+                client_id: "id".to_owned(),
+                client_secret: "secret".to_owned(),
+            },
+            auth_url: auth_url.to_owned(),
+            token_url: "https://provider.example/token".to_owned(),
+            user_url: "https://provider.example/user".to_owned(),
+            scopes: Vec::new(),
+        }
     }
 
     #[test]
@@ -294,6 +347,59 @@ mod tests {
             "https://kiewer.example/auth/github/callback"
         );
         assert!(auth.providers().is_empty());
-        assert!(auth.begin(Provider::GitHub).unwrap().is_none());
+        assert!(auth.begin(Provider::GitHub).is_none());
+    }
+
+    #[test_case("https://kiewer.example", true; "https is secure")]
+    #[test_case("http://localhost:8080", false; "http on a dev box is not")]
+    fn cookies_are_secure_under_https(public_url: &str, secure: bool) {
+        let auth = Auth::new(Vec::new(), public_url).unwrap();
+        assert_eq!(auth.secure_cookies(), secure);
+    }
+
+    #[test]
+    fn an_endpoint_that_is_not_a_url_fails_at_startup() {
+        let err = Auth::new(vec![app("not a url")], "https://kiewer.example").unwrap_err();
+        assert!(matches!(err, Error::OAuth { .. }), "{err}");
+        assert!(err.to_string().contains("auth_url"), "{err}");
+    }
+
+    #[test]
+    fn a_registered_app_starts_a_sign_in_with_state_and_pkce() {
+        let auth = Auth::new(
+            vec![app("https://provider.example/authorize")],
+            "https://kiewer.example",
+        )
+        .unwrap();
+        assert_eq!(auth.providers(), [Provider::GitHub]);
+        let start = auth.begin(Provider::GitHub).unwrap();
+        assert!(
+            start
+                .authorize_url
+                .starts_with("https://provider.example/authorize?")
+        );
+        assert!(
+            start
+                .authorize_url
+                .contains(&format!("state={}", start.state))
+        );
+        assert!(start.authorize_url.contains("code_challenge_method=S256"));
+        assert!(!start.verifier.is_empty());
+        assert!(
+            !start.authorize_url.contains(&start.verifier),
+            "the verifier stays home"
+        );
+    }
+
+    #[test]
+    fn credentials_debug_hides_the_secret() {
+        let text = format!(
+            "{:?}",
+            Credentials {
+                client_id: "id".to_owned(),
+                client_secret: "hunter2".to_owned()
+            }
+        );
+        assert!(text.contains("id") && !text.contains("hunter2"), "{text}");
     }
 }

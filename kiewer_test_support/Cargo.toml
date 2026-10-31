@@ -14,5 +14,8 @@ workspace = true
 
 [dependencies]
 kiewer_lib = { path = "../kiewer_lib" }
+# The pool type the Postgres helper hands out; the features are the
+# library's, unified by cargo.
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio"] }
 tempfile = "3"
 tokio = { version = "1", features = ["io-util", "net", "rt"] }

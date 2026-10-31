@@ -11,7 +11,7 @@
      everyone and cacheable (ADR 0003), so nothing in it may depend on
      the session. -->
 <span id="signed-out"><a href="/auth/github" rel="nofollow">Sign in with GitHub</a></span>
-<span id="signed-in" hidden><span id="handle"></span> <form method="post" action="/auth/sign-out" style="display:inline"><button type="submit">Sign out</button></form></span>
+<span id="signed-in" hidden><a id="handle" href="/welcome">Pick your handle</a> <form method="post" action="/auth/sign-out" style="display:inline"><button type="submit">Sign out</button></form></span>
 </nav>
 <h1>kiewer</h1>
 <p>A site for uploading and sharing KiCad designs, rendered in the browser.</p>
@@ -20,9 +20,13 @@
 fetch("/api/me", { credentials: "same-origin", cache: "no-store" })
   .then(function (r) { return r.json(); })
   .then(function (me) {
-    if (me.signed_in && !me.handle) { location.replace("/welcome"); return; }
     if (me.signed_in) {
-      document.getElementById("handle").textContent = me.handle;
+      // Without a handle yet, the link to pick one stays as it is.
+      if (me.handle) {
+        var handle = document.getElementById("handle");
+        handle.textContent = me.handle;
+        handle.href = "/" + me.handle;
+      }
       document.getElementById("signed-out").hidden = true;
       document.getElementById("signed-in").hidden = false;
     }

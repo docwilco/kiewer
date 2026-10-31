@@ -32,10 +32,12 @@ Sign-in needs a GitHub OAuth app of your own, one per environment
 (docs/v1-scope.md, Q57): at https://github.com/settings/developers, New
 OAuth App, any name, homepage `http://localhost:8080`, callback URL
 `http://localhost:8080/auth/github/callback` (the path is fixed; the
-origin is `KIEWER_PUBLIC_URL`, which defaults to localhost on `PORT`).
-Generate a client secret and put both in `.env` as `GITHUB_CLIENT_ID` and
-`GITHUB_CLIENT_SECRET`. Without them the server runs with sign-in off and
-`/auth/github` answers 404. The sign-in tests use a fake GitHub on
+origin is `PUBLIC_URL`, which defaults to localhost on `PORT`). Generate a
+client secret and put both in `.env` as `OAUTH_GITHUB_CLIENT_ID` and
+`OAUTH_GITHUB_CLIENT_SECRET`, the names `infra/` hands Cloud Run too.
+Without them the server runs with sign-in off and `/auth/github` answers
+404. Cookies are `Secure` under an `https` `PUBLIC_URL`, so a dev box over
+`http` works in every browser. The sign-in tests use a fake GitHub on
 loopback and need no app. Production and staging get their registrations
 through Secret Manager, not `.env`.
 

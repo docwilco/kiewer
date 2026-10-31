@@ -1,17 +1,16 @@
 //! GitHub's particulars: its endpoints and the shape of `GET /user`.
 
-use super::{App, Provider, ProviderUser};
+use super::{App, Credentials, Provider, ProviderUser};
 use crate::error::{Error, Result};
 
 /// The app registered at GitHub (README, Development), on GitHub's own
 /// endpoints. No scope: `/user` answers with the public profile, which has
 /// the id and the login, and kiewer wants nothing else from GitHub.
 #[must_use]
-pub fn app(client_id: String, client_secret: String) -> App {
+pub fn app(credentials: Credentials) -> App {
     App {
         provider: Provider::GitHub,
-        client_id,
-        client_secret,
+        credentials,
         auth_url: "https://github.com/login/oauth/authorize".to_owned(),
         token_url: "https://github.com/login/oauth/access_token".to_owned(),
         user_url: "https://api.github.com/user".to_owned(),

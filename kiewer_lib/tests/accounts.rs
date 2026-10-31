@@ -8,31 +8,14 @@ use kiewer_lib::Error;
 use kiewer_lib::account::{self, Handle};
 use kiewer_lib::auth::Provider;
 use kiewer_lib::session::{self, SessionId};
+use kiewer_test_support::db::{fresh, pool_from_env};
 use sqlx::PgPool;
-
-async fn pool() -> Option<PgPool> {
-    let url = std::env::var("DATABASE_URL")
-        .ok()
-        .filter(|url| !url.is_empty());
-    let Some(url) = url else {
-        eprintln!("DATABASE_URL is unset; skipping");
-        return None;
-    };
-    Some(
-        kiewer_lib::db::connect(&url)
-            .await
-            .expect("connect and migrate"),
-    )
-}
-
-/// A token no earlier run used: rows from earlier runs are still there.
-fn fresh(prefix: &str) -> String {
-    format!("{prefix}-{:016x}", rand::random::<u64>())
-}
 
 #[tokio::test]
 async fn the_account_identity_and_session_tables_exist() {
-    let Some(db) = pool().await else { return };
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT table_name::text FROM information_schema.tables
          WHERE table_schema = 'public' AND table_name IN ('account', 'identity', 'session')
@@ -46,7 +29,9 @@ async fn the_account_identity_and_session_tables_exist() {
 
 #[tokio::test]
 async fn a_first_sign_in_makes_an_account_and_a_second_finds_it() {
-    let Some(db) = pool().await else { return };
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
     let user_id = fresh("gh");
     let first = account::sign_in(&db, Provider::GitHub, &user_id, "octocat")
         .await
@@ -72,7 +57,9 @@ async fn a_first_sign_in_makes_an_account_and_a_second_finds_it() {
 
 #[tokio::test]
 async fn a_handle_is_chosen_once_and_a_taken_one_is_refused() {
-    let Some(db) = pool().await else { return };
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
     let alice = account::sign_in(&db, Provider::GitHub, &fresh("gh"), "alice")
         .await
         .expect("sign in");
@@ -101,7 +88,9 @@ async fn a_handle_is_chosen_once_and_a_taken_one_is_refused() {
 
 #[tokio::test]
 async fn a_session_starts_is_found_and_ends() {
-    let Some(db) = pool().await else { return };
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
     let signed_in = account::sign_in(&db, Provider::GitHub, &fresh("gh"), "carol")
         .await
         .expect("sign in");
@@ -143,7 +132,9 @@ async fn a_session_starts_is_found_and_ends() {
 
 #[tokio::test]
 async fn an_unknown_session_is_not_found() {
-    let Some(db) = pool().await else { return };
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
     let id = SessionId::random();
     assert!(session::find(&db, &id).await.expect("lookup").is_none());
 }
@@ -165,7 +156,9 @@ async fn age_session(db: &PgPool, id: &SessionId, remaining: &str) {
 
 #[tokio::test]
 async fn a_session_slides_its_expiry_when_used_after_a_day() {
-    let Some(db) = pool().await else { return };
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
     let signed_in = account::sign_in(&db, Provider::GitHub, &fresh("gh"), "dave")
         .await
         .expect("sign in");
@@ -195,7 +188,9 @@ async fn a_session_slides_its_expiry_when_used_after_a_day() {
 
 #[tokio::test]
 async fn an_expired_session_is_not_found() {
-    let Some(db) = pool().await else { return };
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
     let signed_in = account::sign_in(&db, Provider::GitHub, &fresh("gh"), "erin")
         .await
         .expect("sign in");

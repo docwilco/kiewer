@@ -1700,6 +1700,7 @@ name = "kiewer_test_support"
 version = "0.1.0"
 dependencies = [
  "kiewer_lib",
+ "sqlx",
  "tempfile",
  "tokio",
 ]

@@ -7,25 +7,14 @@ use std::sync::Arc;
 
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::web::AppState;
+use kiewer_test_support::db::pool_from_env;
 use kiewer_test_support::{http, scratch_dir};
-
-fn database_url() -> Option<String> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    if url.is_empty() {
-        return None;
-    }
-    Some(url)
-}
 
 #[tokio::test]
 async fn connects_and_runs_the_migrations() {
-    let Some(url) = database_url() else {
-        eprintln!("DATABASE_URL is unset; skipping");
+    let Some(pool) = pool_from_env().await else {
         return;
     };
-    let pool = kiewer_lib::db::connect(&url)
-        .await
-        .expect("connect and migrate");
     // Running the set twice is a no-op: every migration is recorded once.
     kiewer_lib::db::migrate(&pool)
         .await
@@ -43,13 +32,12 @@ async fn connects_and_runs_the_migrations() {
 
 #[tokio::test]
 async fn health_is_ok_with_a_database() {
-    let Some(url) = database_url() else {
-        eprintln!("DATABASE_URL is unset; skipping");
+    let Some(db) = pool_from_env().await else {
         return;
     };
     let dir = scratch_dir!();
     let state = AppState {
-        db: kiewer_lib::db::connect(&url).await.expect("connect"),
+        db,
         blobs: Arc::new(FsBlobStore::new(dir.path())),
         auth: Arc::new(
             kiewer_lib::auth::Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth"),

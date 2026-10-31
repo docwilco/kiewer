@@ -15,9 +15,10 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json, Redirect};
 use axum::routing::{get, post};
 use kiewer_lib::account::{self, Handle};
-use kiewer_lib::auth::{App, Auth, Provider};
+use kiewer_lib::auth::{App, Auth, Credentials, Provider};
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::web::AppState;
+use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use oauth2::url::Url;
 use oauth2::{PkceCodeChallenge, PkceCodeVerifier};
@@ -99,8 +100,10 @@ async fn fake_user(State(fake): State<Fake>, headers: HeaderMap) -> impl IntoRes
     (StatusCode::OK, Json(fake.lock().unwrap().user.clone()))
 }
 
-/// The fake on a free port, answering for the user `login` with id `id`.
-async fn fake_github(id: u64, login: &str) -> (Fake, SocketAddr) {
+/// The fake on a free port, answering for the user `login` under a numeric
+/// id no earlier run used.
+async fn fake_github(login: &str) -> (Fake, SocketAddr) {
+    let id = u64::from_str_radix(&fresh("")[1..13], 16).expect("twelve hex digits");
     let fake: Fake = Arc::new(Mutex::new(FakeGitHub {
         challenge: None,
         user: serde_json::json!({"id": id, "login": login}),
@@ -119,14 +122,22 @@ async fn fake_github(id: u64, login: &str) -> (Fake, SocketAddr) {
 }
 
 /// The server with GitHub sign-in registered against the fake at
-/// `github`, on a free port that is also its public URL; a browser at it.
-async fn server_with_github(db: PgPool, github: SocketAddr) -> (http::Browser, TempDir) {
+/// `github`, on a free port; a browser at it. The public URL is that port
+/// under `scheme`: the browser follows paths, so `https` works without
+/// TLS and gives the production cookie attributes.
+async fn server_with_github(
+    db: PgPool,
+    github: SocketAddr,
+    scheme: &str,
+) -> (http::Browser, TempDir) {
     let dir = scratch_dir!();
     let (listener, addr) = http::bind_free_port().await;
     let app = App {
         provider: Provider::GitHub,
-        client_id: "fake-id".to_owned(),
-        client_secret: "fake-secret".to_owned(),
+        credentials: Credentials {
+            client_id: "fake-id".to_owned(),
+            client_secret: "fake-secret".to_owned(),
+        },
         auth_url: format!("http://{github}/login/oauth/authorize"),
         token_url: format!("http://{github}/login/oauth/access_token"),
         user_url: format!("http://{github}/user"),
@@ -135,30 +146,20 @@ async fn server_with_github(db: PgPool, github: SocketAddr) -> (http::Browser, T
     let state = AppState {
         db,
         blobs: Arc::new(FsBlobStore::new(dir.path())),
-        auth: Arc::new(Auth::new(vec![app], format!("http://{addr}")).expect("an auth")),
+        auth: Arc::new(Auth::new(vec![app], format!("{scheme}://{addr}")).expect("an auth")),
     };
     http::serve_listener(listener, state);
     (http::Browser::new(addr), dir)
 }
 
-async fn pool() -> Option<PgPool> {
-    let url = std::env::var("DATABASE_URL")
-        .ok()
-        .filter(|url| !url.is_empty());
-    let Some(url) = url else {
-        eprintln!("DATABASE_URL is unset; skipping");
-        return None;
-    };
-    Some(
-        kiewer_lib::db::connect(&url)
-            .await
-            .expect("connect and migrate"),
-    )
-}
-
-/// A token no earlier run used: rows from earlier runs are still there.
-fn fresh(prefix: &str) -> String {
-    format!("{prefix}-{:016x}", rand::random::<u64>())
+/// Every attribute a cookie line has to carry, named in the failure.
+fn assert_attributes(cookie: &str, attributes: &[&str]) {
+    let missing: Vec<&str> = attributes
+        .iter()
+        .copied()
+        .filter(|attribute| !cookie.contains(attribute))
+        .collect();
+    assert!(missing.is_empty(), "{cookie} lacks {missing:?}");
 }
 
 /// The path and query of an absolute URL, for the next request.
@@ -179,9 +180,11 @@ async fn sign_in_through(browser: &mut http::Browser, github: SocketAddr) -> htt
     assert_eq!(started.status, 303, "{}", started.body);
     let state_cookie = started.header("set-cookie").expect("the state cookie");
     assert!(state_cookie.starts_with("kiewer_oauth="), "{state_cookie}");
-    for attribute in ["HttpOnly", "Secure", "SameSite=Lax", "Path=/auth"] {
-        assert!(state_cookie.contains(attribute), "{state_cookie}");
-    }
+    assert_attributes(
+        state_cookie,
+        &["HttpOnly", "Secure", "SameSite=Lax", "Path=/auth"],
+    );
+    assert_eq!(started.header("cache-control"), Some("private, no-store"));
     let (authorize, authorize_path) = path_and_query(started.header("location").unwrap());
     assert_eq!(
         authorize.port(),
@@ -209,9 +212,11 @@ async fn me(browser: &mut http::Browser) -> serde_json::Value {
 
 #[tokio::test]
 async fn a_person_signs_in_picks_a_handle_stays_signed_in_and_signs_out() {
-    let Some(db) = pool().await else { return };
-    let (_fake, github) = fake_github(rand::random::<u32>().into(), "Octo_Cat").await;
-    let (mut browser, _dir) = server_with_github(db.clone(), github).await;
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (_fake, github) = fake_github("Octo_Cat").await;
+    let (mut browser, _dir) = server_with_github(db.clone(), github, "https").await;
 
     let signed_in = sign_in_through(&mut browser, github).await;
     assert_eq!(signed_in.status, 303, "{}", signed_in.body);
@@ -225,15 +230,17 @@ async fn a_person_signs_in_picks_a_handle_stays_signed_in_and_signs_out() {
         .iter()
         .find(|cookie| cookie.starts_with("kiewer_session="))
         .expect("the session cookie");
-    for attribute in [
-        "HttpOnly",
-        "Secure",
-        "SameSite=Lax",
-        "Path=/",
-        "Max-Age=2592000",
-    ] {
-        assert!(session_cookie.contains(attribute), "{session_cookie}");
-    }
+    assert_attributes(
+        session_cookie,
+        &[
+            "HttpOnly",
+            "Secure",
+            "SameSite=Lax",
+            "Path=/",
+            "Max-Age=2592000",
+        ],
+    );
+    assert_eq!(signed_in.header("cache-control"), Some("private, no-store"));
     assert!(
         cookies
             .iter()
@@ -333,9 +340,11 @@ async fn pick_a_handle(browser: &mut http::Browser, db: &PgPool) -> String {
 
 #[tokio::test]
 async fn a_callback_without_this_browsers_state_is_refused() {
-    let Some(db) = pool().await else { return };
-    let (_fake, github) = fake_github(rand::random::<u32>().into(), "mallory").await;
-    let (mut browser, _dir) = server_with_github(db, github).await;
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (_fake, github) = fake_github("mallory").await;
+    let (mut browser, _dir) = server_with_github(db, github, "https").await;
     let started = browser.get("/auth/github").await;
     assert_eq!(started.status, 303);
     let forged = browser
@@ -359,9 +368,11 @@ async fn a_callback_without_this_browsers_state_is_refused() {
 
 #[tokio::test]
 async fn a_declined_sign_in_goes_home_without_a_session() {
-    let Some(db) = pool().await else { return };
-    let (_fake, github) = fake_github(rand::random::<u32>().into(), "shy").await;
-    let (mut browser, _dir) = server_with_github(db, github).await;
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (_fake, github) = fake_github("shy").await;
+    let (mut browser, _dir) = server_with_github(db, github, "https").await;
     browser.get("/auth/github").await;
     let declined = browser
         .get("/auth/github/callback?error=access_denied&error_description=The+user+has+denied")
@@ -377,9 +388,11 @@ async fn a_declined_sign_in_goes_home_without_a_session() {
 
 #[tokio::test]
 async fn a_bad_code_at_the_provider_is_an_upstream_failure_not_a_session() {
-    let Some(db) = pool().await else { return };
-    let (_fake, github) = fake_github(rand::random::<u32>().into(), "eve").await;
-    let (mut browser, _dir) = server_with_github(db, github).await;
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (_fake, github) = fake_github("eve").await;
+    let (mut browser, _dir) = server_with_github(db, github, "https").await;
     let started = browser.get("/auth/github").await;
     let state_value = browser
         .cookie("kiewer_oauth")
@@ -395,8 +408,65 @@ async fn a_bad_code_at_the_provider_is_an_upstream_failure_not_a_session() {
             "/auth/github/callback?code=stolen&state={state_value}"
         ))
         .await;
-    assert_eq!(failed.status, 500, "{}", failed.body);
+    assert_eq!(failed.status, 502, "{}", failed.body);
+    assert!(failed.body.contains("start again"), "{}", failed.body);
+    assert_eq!(failed.header("cache-control"), Some("private, no-store"));
     assert!(browser.cookie("kiewer_session").is_none());
+}
+
+#[tokio::test]
+async fn a_use_after_a_day_sets_the_cookie_again_with_the_full_lifetime() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (_fake, github) = fake_github("frank").await;
+    let (mut browser, _dir) = server_with_github(db.clone(), github, "https").await;
+    sign_in_through(&mut browser, github).await;
+    let cookie = browser
+        .cookie("kiewer_session")
+        .expect("signed in")
+        .to_owned();
+    let quiet = browser.get("/api/me").await;
+    assert!(
+        quiet.header("set-cookie").is_none(),
+        "a fresh session has nothing to renew"
+    );
+    // Twenty of thirty days left: in place of a clock, as tests/accounts.rs.
+    let aged = sqlx::query(
+        "UPDATE session SET expires_at = now() + interval '20 days' WHERE id_hash = sha256($1)",
+    )
+    .bind(cookie.clone().into_bytes())
+    .execute(&db)
+    .await
+    .expect("age the row")
+    .rows_affected();
+    assert_eq!(aged, 1);
+    let renewed = browser.get("/api/me").await;
+    let set = renewed.header("set-cookie").expect("the cookie set again");
+    assert!(
+        set.starts_with(&format!("kiewer_session={cookie};")),
+        "{set}"
+    );
+    assert_attributes(
+        set,
+        &["Max-Age=2592000", "HttpOnly", "Secure", "SameSite=Lax"],
+    );
+    let again = browser.get("/api/me").await;
+    assert!(again.header("set-cookie").is_none(), "renewed once a day");
+}
+
+#[tokio::test]
+async fn cookies_on_an_http_dev_box_are_not_marked_secure() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (_fake, github) = fake_github("dev").await;
+    let (mut browser, _dir) = server_with_github(db, github, "http").await;
+    let started = browser.get("/auth/github").await;
+    let state_cookie = started.header("set-cookie").expect("the state cookie");
+    assert_attributes(state_cookie, &["HttpOnly", "SameSite=Lax", "Path=/auth"]);
+    assert!(!state_cookie.contains("Secure"), "{state_cookie}");
+    assert_eq!(started.header("cache-control"), Some("private, no-store"));
 }
 
 /// A state with no provider registered and a pool that never connects.

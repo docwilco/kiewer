@@ -18,16 +18,13 @@ use crate::web::{AppState, serve, shutdown_signal};
 /// answers 404, which the log says once at startup.
 fn auth(config: &Config) -> Result<Auth> {
     let mut apps = Vec::new();
-    if let Some(app) = &config.github {
-        apps.push(github::app(
-            app.client_id.clone(),
-            app.client_secret.clone(),
-        ));
+    if let Some(credentials) = &config.github {
+        apps.push(github::app(credentials.clone()));
     }
     let auth = Auth::new(apps, config.public_url.clone())?;
     let providers = auth.providers();
     if providers.is_empty() {
-        tracing::warn!("sign-in is off: no provider app is configured (GITHUB_CLIENT_ID)");
+        tracing::warn!("sign-in is off: no provider app is configured (OAUTH_GITHUB_CLIENT_ID)");
     } else {
         tracing::info!(?providers, public_url = %config.public_url, "sign-in on");
     }

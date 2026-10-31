@@ -5,6 +5,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::auth::Credentials;
 use crate::error::{Error, Result};
 
 /// The port when `PORT` is unset: Cloud Run's default, so a dev box and
@@ -58,21 +59,17 @@ pub struct Config {
     /// `BLOB_BUCKET`, `KIEWER_GCS_EMULATOR`, `KIEWER_BLOB_DIR`: where blobs
     /// live.
     pub blobs: BlobStoreConfig,
-    /// `KIEWER_PUBLIC_URL`: the origin browsers reach the server at, with
-    /// no trailing slash; the sign-in callback URL is under it. Defaults
-    /// to `http://localhost:<port>`, a dev box.
+    /// `PUBLIC_URL`: the origin browsers reach the server at, with no
+    /// trailing slash; the sign-in callback URL is under it and cookies
+    /// are `Secure` when it is `https`. Defaults to
+    /// `http://localhost:<port>`, a dev box. The names of this and the
+    /// OAuth variables are the deploy contract in `infra/` (its README
+    /// lists them; a retired one is a breaking Release).
     pub public_url: String,
-    /// `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`: the GitHub OAuth app
-    /// (README, Development), or `None` with both unset, which turns
-    /// GitHub sign-in off.
-    pub github: Option<OAuthApp>,
-}
-
-/// One provider's OAuth app registration, as the environment gives it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OAuthApp {
-    pub client_id: String,
-    pub client_secret: String,
+    /// `OAUTH_GITHUB_CLIENT_ID` and `OAUTH_GITHUB_CLIENT_SECRET`: the
+    /// GitHub OAuth app (README, Development), or `None` with both unset,
+    /// which turns GitHub sign-in off.
+    pub github: Option<Credentials>,
 }
 
 /// The pair of variables for one provider's app: both, or neither.
@@ -84,11 +81,11 @@ fn oauth_app(
     var: &impl Fn(&str) -> Option<String>,
     id_name: &'static str,
     secret_name: &'static str,
-) -> Result<Option<OAuthApp>> {
+) -> Result<Option<Credentials>> {
     let read = |name: &str| var(name).filter(|value| !value.is_empty());
     match (read(id_name), read(secret_name)) {
         (None, None) => Ok(None),
-        (Some(client_id), Some(client_secret)) => Ok(Some(OAuthApp {
+        (Some(client_id), Some(client_secret)) => Ok(Some(Credentials {
             client_id,
             client_secret,
         })),
@@ -147,13 +144,11 @@ impl Config {
                     .map_or_else(|| PathBuf::from(DEFAULT_BLOB_DIR), PathBuf::from),
             },
         };
-        let public_url = var("KIEWER_PUBLIC_URL")
-            .filter(|url| !url.is_empty())
-            .map_or_else(
-                || format!("http://localhost:{port}"),
-                |url| url.trim_end_matches('/').to_owned(),
-            );
-        let github = oauth_app(&var, "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET")?;
+        let public_url = set("PUBLIC_URL").map_or_else(
+            || format!("http://localhost:{port}"),
+            |url| url.trim_end_matches('/').to_owned(),
+        );
+        let github = oauth_app(&var, "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET")?;
         Ok(Self {
             port,
             database_url,
@@ -200,9 +195,9 @@ mod tests {
     fn the_github_app_is_both_variables_or_neither() {
         let config = Config::from_vars(vars(&[
             ("DATABASE_URL", "postgres://x"),
-            ("KIEWER_PUBLIC_URL", "https://kiewer.example/"),
-            ("GITHUB_CLIENT_ID", "id"),
-            ("GITHUB_CLIENT_SECRET", "secret"),
+            ("PUBLIC_URL", "https://kiewer.example/"),
+            ("OAUTH_GITHUB_CLIENT_ID", "id"),
+            ("OAUTH_GITHUB_CLIENT_SECRET", "secret"),
         ]))
         .expect("valid");
         assert_eq!(
@@ -211,21 +206,21 @@ mod tests {
         );
         assert_eq!(
             config.github,
-            Some(OAuthApp {
+            Some(Credentials {
                 client_id: "id".to_owned(),
                 client_secret: "secret".to_owned()
             })
         );
         let err = Config::from_vars(vars(&[
             ("DATABASE_URL", "postgres://x"),
-            ("GITHUB_CLIENT_ID", "id"),
+            ("OAUTH_GITHUB_CLIENT_ID", "id"),
         ]))
         .expect_err("half an app");
         assert!(
             matches!(
                 err,
                 Error::Env {
-                    name: "GITHUB_CLIENT_SECRET",
+                    name: "OAUTH_GITHUB_CLIENT_SECRET",
                     ..
                 }
             ),
@@ -233,14 +228,14 @@ mod tests {
         );
         let err = Config::from_vars(vars(&[
             ("DATABASE_URL", "postgres://x"),
-            ("GITHUB_CLIENT_SECRET", "secret"),
+            ("OAUTH_GITHUB_CLIENT_SECRET", "secret"),
         ]))
         .expect_err("half an app");
         assert!(
             matches!(
                 err,
                 Error::Env {
-                    name: "GITHUB_CLIENT_ID",
+                    name: "OAUTH_GITHUB_CLIENT_ID",
                     ..
                 }
             ),

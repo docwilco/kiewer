@@ -61,15 +61,25 @@ impl fmt::Debug for SessionId {
 impl FromStr for SessionId {
     type Err = Error;
 
+    /// The canonical text only: 64 lowercase hex digits, so one id has one
+    /// spelling (and one hash).
     fn from_str(text: &str) -> Result<Self> {
         let malformed = || Error::Malformed("not a session id".to_owned());
+        let digit = |b: u8| match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            _ => None,
+        };
         if text.len() != 64 {
             return Err(malformed());
         }
         let mut out = [0u8; 32];
         for (slot, pair) in out.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
-            let pair = std::str::from_utf8(pair).map_err(|_| malformed())?;
-            *slot = u8::from_str_radix(pair, 16).map_err(|_| malformed())?;
+            let (high, low) = (digit(pair[0]), digit(pair[1]));
+            *slot = match (high, low) {
+                (Some(high), Some(low)) => (high << 4) | low,
+                _ => return Err(malformed()),
+            };
         }
         Ok(Self(out))
     }
@@ -161,26 +171,30 @@ pub async fn end(db: &PgPool, id: &SessionId) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use test_case::test_case;
+
     use super::*;
 
     #[test]
-    fn an_id_is_64_hex_characters_and_round_trips() {
+    fn an_id_is_64_lowercase_hex_characters_and_round_trips() {
         let id = SessionId::random();
         let text = id.to_string();
         assert_eq!(text.len(), 64);
-        assert!(text.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
         assert_eq!(text.parse::<SessionId>().unwrap(), id);
         assert_ne!(SessionId::random(), id);
     }
 
-    #[test]
-    fn a_short_or_odd_text_is_not_an_id() {
-        for text in ["", "abc", &"zz".repeat(32)] {
-            assert!(matches!(
-                text.parse::<SessionId>(),
-                Err(Error::Malformed(_))
-            ));
-        }
+    #[test_case(""; "empty")]
+    #[test_case("abc"; "short")]
+    #[test_case(&"zz".repeat(32); "the length but not hex")]
+    #[test_case(&"AB".repeat(32); "uppercase hex is not the canonical spelling")]
+    #[test_case(&"+f".repeat(32); "a sign is not a digit")]
+    fn a_text_that_is_not_the_canonical_id_is_refused(text: &str) {
+        assert!(matches!(
+            text.parse::<SessionId>(),
+            Err(Error::Malformed(_))
+        ));
     }
 
     #[test]
