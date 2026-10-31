@@ -1,0 +1,7 @@
+# The build context is what the runner built, nothing else: the image is
+# runtime-only, the build happens on the runner. The second line is the
+# same path the Dockerfile copies; the third keeps cargo's dep-info files
+# beside the binaries out, so the wildcard takes binaries alone.
+*
+!target/release/kiewer*
+target/release/*.d
