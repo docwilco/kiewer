@@ -2,6 +2,7 @@
 //! read once at startup, so a missing or malformed one fails before the
 //! server listens, naming the variable.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use crate::error::{Error, Result};
@@ -14,6 +15,39 @@ pub const DEFAULT_PORT: u16 = 8080;
 /// under the working directory, git-ignored.
 pub const DEFAULT_BLOB_DIR: &str = "blobs";
 
+/// Where blobs live, as the environment chooses it. `server::run` builds
+/// the matching `BlobStore`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobStoreConfig {
+    /// The filesystem store under `KIEWER_BLOB_DIR` (default
+    /// [`DEFAULT_BLOB_DIR`]): development and tests.
+    Filesystem { root: PathBuf },
+    /// The GCS store on the bucket `BLOB_BUCKET` names, the variable the
+    /// Terraform in `infra/` gives the Cloud Run services; with
+    /// `KIEWER_GCS_EMULATOR` beside it, on that emulator (its base URL)
+    /// with no credentials.
+    Gcs {
+        bucket: String,
+        emulator: Option<String>,
+    },
+}
+
+impl fmt::Display for BlobStoreConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BlobStoreConfig::Filesystem { root } => write!(f, "directory {}", root.display()),
+            BlobStoreConfig::Gcs {
+                bucket,
+                emulator: None,
+            } => write!(f, "bucket {bucket}"),
+            BlobStoreConfig::Gcs {
+                bucket,
+                emulator: Some(endpoint),
+            } => write!(f, "bucket {bucket} on the emulator at {endpoint}"),
+        }
+    }
+}
+
 /// The server's configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -21,8 +55,9 @@ pub struct Config {
     pub port: u16,
     /// `DATABASE_URL`: the Postgres connection string, as sqlx reads it.
     pub database_url: String,
-    /// `KIEWER_BLOB_DIR`: the filesystem blob store's root.
-    pub blob_dir: PathBuf,
+    /// `BLOB_BUCKET`, `KIEWER_GCS_EMULATOR`, `KIEWER_BLOB_DIR`: where blobs
+    /// live.
+    pub blobs: BlobStoreConfig,
     /// `KIEWER_PUBLIC_URL`: the origin browsers reach the server at, with
     /// no trailing slash; the sign-in callback URL is under it. Defaults
     /// to `http://localhost:<port>`, a dev box.
@@ -98,9 +133,21 @@ impl Config {
                 name: "DATABASE_URL",
                 reason: "is not set; see README, Development".to_owned(),
             })?;
-        let blob_dir = var("KIEWER_BLOB_DIR")
-            .filter(|dir| !dir.is_empty())
-            .map_or_else(|| PathBuf::from(DEFAULT_BLOB_DIR), PathBuf::from);
+        let set = |name: &str| var(name).filter(|value| !value.is_empty());
+        let blobs = match (set("BLOB_BUCKET"), set("KIEWER_GCS_EMULATOR")) {
+            (Some(bucket), emulator) => BlobStoreConfig::Gcs { bucket, emulator },
+            (None, Some(_)) => {
+                return Err(Error::Env {
+                    name: "KIEWER_GCS_EMULATOR",
+                    reason: "is set without BLOB_BUCKET, the bucket it would stand in for"
+                        .to_owned(),
+                });
+            }
+            (None, None) => BlobStoreConfig::Filesystem {
+                root: set("KIEWER_BLOB_DIR")
+                    .map_or_else(|| PathBuf::from(DEFAULT_BLOB_DIR), PathBuf::from),
+            },
+        };
         let public_url = var("KIEWER_PUBLIC_URL")
             .filter(|url| !url.is_empty())
             .map_or_else(
@@ -111,7 +158,7 @@ impl Config {
         Ok(Self {
             port,
             database_url,
-            blob_dir,
+            blobs,
             public_url,
             github,
         })
@@ -139,7 +186,12 @@ mod tests {
     fn defaults_fill_what_is_unset() {
         let config = Config::from_vars(vars(&[("DATABASE_URL", "postgres://x")])).expect("valid");
         assert_eq!(config.port, DEFAULT_PORT);
-        assert_eq!(config.blob_dir, PathBuf::from(DEFAULT_BLOB_DIR));
+        assert_eq!(
+            config.blobs,
+            BlobStoreConfig::Filesystem {
+                root: PathBuf::from(DEFAULT_BLOB_DIR)
+            }
+        );
         assert_eq!(config.database_url, "postgres://x");
         assert_eq!(config.public_url, "http://localhost:8080");
         assert_eq!(config.github, None, "sign-in is off without the app");
@@ -206,7 +258,80 @@ mod tests {
         ]))
         .expect("valid");
         assert_eq!(config.port, 3000);
-        assert_eq!(config.blob_dir, PathBuf::from("/var/blobs"));
+        assert_eq!(
+            config.blobs,
+            BlobStoreConfig::Filesystem {
+                root: PathBuf::from("/var/blobs")
+            }
+        );
+    }
+
+    #[test]
+    fn a_bucket_means_the_gcs_store() {
+        let config = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("BLOB_BUCKET", "my-project-kiewer-blobs"),
+        ]))
+        .expect("valid");
+        assert_eq!(
+            config.blobs,
+            BlobStoreConfig::Gcs {
+                bucket: "my-project-kiewer-blobs".to_owned(),
+                emulator: None,
+            }
+        );
+    }
+
+    #[test]
+    fn an_emulator_beside_the_bucket_points_the_gcs_store_at_it() {
+        let config = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("BLOB_BUCKET", "kiewer-dev"),
+            ("KIEWER_GCS_EMULATOR", "http://127.0.0.1:4443"),
+        ]))
+        .expect("valid");
+        assert_eq!(
+            config.blobs,
+            BlobStoreConfig::Gcs {
+                bucket: "kiewer-dev".to_owned(),
+                emulator: Some("http://127.0.0.1:4443".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn an_emulator_without_a_bucket_names_itself() {
+        let err = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("KIEWER_GCS_EMULATOR", "http://127.0.0.1:4443"),
+        ]))
+        .expect_err("an emulator stands in for a bucket");
+        assert!(
+            matches!(
+                err,
+                Error::Env {
+                    name: "KIEWER_GCS_EMULATOR",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_choice_names_itself() {
+        let fs = BlobStoreConfig::Filesystem {
+            root: PathBuf::from("blobs"),
+        };
+        assert_eq!(fs.to_string(), "directory blobs");
+        let gcs = BlobStoreConfig::Gcs {
+            bucket: "b".to_owned(),
+            emulator: Some("http://127.0.0.1:4443".to_owned()),
+        };
+        assert_eq!(
+            gcs.to_string(),
+            "bucket b on the emulator at http://127.0.0.1:4443"
+        );
     }
 
     #[test]

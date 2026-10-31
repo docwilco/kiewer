@@ -17,8 +17,10 @@ Running the server: `docker compose up -d` starts Postgres (`compose.yaml`),
 `cargo run`. The first line on stdout is the build line; the page is at
 http://localhost:8080/ and `/healthz` says `ok` once the database answers.
 `kiewer_lib::config` is the list of variables the server reads and their
-defaults; the blob store writes under `blobs/` (git-ignored) until the GCS
-store exists. Ctrl-c or SIGTERM stops it after the requests in flight.
+defaults; the blob store writes under `blobs/` (git-ignored) unless
+`BLOB_BUCKET` names a GCS bucket, which makes it the GCS store (with
+`KIEWER_GCS_EMULATOR` beside it, on the emulator below). Ctrl-c or SIGTERM
+stops it after the requests in flight.
 
 The tests that need Postgres (`kiewer_lib/tests/db.rs`, `accounts.rs`,
 `sign_in.rs`) run when `DATABASE_URL` is exported and skip when it is not,
@@ -36,6 +38,14 @@ Generate a client secret and put both in `.env` as `GITHUB_CLIENT_ID` and
 `/auth/github` answers 404. The sign-in tests use a fake GitHub on
 loopback and need no app. Production and staging get their registrations
 through Secret Manager, not `.env`.
+
+The GCS store test (`kiewer_lib/tests/gcs_blob_store.rs`) runs the same way
+when `KIEWER_GCS_EMULATOR` names a
+[fake-gcs-server](https://github.com/fsouza/fake-gcs-server) and skips when
+it is not set. On a dev box: the release binary for your platform (v1.56.1,
+the version CI pins), then
+`fake-gcs-server -scheme http -host 127.0.0.1 -port 4443 -backend memory -public-host 127.0.0.1`
+and `export KIEWER_GCS_EMULATOR=http://127.0.0.1:4443`.
 
 Clippy is pedantic with no blanket allows: every finding is fixed or carries a
 site-level `#[expect(..., reason = "...")]` naming the invariant that makes it safe.

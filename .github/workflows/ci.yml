@@ -84,13 +84,34 @@ jobs:
           --health-retries 15
     env:
       DATABASE_URL: postgres://kiewer:kiewer@127.0.0.1:5432/kiewer
+      # The GCS emulator the step below starts; the tests gated on it
+      # (kiewer_lib/tests/gcs_blob_store.rs) run here and skip on a box
+      # without it.
+      KIEWER_GCS_EMULATOR: http://127.0.0.1:4443
     steps:
       - uses: actions/checkout@v5
       # The programs the code or its tests run. This list, the Dockerfile's
       # apt layer and the dev-box setup move together: a program one of them
-      # gains, all gain in the same commit. Empty until the first one
-      # (Postgres is a service above, not a program on the runner).
+      # gains, all gain in the same commit (Postgres is a service above, not
+      # a program on the runner). No apt package yet:
       # - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends <packages>
+      #
+      # fake-gcs-server, the GCS emulator for kiewer_lib/tests/gcs_blob_store.rs:
+      # Google's own storage client against it over plain http on the
+      # loopback. Pinned by version and checksum; the tests make their own
+      # buckets through its JSON API, so it starts empty. Only the tests run
+      # it, so the Dockerfile does not gain it; a dev box runs the same
+      # binary (README, Development).
+      - name: Start the GCS emulator
+        run: |
+          version=1.56.1
+          curl -fsSLO "https://github.com/fsouza/fake-gcs-server/releases/download/v$version/fake-gcs-server_${version}_Linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/fsouza/fake-gcs-server/releases/download/v$version/checksums.txt"
+          grep "fake-gcs-server_${version}_Linux_amd64.tar.gz" checksums.txt | sha256sum -c -
+          tar xzf "fake-gcs-server_${version}_Linux_amd64.tar.gz" fake-gcs-server
+          ./fake-gcs-server -scheme http -host 127.0.0.1 -port 4443 -backend memory -public-host 127.0.0.1 &
+          for _ in $(seq 1 20); do curl -fs http://127.0.0.1:4443/storage/v1/b >/dev/null && break; sleep 0.5; done
+          rm -f "fake-gcs-server_${version}_Linux_amd64.tar.gz" checksums.txt
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/cargo-cached
         with:
