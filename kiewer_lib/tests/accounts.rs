@@ -7,7 +7,7 @@
 use kiewer_lib::Error;
 use kiewer_lib::account::{self, Handle, Linked};
 use kiewer_lib::auth::{Provider, ProviderUser};
-use kiewer_lib::session::{self, SessionId};
+use kiewer_lib::session::{self, SessionId, SessionKey};
 use kiewer_test_support::db::{fresh, pool_from_env};
 use sqlx::PgPool;
 
@@ -267,6 +267,128 @@ async fn a_session_starts_is_found_and_ends() {
         .expect("count");
     assert_eq!(rows, 0, "sign-out removes the row, not just its validity");
     session::end(&db, &id).await.expect("ending twice is fine");
+}
+
+/// Sets a session's last-seen time from the test, in place of a clock.
+async fn last_seen(db: &PgPool, id: &SessionId, ago: &str) {
+    let changed = sqlx::query(
+        "UPDATE session SET last_seen_at = now() - $2::interval WHERE id_hash = sha256($1)",
+    )
+    .bind(id.to_string().into_bytes())
+    .bind(ago)
+    .execute(db)
+    .await
+    .expect("update")
+    .rows_affected();
+    assert_eq!(changed, 1, "the session row is there");
+}
+
+#[tokio::test]
+async fn an_accounts_sessions_are_listed_with_the_current_one_marked_and_revoked() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let signed_in = account::sign_in(&db, Provider::GitHub, &user(&fresh("gh"), "grace"))
+        .await
+        .expect("sign in");
+    let account = signed_in.account_id;
+    let laptop = session::start(&db, account).await.expect("start");
+    let phone = session::start(&db, account).await.expect("start");
+    let tablet = session::start(&db, account).await.expect("start");
+    last_seen(&db, &laptop, "2 days").await;
+    last_seen(&db, &tablet, "1 hour").await;
+
+    let listed = session::list(&db, account, &phone).await.expect("list");
+    let order: Vec<(bool, bool)> = listed
+        .iter()
+        .map(|s| (s.current, s.key == laptop.key()))
+        .collect();
+    assert_eq!(
+        order,
+        [(true, false), (false, false), (false, true)],
+        "most recently seen first, the current one among them: {listed:?}"
+    );
+    for s in &listed {
+        assert!(
+            s.created_at.ends_with('Z') && s.last_seen_at.ends_with('Z'),
+            "times are UTC, ISO 8601: {s:?}"
+        );
+        assert_eq!(s.key.to_string().len(), 64, "the key is the hash in hex");
+        assert_ne!(
+            s.key.to_string(),
+            phone.to_string(),
+            "the cookie's id is never on the page"
+        );
+    }
+    let key: SessionKey = listed[2].key.to_string().parse().expect("round-trips");
+    assert_eq!(key, laptop.key());
+
+    // Revoke one: the laptop, by its key, from the phone's session.
+    session::revoke(&db, account, &laptop.key())
+        .await
+        .expect("revoke");
+    assert!(session::find(&db, &laptop).await.expect("find").is_none());
+    assert!(session::find(&db, &phone).await.expect("find").is_some());
+    // Revoking with another account's id does nothing: the key alone
+    // never suffices.
+    let other = account::sign_in(&db, Provider::GitHub, &user(&fresh("gh"), "heidi"))
+        .await
+        .expect("sign in");
+    session::revoke(&db, other.account_id, &tablet.key())
+        .await
+        .expect("revoke");
+    assert!(session::find(&db, &tablet).await.expect("find").is_some());
+    // Revoke all others: the phone stays alone.
+    let fourth = session::start(&db, account).await.expect("start");
+    session::revoke_others(&db, account, &phone)
+        .await
+        .expect("revoke others");
+    assert!(session::find(&db, &phone).await.expect("find").is_some());
+    assert!(session::find(&db, &tablet).await.expect("find").is_none());
+    assert!(session::find(&db, &fourth).await.expect("find").is_none());
+    assert_eq!(
+        session::list(&db, account, &phone)
+            .await
+            .expect("list")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_use_marks_the_session_seen_at_most_every_few_minutes() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let signed_in = account::sign_in(&db, Provider::GitHub, &user(&fresh("gh"), "ivan"))
+        .await
+        .expect("sign in");
+    let id = session::start(&db, signed_in.account_id)
+        .await
+        .expect("start");
+    let seen = |db: &PgPool| {
+        let db = db.clone();
+        async move {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT extract(epoch FROM now() - last_seen_at)::float8 FROM session WHERE id_hash = sha256($1)",
+            )
+            .bind(id.to_string().into_bytes())
+            .fetch_one(&db)
+            .await
+            .expect("seconds since seen")
+        }
+    };
+    last_seen(&db, &id, "2 minutes").await;
+    let found = session::find(&db, &id).await.expect("find").expect("found");
+    assert!(!found.refreshed);
+    assert!(
+        seen(&db).await > 100.0,
+        "two minutes ago is recent enough: no write"
+    );
+    last_seen(&db, &id, "10 minutes").await;
+    let found = session::find(&db, &id).await.expect("find").expect("found");
+    assert!(!found.refreshed, "the expiry has 30 days: nothing slid");
+    assert!(seen(&db).await < 5.0, "ten minutes ago: seen now");
 }
 
 #[tokio::test]

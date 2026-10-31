@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sessions · kiewer</title>
+</head>
+<body>
+<nav><a href="/">kiewer</a> · <a href="/settings">Settings</a></nav>
+<h1>Sessions</h1>
+<p>Every browser signed in to this account. A session ends 30 days after its last use, or when you revoke it here. Times are UTC.</p>
+<table>
+<thead><tr><th>Started</th><th>Last seen</th><th></th></tr></thead>
+<tbody>
+{% for session in sessions %}
+<tr>
+<td><time datetime="{{ session.created_at }}">{{ session.created_at }}</time></td>
+<td><time datetime="{{ session.last_seen_at }}">{{ session.last_seen_at }}</time></td>
+<td>{% if session.current %}This browser{% else %}<form method="post" action="/settings/sessions/revoke"><input type="hidden" name="key" value="{{ session.key }}"><button type="submit">Revoke</button></form>{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% if sessions.len() > 1 %}
+<form method="post" action="/settings/sessions/revoke-others"><button type="submit">Revoke all other sessions</button></form>
+{% endif %}
+</body>
+</html>

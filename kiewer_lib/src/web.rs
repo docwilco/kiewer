@@ -40,6 +40,12 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/{provider}/callback", get(auth::callback))
         .route("/welcome", get(auth::welcome).post(auth::choose_handle))
         .route("/settings", get(settings::account))
+        .route("/settings/sessions", get(settings::sessions))
+        .route("/settings/sessions/revoke", post(settings::revoke))
+        .route(
+            "/settings/sessions/revoke-others",
+            post(settings::revoke_others),
+        )
         .with_state(state)
 }
 

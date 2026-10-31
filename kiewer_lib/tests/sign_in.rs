@@ -17,6 +17,7 @@ use axum::routing::{get, post};
 use kiewer_lib::account::{self, Handle};
 use kiewer_lib::auth::{App, Auth, Credentials, Provider, ProviderUser};
 use kiewer_lib::blob::fs::FsBlobStore;
+use kiewer_lib::session::SessionId;
 use kiewer_lib::web::AppState;
 use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::{TempDir, http, scratch_dir};
@@ -682,6 +683,152 @@ async fn a_link_needs_a_signed_in_browser_and_settings_need_a_session() {
     let settings = browser.get("/settings").await;
     assert_eq!(settings.status, 303, "{}", settings.body);
     assert_eq!(settings.header("location"), Some("/welcome"));
+}
+
+/// The key of the session behind the browser's cookie, as the sessions
+/// page names it.
+fn session_key_of(browser: &http::Browser) -> String {
+    browser
+        .cookie("kiewer_session")
+        .expect("signed in")
+        .parse::<SessionId>()
+        .expect("a session id")
+        .key()
+        .to_string()
+}
+
+#[tokio::test]
+async fn the_sessions_page_lists_the_accounts_sessions_and_revokes_them() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (_github, github) = fake_github("judy").await;
+    let (mut laptop, _dir) = server_with_github(db, github, "https").await;
+    sign_up_with_github(&mut laptop, github).await;
+    // The same person in two more browsers.
+    let mut phone = http::Browser::new(laptop.addr());
+    let mut tablet = http::Browser::new(laptop.addr());
+    for browser in [&mut phone, &mut tablet] {
+        let signed_in = sign_in_through(browser, github).await;
+        assert_eq!(signed_in.header("location"), Some("/"), "a handle already");
+    }
+
+    let page = laptop.get("/settings/sessions").await;
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert_eq!(page.header("cache-control"), Some("private, no-store"));
+    assert_eq!(
+        page.body.matches("<time datetime=\"").count(),
+        6,
+        "a created and a last-seen time per session: {}",
+        page.body
+    );
+    let shown = page
+        .body
+        .split("<time datetime=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("a time");
+    assert!(
+        shown.len() == 20 && shown.as_bytes()[10] == b'T' && shown.ends_with('Z'),
+        "ISO 8601 UTC to the second: {shown}"
+    );
+    assert_eq!(
+        page.body.matches("This browser").count(),
+        1,
+        "the current session is marked once: {}",
+        page.body
+    );
+    assert!(
+        page.body.contains(&session_key_of(&phone)) && page.body.contains(&session_key_of(&tablet)),
+        "the others are named by their keys, revocable: {}",
+        page.body
+    );
+    assert!(
+        !page.body.contains(laptop.cookie("kiewer_session").unwrap()),
+        "the cookie's id is never on the page"
+    );
+
+    // Revoke the phone from the laptop.
+    let revoked = laptop
+        .post_form(
+            "/settings/sessions/revoke",
+            &format!("key={}", session_key_of(&phone)),
+        )
+        .await;
+    assert_eq!(revoked.status, 303, "{}", revoked.body);
+    assert_eq!(revoked.header("location"), Some("/settings/sessions"));
+    assert_eq!(revoked.header("cache-control"), Some("private, no-store"));
+    assert_eq!(me(&mut phone).await["signed_in"], false, "the phone is out");
+    assert_eq!(me(&mut tablet).await["signed_in"], true);
+    assert_eq!(me(&mut laptop).await["signed_in"], true);
+
+    // Revoke all others from the laptop: the tablet goes, the laptop stays.
+    let others = laptop
+        .post_form("/settings/sessions/revoke-others", "")
+        .await;
+    assert_eq!(others.status, 303, "{}", others.body);
+    assert_eq!(others.header("location"), Some("/settings/sessions"));
+    assert_eq!(me(&mut tablet).await["signed_in"], false);
+    assert_eq!(me(&mut laptop).await["signed_in"], true);
+    let page = laptop.get("/settings/sessions").await;
+    assert_eq!(
+        page.body.matches("<time datetime=\"").count(),
+        2,
+        "{}",
+        page.body
+    );
+}
+
+#[tokio::test]
+async fn a_revoke_takes_the_accounts_own_keys_and_a_session() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (_github, github) = fake_github("lena").await;
+    let (mut laptop, _dir) = server_with_github(db.clone(), github, "https").await;
+    sign_up_with_github(&mut laptop, github).await;
+
+    // A key that is not one is refused; a stranger's key revokes nothing.
+    let bad = laptop
+        .post_form("/settings/sessions/revoke", "key=not-a-key")
+        .await;
+    assert_eq!(bad.status, 400, "{}", bad.body);
+    let (_other_github, other_github) = fake_github("kim").await;
+    let (mut kim, _dir2) = server_with_github(db, other_github, "https").await;
+    sign_in_through(&mut kim, other_github).await;
+    let someone_elses = laptop
+        .post_form(
+            "/settings/sessions/revoke",
+            &format!("key={}", session_key_of(&kim)),
+        )
+        .await;
+    assert_eq!(someone_elses.status, 303);
+    assert_eq!(me(&mut kim).await["signed_in"], true, "kim is untouched");
+
+    // Revoking the current session is a sign-out.
+    let own = laptop
+        .post_form(
+            "/settings/sessions/revoke",
+            &format!("key={}", session_key_of(&laptop)),
+        )
+        .await;
+    assert_eq!(own.status, 303, "{}", own.body);
+    assert_eq!(own.header("location"), Some("/"));
+    assert!(
+        laptop.cookie("kiewer_session").is_none(),
+        "the cookie is forgotten"
+    );
+    assert_eq!(me(&mut laptop).await["signed_in"], false);
+
+    // Signed out: the page and its forms send the browser home.
+    let page = laptop.get("/settings/sessions").await;
+    assert_eq!(page.status, 303);
+    assert_eq!(page.header("location"), Some("/"));
+    let post = laptop
+        .post_form("/settings/sessions/revoke-others", "")
+        .await;
+    assert_eq!(post.status, 303);
+    assert_eq!(post.header("location"), Some("/"));
 }
 
 #[tokio::test]
