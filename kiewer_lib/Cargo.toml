@@ -13,13 +13,29 @@ workspace = true
 askama = { version = "0.14", default-features = false, features = ["derive", "std"] }
 async-trait = "0.1"
 # http1 only: Fastly and Cloud Run's front end speak HTTP/1.1 to the
-# container; the rest of axum's defaults (json, form, query) come in with
-# the handlers that need them.
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+# container. form: the handle and sign-out forms; json: /api/me; query:
+# the OAuth callback's code and state.
+axum = { version = "0.8", default-features = false, features = ["form", "http1", "json", "query", "tokio"] }
+# cookie: the session and OAuth-state cookie jar. Neither signed nor
+# private: the session cookie is an opaque random id and the state cookie
+# is compared with the provider's echo, so neither carries a claim.
+axum-extra = { version = "0.12", default-features = false, features = ["cookie"] }
 derive_more = { version = "2", features = ["display", "error", "from"] }
 flate2 = "1"
+# The authorization-code exchange with PKCE, over reqwest with rustls; the
+# reqwest line below is the same major so one client serves the token call
+# and the provider's user call.
+oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
+# 0.8, the major sqlx and oauth2 already bring: OsRng for session ids.
+rand = { version = "0.8", default-features = false, features = ["getrandom"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sha2 = "0.11"
 sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "tls-rustls"] }
+# The Duration type a cookie's Max-Age takes (the cookie crate's, which
+# axum-extra does not re-export). Nothing else: the clock is Postgres's.
+time = { version = "0.3", default-features = false }
 tokio = { version = "1", features = ["macros", "net", "rt", "signal", "time"] }
 tracing = "0.1"
 

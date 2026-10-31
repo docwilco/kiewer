@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use derive_more::{Display, Error, From};
 
+use crate::account::Handle;
+use crate::auth::Provider;
 use crate::blob::BlobHash;
 
 /// Every way the library fails. Variants are failure kinds with context,
@@ -54,6 +56,18 @@ pub enum Error {
     /// A page template did not render.
     #[display("template: {_0}")]
     Template(askama::Error),
+    /// Another account already has this handle.
+    #[display("handle {_0} is taken")]
+    #[from(ignore)]
+    HandleTaken(#[error(not(source))] Handle),
+    /// A sign-in provider refused the exchange or answered without what
+    /// the flow needs.
+    #[display("{provider} sign-in: {reason}")]
+    #[from(ignore)]
+    OAuth { provider: Provider, reason: String },
+    /// An HTTP call to a provider or another service failed.
+    #[display("http: {_0}")]
+    Http(reqwest::Error),
     /// A store that failed for a reason of its own (a test double, a
     /// remote service).
     #[display("{reason}")]
@@ -82,17 +96,20 @@ pub enum Exit {
     Template = 7,
     /// A failure with no better kind.
     Failed = 8,
+    /// A sign-in provider or another service over HTTP.
+    Upstream = 9,
 }
 
 impl Exit {
     /// Every kind, in code order.
-    pub const ALL: [Exit; 6] = [
+    pub const ALL: [Exit; 7] = [
         Exit::Io,
         Exit::Blob,
         Exit::Config,
         Exit::Db,
         Exit::Template,
         Exit::Failed,
+        Exit::Upstream,
     ];
 
     /// The codes never assigned: 0 (success), 1 and 2 (the shell's and a
@@ -118,6 +135,7 @@ impl Exit {
             Exit::Db => "Postgres, including migrations",
             Exit::Template => "a page did not render",
             Exit::Failed => "a failure with no better kind",
+            Exit::Upstream => "a sign-in provider or another service over HTTP",
         }
     }
 
@@ -146,7 +164,8 @@ impl Error {
             Error::Env { .. } => Exit::Config,
             Error::Db(_) | Error::Migrate(_) => Exit::Db,
             Error::Template(_) => Exit::Template,
-            Error::Failed { .. } => Exit::Failed,
+            Error::Failed { .. } | Error::HandleTaken(_) => Exit::Failed,
+            Error::OAuth { .. } | Error::Http(_) => Exit::Upstream,
         }
     }
 }

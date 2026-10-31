@@ -43,6 +43,7 @@ The executable's non-zero exits, each a kind of `kiewer_lib::error::Error`
 | 6 | Db | Postgres, including migrations |
 | 7 | Template | a page did not render |
 | 8 | Failed | a failure with no better kind |
+| 9 | Upstream | a sign-in provider or another service over HTTP |
 
 ## Infrastructure
 
