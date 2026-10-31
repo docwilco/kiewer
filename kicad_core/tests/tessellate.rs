@@ -320,8 +320,61 @@ fn the_outline_is_its_strokes_and_its_bounds_are_the_board() {
         0.02,
         "outline area",
     );
-    let bounds = Tessellator::outline_bounds(&board).expect("an outline");
+    let bounds = tessellator.outline_bounds(&board).expect("an outline");
     assert_bounds_eq(bounds, (0.0, 0.0), (20.0, 10.0));
+}
+
+#[test]
+fn a_footprint_edge_cut_joins_the_outline_in_its_frame() {
+    // A 20 by 10 board whose connector footprint, at (10, 10) turned 90
+    // degrees, carries a slot edge from (0, 0) to (5, 0) in its frame: on
+    // the board that runs up the screen, from (10, 10) to (10, 5).
+    let with_slot = board(
+        r#"(gr_rect (start 0 0) (end 20 10) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+           (footprint "J" (layer "F.Cu") (at 10 10 90)
+             (fp_line (start 0 0) (end 5 0) (stroke (width 0.1) (type default)) (layer "Edge.Cuts")))"#,
+    );
+    let tessellator = Tessellator::new(TOLERANCE);
+    let mesh = tessellator.outline(&with_slot);
+    assert!(
+        mesh.covers(Point { x: 10.0, y: 7.5 }),
+        "the slot edge is stroked"
+    );
+    assert_bounds_eq(
+        tessellator.outline_bounds(&with_slot).expect("an outline"),
+        (0.0, 0.0),
+        (20.0, 10.0),
+    );
+    let only_board = board(
+        r#"(footprint "J" (layer "F.Cu") (at 10 10 90)
+             (fp_line (start 0 0) (end 5 0) (stroke (width 0.1) (type default)) (layer "Edge.Cuts")))"#,
+    );
+    assert_bounds_eq(
+        tessellator
+            .outline_bounds(&only_board)
+            .expect("the footprint's edge"),
+        (10.0, 5.0),
+        (10.0, 10.0),
+    );
+}
+
+#[test]
+fn a_custom_pad_primitive_wound_the_other_way_still_adds_copper() {
+    // The primitive is listed clockwise on the screen (the opposite of
+    // the generated anchor) and covers the anchor: the two must add up,
+    // not cancel.
+    let board = board(
+        r#"(footprint "X" (layer "F.Cu") (at 0 0)
+             (pad "1" smd custom (at 10 10) (size 0.5 0.5) (layers "F.Cu") (net "GND")
+               (options (clearance outline) (anchor circle))
+               (primitives (gr_poly (pts (xy -0.5 -0.5) (xy -0.5 0.5) (xy 0.5 0.5) (xy 0.5 -0.5)) (width 0) (fill yes)))))"#,
+    );
+    let mesh = f_cu(&board);
+    assert!(
+        mesh.covers(Point { x: 10.0, y: 10.0 }),
+        "the anchor is still copper"
+    );
+    assert_close(mesh.area(), 1.0, 0.01, "the square, anchor inside it");
 }
 
 /// The arc's extremes are computed points, so equal to within rounding.
@@ -340,13 +393,15 @@ fn assert_bounds_eq(bounds: Bounds, min: (f64, f64), max: (f64, f64)) {
 fn a_board_without_an_outline_has_no_outline_bounds() {
     let board =
         board(r#"(segment (start 10 20) (end 14 20) (width 0.5) (layer "F.Cu") (net "GND"))"#);
-    assert_eq!(Tessellator::outline_bounds(&board), None);
+    assert_eq!(Tessellator::new(TOLERANCE).outline_bounds(&board), None);
 }
 
 #[test]
 fn the_hand_off_board_tessellates_within_its_outline() {
     let board = hand_off_board();
-    let bounds = Tessellator::outline_bounds(board).expect("the board has an outline");
+    let bounds = Tessellator::new(TOLERANCE)
+        .outline_bounds(board)
+        .expect("the board has an outline");
     // The hand-off README: one viewBox of 111.9886 by 57.9882 mm.
     assert_close(bounds.width(), 111.9886, 1e-3, "outline width");
     assert_close(bounds.height(), 57.9882, 1e-3, "outline height");

@@ -8,6 +8,7 @@
 //! a device, a format and a texture view to draw into.
 
 use bytemuck::{Pod, Zeroable};
+use derive_more::Display;
 use wgpu::util::DeviceExt as _;
 
 use crate::camera::View;
@@ -35,6 +36,15 @@ pub fn device_descriptor() -> wgpu::DeviceDescriptor<'static> {
     }
 }
 
+/// Which API a viewer draws with, for the page and the beacon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
+pub enum Backend {
+    #[display("webgpu")]
+    WebGpu,
+    #[display("webgl2")]
+    WebGl2,
+}
+
 /// Samples per pixel when the target format allows it: the edges of
 /// tracks and pads without a shimmer, at the cost of a four times larger
 /// render target.
@@ -55,23 +65,6 @@ impl Vertex {
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
     };
-}
-
-/// The camera uniform as the shader declares it.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
-struct ViewUniform {
-    center: [f32; 2],
-    scale: [f32; 2],
-}
-
-impl From<View> for ViewUniform {
-    fn from(view: View) -> Self {
-        Self {
-            center: view.center,
-            scale: view.scale,
-        }
-    }
 }
 
 /// A colour as the page names it (`#2b2b2b`), converted for the target.
@@ -166,7 +159,7 @@ impl Renderer {
         });
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("view"),
-            contents: bytemuck::bytes_of(&ViewUniform {
+            contents: bytemuck::bytes_of(&View {
                 center: [0.0, 0.0],
                 scale: [1.0, 1.0],
             }),
@@ -231,10 +224,10 @@ impl Renderer {
         }
     }
 
-    /// The format this renderer draws into.
+    /// Samples per pixel the frames are drawn with.
     #[must_use]
-    pub fn format(&self) -> wgpu::TextureFormat {
-        self.format
+    pub fn sample_count(&self) -> u32 {
+        self.sample_count
     }
 
     /// Replace the geometry: `vertices` and `indices` in threes.
@@ -271,11 +264,7 @@ impl Renderer {
         view: View,
         clear: wgpu::Color,
     ) {
-        queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&ViewUniform::from(view)),
-        );
+        queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&view));
         let msaa_view = (self.sample_count > 1).then(|| self.msaa_view(device, size));
         let (attachment, resolve_target) = match &msaa_view {
             Some(msaa) => (msaa, Some(target)),
@@ -372,7 +361,7 @@ mod tests {
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::empty(),
         );
-        let info = validator
+        validator
             .validate(&module)
             .expect("the shader validates with no capabilities beyond the baseline");
         let entry_points: Vec<&str> = module
@@ -381,14 +370,13 @@ mod tests {
             .map(|entry| entry.name.as_str())
             .collect();
         assert_eq!(entry_points, ["vs_main", "fs_main"]);
-        // The vertex layout and the shader agree on the attributes.
+        // The vertex stage takes the one input struct the layout fills.
         let vertex = module
             .entry_points
             .iter()
             .find(|entry| entry.name == "vs_main")
             .expect("vs_main");
         assert_eq!(vertex.function.arguments.len(), 1);
-        drop(info);
     }
 
     #[test]
@@ -396,11 +384,7 @@ mod tests {
         assert_eq!(Vertex::LAYOUT.array_stride, 24);
         assert_eq!(Vertex::LAYOUT.attributes.len(), 2);
         assert_eq!(Vertex::LAYOUT.attributes[1].offset, 8);
-        assert_eq!(
-            std::mem::size_of::<ViewUniform>(),
-            16,
-            "one 16-byte uniform row"
-        );
+        assert_eq!(std::mem::size_of::<View>(), 16, "one 16-byte uniform row");
     }
 
     #[test]

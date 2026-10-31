@@ -7,8 +7,7 @@ A site for uploading and sharing KiCad designs, rendered in the browser. The des
 One-time, after cloning: `git config core.hooksPath .githooks`, then for
 the viewer's browser build `rustup target add wasm32-unknown-unknown` and
 `cargo install wasm-bindgen-cli --version "$(scripts/wasm-bindgen-version.sh)" --locked`
-(the tool must be the version Cargo.lock names for the `wasm-bindgen`
-crate; the script prints it, and CI installs the same way). The hook runs
+(the version Cargo.lock names; CI installs the same way). The hook runs
 `scripts/checks.sh` (the stages are listed in its usage line) before every
 commit against a snapshot of the index, so unstaged edits never reach the
 checks and the working tree stays usable while they run; it needs `rsync`,

@@ -55,6 +55,7 @@ pub const NOT_BUILT: &str =
 struct Page {
     build: String,
     embedded: bool,
+    not_built: &'static str,
     board_path: &'static str,
 }
 
@@ -62,6 +63,7 @@ async fn page() -> Result<Html<String>> {
     let page = Page {
         build: crate::build::line(),
         embedded: embedded(),
+        not_built: NOT_BUILT.trim_end(),
         board_path: BOARD_PATH,
     };
     Ok(Html(page.render()?))

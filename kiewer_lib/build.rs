@@ -20,12 +20,12 @@ fn main() {
     for (from, to) in [("TARGET", "KIEWER_TARGET"), ("PROFILE", "KIEWER_PROFILE")] {
         let value =
             env::var(from).unwrap_or_else(|_| panic!("cargo sets {from} for a build script"));
-        println!("cargo:rustc-env={to}={value}");
+        println!("cargo::rustc-env={to}={value}");
     }
-    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo::rerun-if-changed=build.rs");
 
     println!("cargo::rustc-check-cfg=cfg(kiewer_viewer_embedded)");
-    println!("cargo:rerun-if-env-changed=KIEWER_VIEWER_REQUIRED");
+    println!("cargo::rerun-if-env-changed=KIEWER_VIEWER_REQUIRED");
     let manifest = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR")
             .expect("cargo sets CARGO_MANIFEST_DIR for a build script"),
@@ -35,11 +35,11 @@ fn main() {
     let script = dist.join("kiewer_viewer.js");
     let wasm = dist.join("kiewer_viewer_bg.wasm");
     if script.is_file() && wasm.is_file() {
-        println!("cargo:rustc-cfg=kiewer_viewer_embedded");
-        println!("cargo:rustc-env=KIEWER_VIEWER_JS={}", script.display());
-        println!("cargo:rustc-env=KIEWER_VIEWER_WASM={}", wasm.display());
-        println!("cargo:rerun-if-changed={}", script.display());
-        println!("cargo:rerun-if-changed={}", wasm.display());
+        println!("cargo::rustc-cfg=kiewer_viewer_embedded");
+        println!("cargo::rustc-env=KIEWER_VIEWER_JS={}", script.display());
+        println!("cargo::rustc-env=KIEWER_VIEWER_WASM={}", wasm.display());
+        println!("cargo::rerun-if-changed={}", script.display());
+        println!("cargo::rerun-if-changed={}", wasm.display());
     } else {
         assert!(
             env::var_os("KIEWER_VIEWER_REQUIRED").is_none_or(|value| value != "1"),
@@ -49,6 +49,6 @@ fn main() {
         );
         // The whole viewer crate's directory, so the files' appearance
         // under dist/ reruns this script and the embed switches on.
-        println!("cargo:rerun-if-changed={}", viewer.display());
+        println!("cargo::rerun-if-changed={}", viewer.display());
     }
 }

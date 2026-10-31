@@ -25,7 +25,7 @@ pub mod palette {
     pub const F_CU: Rgb = Rgb(0xc8, 0x34, 0x34);
 }
 
-/// The outline layer's name and the copper layer the tracer shows.
+/// The one copper layer the tracer shows.
 pub const COPPER_LAYER: &str = "F.Cu";
 
 /// Triangles ready for upload, with where they came from.
@@ -53,7 +53,8 @@ impl Scene {
             .layer_named(COPPER_LAYER)
             .map(|layer| tessellator.copper(board, layer))
             .unwrap_or_default();
-        let bounds = Tessellator::outline_bounds(board)
+        let bounds = tessellator
+            .outline_bounds(board)
             .or_else(|| outline.bounds())
             .or_else(|| copper.bounds())?;
         let origin = bounds.center();

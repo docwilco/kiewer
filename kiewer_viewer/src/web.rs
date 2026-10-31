@@ -4,35 +4,20 @@
 //! hands each gesture here in device pixels; the camera, the parse and
 //! the tessellation are Rust.
 //!
-//! WebGPU is tried first, without touching the canvas: an adapter can be
-//! asked for before any context exists, so a browser that has
-//! `navigator.gpu` but no adapter leaves the canvas free for WebGL2. A
-//! failure on both is an error the page shows; nothing here panics on a
-//! missing API.
+//! WebGPU is tried first, and its adapter and device are asked for before
+//! anything touches the canvas: a canvas keeps the first context it is
+//! given, so a WebGPU failure at any step before the surface leaves it
+//! free for a WebGL2 context. A failure on both is an [`Error`] the page
+//! shows; nothing here panics on a missing API.
 
 use kicad_core::model::Point;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
-use crate::camera::{Camera, Size};
-use crate::render::{MSAA_SAMPLES, Renderer, device_descriptor};
+use crate::camera::{Camera, DOUBLE_CLICK, Size};
+use crate::error::{Error, Result};
+use crate::render::{Backend, MSAA_SAMPLES, Renderer, device_descriptor};
 use crate::scene::{Scene, palette};
-
-/// Which backend a viewer ended up on, for the page and the beacon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backend {
-    WebGpu,
-    WebGl2,
-}
-
-impl Backend {
-    fn name(self) -> &'static str {
-        match self {
-            Backend::WebGpu => "webgpu",
-            Backend::WebGl2 => "webgl2",
-        }
-    }
-}
 
 /// The viewer over one canvas.
 #[wasm_bindgen]
@@ -45,67 +30,103 @@ pub struct Viewer {
     camera: Camera,
     scene: Option<Scene>,
     backend: Backend,
-    samples: u32,
 }
 
-/// What the browser gave: the surface on the canvas, the adapter behind
-/// it and which backend that is.
+/// What the browser gave: the surface on the canvas, the adapter and the
+/// device behind it, and which backend that is.
 struct Gpu {
     surface: wgpu::Surface<'static>,
     adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
     backend: Backend,
 }
 
-async fn request_gpu(canvas: HtmlCanvasElement) -> Result<Gpu, String> {
-    let mut reasons = Vec::new();
-    if wgpu::util::is_browser_webgpu_supported().await {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::BROWSER_WEBGPU,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        match instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-        {
-            Ok(adapter) => {
-                let surface = instance
-                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-                    .map_err(|error| format!("WebGPU: no surface on the canvas: {error}"))?;
-                return Ok(Gpu {
-                    surface,
-                    adapter,
-                    backend: Backend::WebGpu,
-                });
-            }
-            Err(error) => reasons.push(format!("WebGPU: no adapter: {error}")),
-        }
-    } else {
-        reasons.push("WebGPU: navigator.gpu is not available".to_owned());
-    }
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::GL,
+fn instance(backends: wgpu::Backends) -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
+    })
+}
+
+/// WebGPU, or `None` with the reason added to `reasons`. The canvas is
+/// touched last, once the adapter and the device are in hand.
+async fn webgpu(canvas: &HtmlCanvasElement, reasons: &mut Vec<String>) -> Option<Gpu> {
+    if !wgpu::util::is_browser_webgpu_supported().await {
+        reasons.push("WebGPU: navigator.gpu is not available".to_owned());
+        return None;
+    }
+    let instance = instance(wgpu::Backends::BROWSER_WEBGPU);
+    let adapter = match instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+    {
+        Ok(adapter) => adapter,
+        Err(error) => {
+            reasons.push(format!("WebGPU: no adapter: {error}"));
+            return None;
+        }
+    };
+    let (device, queue) = match adapter.request_device(&device_descriptor()).await {
+        Ok(pair) => pair,
+        Err(error) => {
+            reasons.push(format!("WebGPU: no device: {error}"));
+            return None;
+        }
+    };
+    let surface = match instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone())) {
+        Ok(surface) => surface,
+        Err(error) => {
+            reasons.push(format!("WebGPU: no surface on the canvas: {error}"));
+            return None;
+        }
+    };
+    Some(Gpu {
+        surface,
+        adapter,
+        device,
+        queue,
+        backend: Backend::WebGpu,
+    })
+}
+
+/// WebGL2, the last resort: the context has to exist before its adapter
+/// can be asked for, so the surface comes first here.
+async fn webgl2(canvas: HtmlCanvasElement, mut reasons: Vec<String>) -> Result<Gpu> {
+    let backend = Backend::WebGl2;
+    let instance = instance(wgpu::Backends::GL);
     let surface = instance
         .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-        .map_err(|error| {
-            format!(
-                "{}; WebGL2: no context on the canvas: {error}",
-                reasons.join("; ")
-            )
-        })?;
+        .map_err(|source| Error::Surface { backend, source })?;
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(&surface),
             ..Default::default()
         })
         .await
-        .map_err(|error| format!("{}; WebGL2: no adapter: {error}", reasons.join("; ")))?;
+        .map_err(|error| {
+            reasons.push(format!("WebGL2: no adapter: {error}"));
+            Error::NoAdapter { reasons }
+        })?;
+    let (device, queue) = adapter
+        .request_device(&device_descriptor())
+        .await
+        .map_err(|source| Error::Device { backend, source })?;
     Ok(Gpu {
         surface,
         adapter,
-        backend: Backend::WebGl2,
+        device,
+        queue,
+        backend,
     })
+}
+
+async fn request_gpu(canvas: HtmlCanvasElement) -> Result<Gpu> {
+    let mut reasons = Vec::new();
+    if let Some(gpu) = webgpu(&canvas, &mut reasons).await {
+        return Ok(gpu);
+    }
+    webgl2(canvas, reasons).await
 }
 
 #[wasm_bindgen]
@@ -117,24 +138,17 @@ impl Viewer {
         canvas: HtmlCanvasElement,
         width: u32,
         height: u32,
-    ) -> Result<Viewer, JsError> {
+    ) -> core::result::Result<Viewer, JsError> {
         console_error_panic_hook::set_once();
-        let gpu = request_gpu(canvas)
-            .await
-            .map_err(|reason| JsError::new(&reason))?;
-        let (device, queue) = gpu
-            .adapter
-            .request_device(&device_descriptor())
-            .await
-            .map_err(|error| {
-                JsError::new(&format!("{}: no device: {error}", gpu.backend.name()))
-            })?;
+        let gpu = request_gpu(canvas).await?;
         let mut config = gpu
             .surface
             .get_default_config(&gpu.adapter, width.max(1), height.max(1))
-            .ok_or_else(|| JsError::new("the adapter does not draw to this canvas"))?;
+            .ok_or(Error::NoSurfaceConfig {
+                backend: gpu.backend,
+            })?;
         config.present_mode = wgpu::PresentMode::Fifo;
-        gpu.surface.configure(&device, &config);
+        gpu.surface.configure(&gpu.device, &config);
         let samples = if gpu
             .adapter
             .get_texture_format_features(config.format)
@@ -145,48 +159,42 @@ impl Viewer {
         } else {
             1
         };
-        let renderer = Renderer::new(&device, config.format, samples);
+        let renderer = Renderer::new(&gpu.device, config.format, samples);
         let camera = Camera::new(Size {
             width: f64::from(config.width),
             height: f64::from(config.height),
         });
         Ok(Viewer {
-            device,
-            queue,
+            device: gpu.device,
+            queue: gpu.queue,
             surface: gpu.surface,
             config,
             renderer,
             camera,
             scene: None,
             backend: gpu.backend,
-            samples,
         })
     }
 
     /// `webgpu` or `webgl2`.
     #[must_use]
     pub fn backend(&self) -> String {
-        self.backend.name().to_owned()
+        self.backend.to_string()
     }
 
     /// Samples per pixel the frame is drawn with: 4 with multisampling, 1
     /// without.
     #[must_use]
     pub fn samples(&self) -> u32 {
-        self.samples
+        self.renderer.sample_count()
     }
 
     /// Parse a `.kicad_pcb` text, tessellate its outline and front
     /// copper, upload them and fit the view to the board. A parse error
     /// is the error's message with its line.
-    pub fn load_board(&mut self, text: &str) -> Result<(), JsError> {
-        let board =
-            kicad_core::parse_board(text).map_err(|error| JsError::new(&error.to_string()))?;
-        let Some(scene) = Scene::build(&board, self.config.format) else {
-            return Err(JsError::new(
-                "the board has no outline and no front copper to draw",
-            ));
-        };
+    pub fn load_board(&mut self, text: &str) -> core::result::Result<(), JsError> {
+        let board = kicad_core::parse_board(text).map_err(Error::from)?;
+        let scene = Scene::build(&board, self.config.format).ok_or(Error::NothingToDraw)?;
         self.renderer
             .upload(&self.device, &scene.vertices, &scene.indices);
         self.camera.fit(scene.bounds);
@@ -214,10 +222,15 @@ impl Viewer {
         self.camera.wheel(Point { x, y }, delta);
     }
 
-    /// Multiply the scale by `factor` about the pointer: a double click,
-    /// a Safari gesture.
+    /// Multiply the scale by `factor` about the pointer: a Safari pinch
+    /// gesture's running scale.
     pub fn zoom_at(&mut self, x: f64, y: f64, factor: f64) {
         self.camera.zoom_at(Point { x, y }, factor);
+    }
+
+    /// A double click: one [`DOUBLE_CLICK`] zoom about the pointer.
+    pub fn double_click(&mut self, x: f64, y: f64) {
+        self.camera.zoom_at(Point { x, y }, DOUBLE_CLICK);
     }
 
     /// `steps` presses of plus (positive) or minus, at the view's centre.
@@ -270,7 +283,7 @@ impl Viewer {
 
     /// Draw a frame. A lost or outdated surface is reconfigured and the
     /// frame skipped; the next call draws.
-    pub fn render(&mut self) -> Result<(), JsError> {
+    pub fn render(&mut self) -> core::result::Result<(), JsError> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -282,7 +295,10 @@ impl Viewer {
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Validation => {
-                return Err(JsError::new("the surface refused a frame"));
+                return Err(Error::FrameRefused {
+                    backend: self.backend,
+                }
+                .into());
             }
         };
         let target = frame

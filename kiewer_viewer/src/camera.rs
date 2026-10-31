@@ -6,11 +6,15 @@
 //! y down, as the board's own frame is; so a world point is
 //! `centre + (screen - viewport / 2) / scale` with no flip.
 
+use bytemuck::{Pod, Zeroable};
 use kicad_core::geometry::Bounds;
 use kicad_core::model::Point;
 
-/// The zoom factor of one `+` or `-` key press, and of a double click.
+/// The zoom factor of one `+` or `-` key press.
 pub const STEP: f64 = 1.3;
+
+/// The zoom factor of a double click, at the pointer.
+pub const DOUBLE_CLICK: f64 = 2.0;
 
 /// Wheel pixels per doubling of the scale: a mouse notch of 100 pixels is
 /// 2^(1/3), a smooth trackpad scroll zooms in proportion.
@@ -42,10 +46,11 @@ pub struct Size {
     pub height: f64,
 }
 
-/// What the vertex shader needs: the centre to subtract (relative to the
-/// scene's origin) and the factors that take millimetres to clip space,
-/// y flipped since clip space points up.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// What the vertex shader needs, laid out as its uniform: the centre to
+/// subtract (relative to the scene's origin) and the factors that take
+/// millimetres to clip space, y flipped since clip space points up.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct View {
     pub center: [f32; 2],
     pub scale: [f32; 2],
@@ -73,12 +78,6 @@ impl Camera {
     #[must_use]
     pub fn scale(&self) -> f64 {
         self.scale
-    }
-
-    /// The viewport in device pixels.
-    #[must_use]
-    pub fn viewport(&self) -> Size {
-        self.viewport
     }
 
     /// The viewport changed size: the centre and the scale stay, so the
@@ -348,7 +347,7 @@ mod tests {
         fn zoom_at(&mut self, screen: Point, factor: f64) {
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "the baseline under test is the f32 camera itself"
+                reason = "screen coordinates are whole pixels under 2^24 and the factor is 1.005, both exact in f32"
             )]
             let (sx, sy, factor) = (screen.x as f32, screen.y as f32, factor as f32);
             #[expect(
@@ -375,7 +374,7 @@ mod tests {
         fn world_to_screen(&self, world: Point) -> Point {
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "the baseline under test is the f32 camera itself"
+                reason = "a world point is millimetres in the hundreds, which f32 holds to 1e-5 mm, below what this measurement resolves"
             )]
             let (wx, wy, half_w, half_h) = (
                 world.x as f32,
@@ -395,7 +394,7 @@ mod tests {
         let mut camera = fitted();
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "the baseline under test is the f32 camera itself"
+            reason = "the fitted centre and scale are millimetres in the hundreds and pixels per millimetre near 13, which f32 holds to 1e-5"
         )]
         let mut baseline = F32Camera {
             center: [camera.center().x as f32, camera.center().y as f32],

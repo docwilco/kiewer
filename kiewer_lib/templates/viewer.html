@@ -34,7 +34,7 @@
 </div>
 <p hidden><small>{{ build }}</small></p>
 {% if !embedded %}
-<p id="not-built">the viewer is not built into this server: run scripts/build-viewer.sh, then build again</p>
+<p id="not-built">{{ not_built }}</p>
 {% endif %}
 <script type="module">
 // The page owns the listeners and hands each gesture to the wasm in
@@ -47,6 +47,7 @@ const status = document.getElementById("status");
 const errorBox = document.getElementById("error");
 let viewer = null;
 let frame = 0;
+let gesturing = false;
 
 function fail(message) {
   errorBox.textContent = String(message);
@@ -86,7 +87,7 @@ canvas.addEventListener("wheel", function (e) {
   const dx = e.deltaX * unit, dy = e.deltaY * unit;
   const notch = e.deltaMode !== 0 || (Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 40);
   if (e.ctrlKey && !notch) {
-    viewer.wheel(x, y, dy * PINCH_GAIN);
+    if (!gesturing) viewer.wheel(x, y, dy * PINCH_GAIN);
   } else if (e.ctrlKey) {
     viewer.pan(x, y, x - dy, y);
   } else if (e.shiftKey) {
@@ -131,13 +132,16 @@ canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
 canvas.addEventListener("dblclick", function (e) {
   if (!viewer) return;
   const [x, y] = point(e);
-  viewer.zoom_at(x, y, 2);
+  viewer.double_click(x, y);
   schedule();
 });
 
 // Safari reports a trackpad pinch as gesture events with a running scale.
+// While one is under way, a wheel with ctrlKey is the same pinch seen
+// twice and is dropped (the wheel handler checks `gesturing`).
 let gestureScale = 1;
-canvas.addEventListener("gesturestart", function (e) { e.preventDefault(); gestureScale = 1; });
+canvas.addEventListener("gesturestart", function (e) { e.preventDefault(); gestureScale = 1; gesturing = true; });
+canvas.addEventListener("gestureend", function (e) { e.preventDefault(); gesturing = false; });
 canvas.addEventListener("gesturechange", function (e) {
   e.preventDefault();
   if (!viewer || !e.scale) return;

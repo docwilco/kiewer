@@ -19,6 +19,7 @@ kicad_core = { path = "../kicad_core" }
 # Vertex and uniform structs as the bytes the GPU reads; derive for
 # Pod and Zeroable on them.
 bytemuck = { version = "1", features = ["derive"] }
+derive_more = { version = "2", default-features = false, features = ["display", "error", "from"] }
 wasm-bindgen = "0.2"
 # wgpu (ADR 0001) with no native backend yet: natively this crate is its
 # tests and, later, the thumbnail renderer (#7), which adds one. wgsl is
@@ -33,7 +34,7 @@ wgpu = { version = "30", default-features = false, features = ["std", "wgsl"] }
 console_error_panic_hook = "0.1"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
-wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "webgpu", "webgl"] }
+wgpu = { version = "30", default-features = false, features = ["webgpu", "webgl"] }
 
 [dev-dependencies]
 # The shader is validated natively, where no GPU is: naga's WGSL front

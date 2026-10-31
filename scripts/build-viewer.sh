@@ -36,10 +36,13 @@ if [ "$have" != "$wanted" ]; then
 fi
 
 target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+# A named package, not the workspace: the server does not build for
+# wasm32. The feature-unification concern behind "never -p"
+# (rust-conventions) is about duplicate artifacts under one target
+# directory; a --target build has a directory of its own.
 cargo build --target wasm32-unknown-unknown -p kiewer_viewer --lib "${profile_flag[@]}"
 mkdir -p "$out_dir"
 # --target web: an ES module with a default export that fetches the wasm
 # beside it, which the viewer page imports; no TypeScript, nothing reads it.
 wasm-bindgen --target web --no-typescript --out-dir "$out_dir" \
   "$target_dir/wasm32-unknown-unknown/$profile/kiewer_viewer.wasm"
-ls -l "$out_dir"

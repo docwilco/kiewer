@@ -17,7 +17,8 @@ use lyon_tessellation::{
 
 use crate::geometry::{Arc, Bounds, Transform, segments_for};
 use crate::model::{
-    Board, Drawing, Drill, Graphic, LayerId, Pad, PadKind, PadShape, Point, Shape, Size, Via, Zone,
+    Board, Drawing, Drill, EDGE_CUTS, LayerId, Pad, PadKind, PadShape, Point, Shape, Size, Via,
+    Zone,
 };
 
 /// Triangles: positions in millimetres, indices in threes.
@@ -34,21 +35,6 @@ impl Mesh {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.indices.is_empty()
-    }
-
-    /// Add `other`'s triangles after this mesh's.
-    ///
-    /// # Panics
-    ///
-    /// When the joined mesh would hold 2^32 vertices or more, beyond what
-    /// a `u32` index reaches: a board's copper is thousands of times
-    /// smaller.
-    pub fn append(&mut self, other: Mesh) {
-        let base =
-            u32::try_from(self.positions.len()).expect("a mesh has fewer than 2^32 vertices");
-        self.positions.extend(other.positions);
-        self.indices
-            .extend(other.indices.into_iter().map(|index| index + base));
     }
 
     /// The corners of every triangle, in order.
@@ -163,14 +149,16 @@ impl Tessellator {
         builder.finish()
     }
 
-    /// The board outline: every `Edge.Cuts` graphic stroked at its width
-    /// (at least 0.05 mm, KiCad's default edge width) with round ends.
+    /// The board outline: every `Edge.Cuts` graphic, the board's and the
+    /// footprints' (a connector's slot, in the footprint's frame), stroked
+    /// at its width (at least 0.05 mm, KiCad's default edge width) with
+    /// round ends.
     #[must_use]
     pub fn outline(&self, board: &Board) -> Mesh {
         let mut builder = MeshBuilder::new(self.tolerance);
-        for graphic in board.outline() {
-            let width = graphic.drawing.width.max(MIN_OUTLINE_WIDTH);
-            let (points, closed) = outline_points(&graphic.drawing, self.tolerance);
+        for drawing in outline_drawings(board) {
+            let width = drawing.width.max(MIN_OUTLINE_WIDTH);
+            let (points, closed) = outline_points(&drawing, self.tolerance);
             builder.stroke(&points, width, closed);
         }
         builder.finish()
@@ -179,11 +167,76 @@ impl Tessellator {
     /// The box around the outline's geometry (the centre lines, not their
     /// strokes), or `None` for a board without `Edge.Cuts` graphics.
     #[must_use]
-    pub fn outline_bounds(board: &Board) -> Option<Bounds> {
-        board
-            .outline()
-            .filter_map(graphic_bounds)
+    pub fn outline_bounds(&self, board: &Board) -> Option<Bounds> {
+        outline_drawings(board)
+            .filter_map(|drawing| graphic_bounds(&drawing, self.tolerance))
             .reduce(Bounds::union)
+    }
+}
+
+/// Every `Edge.Cuts` drawing on the board: the board's own as written,
+/// a footprint's carried into the board's frame.
+fn outline_drawings(board: &Board) -> impl Iterator<Item = Drawing> + '_ {
+    let edge = board.layer_named(EDGE_CUTS);
+    let own = board.outline().map(|graphic| graphic.drawing.clone());
+    let placed = board.footprints.iter().flat_map(move |footprint| {
+        let frame = Transform::new(footprint.at, footprint.rotation);
+        footprint
+            .graphics
+            .iter()
+            .filter(move |graphic| Some(graphic.layer) == edge)
+            .map(move |graphic| transformed(&graphic.drawing, &frame))
+    });
+    own.chain(placed)
+}
+
+/// `drawing` with its points carried through `frame`. A rectangle turns
+/// into the polygon of its corners, since a turned rectangle is no
+/// longer axis-aligned.
+fn transformed(drawing: &Drawing, frame: &Transform) -> Drawing {
+    let f = |p: &Point| frame.apply(*p);
+    let shape = match &drawing.shape {
+        Shape::Line { start, end } => Shape::Line {
+            start: f(start),
+            end: f(end),
+        },
+        Shape::Arc { start, mid, end } => Shape::Arc {
+            start: f(start),
+            mid: f(mid),
+            end: f(end),
+        },
+        Shape::Circle { center, end } => Shape::Circle {
+            center: f(center),
+            end: f(end),
+        },
+        Shape::Rect { start, end } => Shape::Polygon {
+            points: [
+                *start,
+                Point {
+                    x: end.x,
+                    y: start.y,
+                },
+                *end,
+                Point {
+                    x: start.x,
+                    y: end.y,
+                },
+            ]
+            .iter()
+            .map(f)
+            .collect(),
+        },
+        Shape::Polygon { points } => Shape::Polygon {
+            points: points.iter().map(f).collect(),
+        },
+        Shape::Curve { points } => Shape::Curve {
+            points: points.iter().map(f).collect(),
+        },
+    };
+    Drawing {
+        shape,
+        width: drawing.width,
+        filled: drawing.filled,
     }
 }
 
@@ -234,9 +287,10 @@ fn outline_points(drawing: &Drawing, tolerance: f64) -> (Vec<Point>, bool) {
     }
 }
 
-/// The box around an outline graphic's centre line.
-fn graphic_bounds(graphic: &Graphic) -> Option<Bounds> {
-    match &graphic.drawing.shape {
+/// The box around an outline drawing's centre line: exact for an arc and
+/// a circle, the flattened points (within `tolerance`) for a curve.
+fn graphic_bounds(drawing: &Drawing, tolerance: f64) -> Option<Bounds> {
+    match &drawing.shape {
         Shape::Arc { start, mid, end } => Some(match Arc::through(*start, *mid, *end) {
             Some(arc) => arc.bounds(),
             None => Bounds::of(*start).including(*end),
@@ -255,7 +309,7 @@ fn graphic_bounds(graphic: &Graphic) -> Option<Bounds> {
             })
         }
         Shape::Line { .. } | Shape::Rect { .. } | Shape::Polygon { .. } | Shape::Curve { .. } => {
-            let (points, _) = outline_points(&graphic.drawing, 0.01);
+            let (points, _) = outline_points(drawing, tolerance);
             Bounds::around(points)
         }
     }
@@ -341,9 +395,7 @@ fn rounded_rect(size: Size, radius: f64, tolerance: f64) -> Vec<Point> {
                 x: cx + radius * angle.cos(),
                 y: cy + radius * angle.sin(),
             };
-            if points.last().is_some_and(|last: &Point| {
-                (last.x - p.x).abs() < 1e-12 && (last.y - p.y).abs() < 1e-12
-            }) {
+            if points.last().is_some_and(|last| same_point(*last, p)) {
                 continue;
             }
             points.push(p);
@@ -352,13 +404,28 @@ fn rounded_rect(size: Size, radius: f64, tolerance: f64) -> Vec<Point> {
     // The last point of the fourth arc meets the first of the first arc.
     let closes = matches!(
         (points.first(), points.last()),
-        (Some(first), Some(last))
-            if (last.x - first.x).abs() < 1e-12 && (last.y - first.y).abs() < 1e-12
+        (Some(first), Some(last)) if same_point(*first, *last)
     );
     if closes {
         points.pop();
     }
     points
+}
+
+/// Whether two points coincide to within a picometre: a generator's
+/// repeated corner, never two distinct points of a board.
+fn same_point(a: Point, b: Point) -> bool {
+    (a.x - b.x).abs() < 1e-12 && (a.y - b.y).abs() < 1e-12
+}
+
+/// Twice the signed area of a polygon (the shoelace sum): positive when
+/// the points run in increasing angle in the file's frame.
+fn signed_area(polygon: &[Point]) -> f64 {
+    polygon
+        .iter()
+        .zip(polygon.iter().cycle().skip(1))
+        .map(|(a, b)| a.x * b.y - b.x * a.y)
+        .sum()
 }
 
 /// Accumulates fills and strokes into one mesh.
@@ -397,14 +464,16 @@ impl MeshBuilder {
 
     /// Fill `positives` with `holes` cut out: positives wound one way,
     /// holes the other, under the non-zero rule, so overlapping positives
-    /// stay filled and a hole in one of them stays open.
+    /// stay filled and a hole in one of them stays open. The winding is
+    /// imposed here, whatever way a polygon arrived (a custom pad's
+    /// primitive keeps the file's order), so no shape cancels another.
     fn fill(&mut self, positives: &[Vec<Point>], holes: &[Vec<Point>]) {
         let mut path = Path::builder();
         for polygon in positives {
-            add_polygon(&mut path, polygon, false);
+            add_polygon(&mut path, polygon, signed_area(polygon) < 0.0);
         }
         for polygon in holes {
-            add_polygon(&mut path, polygon, true);
+            add_polygon(&mut path, polygon, signed_area(polygon) > 0.0);
         }
         let path = path.build();
         let options =
