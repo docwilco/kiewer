@@ -6,10 +6,28 @@
 
 use kiewer_lib::Error;
 use kiewer_lib::account::{self, Handle};
-use kiewer_lib::auth::Provider;
+use kiewer_lib::auth::{Provider, ProviderUser};
 use kiewer_lib::session::{self, SessionId};
 use kiewer_test_support::db::{fresh, pool_from_env};
 use sqlx::PgPool;
+
+/// What a provider said about someone: `id` under the login `login`, no
+/// email.
+fn user(id: &str, login: &str) -> ProviderUser {
+    ProviderUser {
+        id: id.to_owned(),
+        login: login.to_owned(),
+        email: None,
+    }
+}
+
+/// The same, with an email the provider vouched for.
+fn user_with_email(id: &str, login: &str, email: &str) -> ProviderUser {
+    ProviderUser {
+        email: Some(email.to_owned()),
+        ..user(id, login)
+    }
+}
 
 #[tokio::test]
 async fn the_account_identity_and_session_tables_exist() {
@@ -33,13 +51,13 @@ async fn a_first_sign_in_makes_an_account_and_a_second_finds_it() {
         return;
     };
     let user_id = fresh("gh");
-    let first = account::sign_in(&db, Provider::GitHub, &user_id, "octocat")
+    let first = account::sign_in(&db, Provider::GitHub, &user(&user_id, "octocat"))
         .await
         .expect("a first sign-in");
     assert!(first.is_new, "the first sign-in makes the account");
     assert_eq!(first.handle, None, "no handle until the person picks one");
     assert_eq!(first.provider_login, "octocat");
-    let second = account::sign_in(&db, Provider::GitHub, &user_id, "octocat-renamed")
+    let second = account::sign_in(&db, Provider::GitHub, &user(&user_id, "octocat-renamed"))
         .await
         .expect("a second sign-in");
     assert!(!second.is_new);
@@ -48,11 +66,56 @@ async fn a_first_sign_in_makes_an_account_and_a_second_finds_it() {
         second.provider_login, "octocat-renamed",
         "the login the provider shows now is the one kept"
     );
-    // Two providers' identities are never merged by login or email.
-    let other = account::sign_in(&db, Provider::GitHub, &fresh("gh"), "octocat")
+    // Two identities are never merged by login.
+    let other = account::sign_in(&db, Provider::GitHub, &user(&fresh("gh"), "octocat"))
         .await
         .expect("another person with the same login");
     assert_ne!(other.account_id, first.account_id);
+}
+
+#[tokio::test]
+async fn two_accounts_sharing_an_email_stay_two_accounts() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let email = format!("{}@example.com", fresh("shared"));
+    let discord = account::sign_in(
+        &db,
+        Provider::Discord,
+        &user_with_email(&fresh("dc"), "nelly", &email),
+    )
+    .await
+    .expect("a first sign-in with Discord");
+    let google = account::sign_in(
+        &db,
+        Provider::Google,
+        &user_with_email(&fresh("sub"), "Nelly D", &email),
+    )
+    .await
+    .expect("a first sign-in with Google under the same email");
+    assert!(discord.is_new && google.is_new);
+    assert_ne!(
+        discord.account_id, google.account_id,
+        "an email never finds an account: linking is explicit, from settings"
+    );
+    // The same provider with another id and the same email: a third account.
+    let discord_again = account::sign_in(
+        &db,
+        Provider::Discord,
+        &user_with_email(&fresh("dc"), "nelly-alt", &email),
+    )
+    .await
+    .expect("another Discord user with the same email");
+    assert_ne!(discord_again.account_id, discord.account_id);
+    // The email is kept on each identity, for settings, and follows the
+    // provider's answer.
+    let kept: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT email FROM identity WHERE account_id = $1")
+            .bind(discord.account_id)
+            .fetch_all(&db)
+            .await
+            .expect("select");
+    assert_eq!(kept, [Some(email.clone())]);
 }
 
 #[tokio::test]
@@ -60,10 +123,10 @@ async fn a_handle_is_chosen_once_and_a_taken_one_is_refused() {
     let Some(db) = pool_from_env().await else {
         return;
     };
-    let alice = account::sign_in(&db, Provider::GitHub, &fresh("gh"), "alice")
+    let alice = account::sign_in(&db, Provider::GitHub, &user(&fresh("gh"), "alice"))
         .await
         .expect("sign in");
-    let bob = account::sign_in(&db, Provider::GitHub, &fresh("gh"), "bob")
+    let bob = account::sign_in(&db, Provider::GitHub, &user(&fresh("gh"), "bob"))
         .await
         .expect("sign in");
     let handle: Handle = fresh("alice").parse().expect("a valid handle");
@@ -77,7 +140,7 @@ async fn a_handle_is_chosen_once_and_a_taken_one_is_refused() {
         matches!(err, Error::HandleTaken(ref taken) if taken == &handle),
         "{err}"
     );
-    let again = account::sign_in(&db, Provider::GitHub, &fresh("gh"), "alice").await;
+    let again = account::sign_in(&db, Provider::GitHub, &user(&fresh("gh"), "alice")).await;
     assert!(again.is_ok(), "the refusal left the database usable");
     let other: Handle = fresh("alice").parse().expect("a valid handle");
     let err = account::choose_handle(&db, alice.account_id, &other)
@@ -91,7 +154,7 @@ async fn a_session_starts_is_found_and_ends() {
     let Some(db) = pool_from_env().await else {
         return;
     };
-    let signed_in = account::sign_in(&db, Provider::GitHub, &fresh("gh"), "carol")
+    let signed_in = account::sign_in(&db, Provider::GitHub, &user(&fresh("gh"), "carol"))
         .await
         .expect("sign in");
     let id = session::start(&db, signed_in.account_id)
@@ -159,7 +222,7 @@ async fn a_session_slides_its_expiry_when_used_after_a_day() {
     let Some(db) = pool_from_env().await else {
         return;
     };
-    let signed_in = account::sign_in(&db, Provider::GitHub, &fresh("gh"), "dave")
+    let signed_in = account::sign_in(&db, Provider::GitHub, &user(&fresh("gh"), "dave"))
         .await
         .expect("sign in");
     let id = session::start(&db, signed_in.account_id)
@@ -191,7 +254,7 @@ async fn an_expired_session_is_not_found() {
     let Some(db) = pool_from_env().await else {
         return;
     };
-    let signed_in = account::sign_in(&db, Provider::GitHub, &fresh("gh"), "erin")
+    let signed_in = account::sign_in(&db, Provider::GitHub, &user(&fresh("gh"), "erin"))
         .await
         .expect("sign in");
     let id = session::start(&db, signed_in.account_id)

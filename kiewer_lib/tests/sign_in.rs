@@ -1,7 +1,7 @@
-//! Sign-in over HTTP: `/api/me`, the GitHub flow against a fake GitHub on
-//! loopback (an axum server answering the authorize, token and user
-//! endpoints, so no network is touched), the welcome page's handle form
-//! and sign-out. The flow tests need Postgres and skip without
+//! Sign-in over HTTP: `/api/me`, the flow with each provider against a
+//! fake of it on loopback (an axum server answering the authorize, token
+//! and user endpoints on the real paths, so no network is touched), the
+//! welcome page's handle form and sign-out. The flow tests need Postgres and skip without
 //! `DATABASE_URL`, like `tests/db.rs`; `/api/me` without a session needs
 //! no database.
 
@@ -15,7 +15,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json, Redirect};
 use axum::routing::{get, post};
 use kiewer_lib::account::{self, Handle};
-use kiewer_lib::auth::{App, Auth, Credentials, Provider};
+use kiewer_lib::auth::{App, Auth, Credentials, Provider, ProviderUser};
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::web::AppState;
 use kiewer_test_support::db::{fresh, pool_from_env};
@@ -23,22 +23,35 @@ use kiewer_test_support::{TempDir, http, scratch_dir};
 use oauth2::url::Url;
 use oauth2::{PkceCodeChallenge, PkceCodeVerifier};
 use sqlx::PgPool;
+use test_case::test_case;
 
-/// A GitHub on loopback: the authorize page sends the browser straight
+/// A provider on loopback: the authorize page sends the browser straight
 /// back with a code, the token endpoint checks the code and the PKCE
 /// verifier against the challenge the authorize page saw, and the user
-/// endpoint answers for the bearer token it issued.
-#[derive(Default)]
-struct FakeGitHub {
+/// endpoint answers for the bearer token it issued. Its routes are the
+/// real provider's paths, so the app under test is the real one
+/// (`Provider::app`) with the host swapped.
+struct FakeProvider {
     challenge: Option<String>,
-    /// What `/user` answers; a test changes it to be someone else.
+    /// The `scope` the authorize page was asked for, as the provider sees
+    /// it: space-separated, or absent.
+    scope: Option<String>,
+    /// What the user endpoint answers; a test changes it to be someone
+    /// else.
     user: serde_json::Value,
 }
 
-type Fake = Arc<Mutex<FakeGitHub>>;
+type Fake = Arc<Mutex<FakeProvider>>;
 
 const FAKE_CODE: &str = "fake-code";
 const FAKE_TOKEN: &str = "fake-token";
+
+fn fake_credentials() -> Credentials {
+    Credentials {
+        client_id: "fake-id".to_owned(),
+        client_secret: "fake-secret".to_owned(),
+    }
+}
 
 async fn fake_authorize(
     State(fake): State<Fake>,
@@ -50,7 +63,11 @@ async fn fake_authorize(
         query.get("code_challenge_method").map(String::as_str),
         Some("S256")
     );
-    fake.lock().unwrap().challenge = query.get("code_challenge").cloned();
+    {
+        let mut fake = fake.lock().unwrap();
+        fake.challenge = query.get("code_challenge").cloned();
+        fake.scope = query.get("scope").cloned();
+    }
     let back = format!(
         "{}?code={FAKE_CODE}&state={}",
         query["redirect_uri"], query["state"]
@@ -100,18 +117,24 @@ async fn fake_user(State(fake): State<Fake>, headers: HeaderMap) -> impl IntoRes
     (StatusCode::OK, Json(fake.lock().unwrap().user.clone()))
 }
 
-/// The fake on a free port, answering for the user `login` under a numeric
-/// id no earlier run used.
-async fn fake_github(login: &str) -> (Fake, SocketAddr) {
-    let id = u64::from_str_radix(&fresh("")[1..13], 16).expect("twelve hex digits");
-    let fake: Fake = Arc::new(Mutex::new(FakeGitHub {
+/// The path of an absolute URL: where the fake serves a real endpoint.
+fn path_of(url: &str) -> String {
+    Url::parse(url).expect("a URL").path().to_owned()
+}
+
+/// The fake for `provider` on a free port, answering for `user` at its
+/// user endpoint.
+async fn fake_provider(provider: Provider, user: serde_json::Value) -> (Fake, SocketAddr) {
+    let fake: Fake = Arc::new(Mutex::new(FakeProvider {
         challenge: None,
-        user: serde_json::json!({"id": id, "login": login}),
+        scope: None,
+        user,
     }));
+    let real = provider.app(fake_credentials());
     let router = Router::new()
-        .route("/login/oauth/authorize", get(fake_authorize))
-        .route("/login/oauth/access_token", post(fake_token))
-        .route("/user", get(fake_user))
+        .route(&path_of(&real.auth_url), get(fake_authorize))
+        .route(&path_of(&real.token_url), post(fake_token))
+        .route(&path_of(&real.user_url), get(fake_user))
         .with_state(fake.clone());
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -121,35 +144,86 @@ async fn fake_github(login: &str) -> (Fake, SocketAddr) {
     (fake, addr)
 }
 
-/// The server with GitHub sign-in registered against the fake at
-/// `github`, on a free port; a browser at it. The public URL is that port
-/// under `scheme`: the browser follows paths, so `https` works without
-/// TLS and gives the production cookie attributes.
+/// Digits no earlier run used: a GitHub id, a Discord snowflake, a Google
+/// sub.
+fn fresh_digits() -> String {
+    u64::from_str_radix(&fresh("")[1..13], 16)
+        .expect("twelve hex digits")
+        .to_string()
+}
+
+/// A fake GitHub answering for the user `login` under a numeric id no
+/// earlier run used.
+async fn fake_github(login: &str) -> (Fake, SocketAddr) {
+    let id: u64 = fresh_digits().parse().unwrap();
+    fake_provider(
+        Provider::GitHub,
+        serde_json::json!({"id": id, "login": login}),
+    )
+    .await
+}
+
+/// What a provider's user endpoint says about a fresh person with the
+/// login `login` and the verified email `email`, in that provider's shape.
+fn fresh_user(provider: Provider, login: &str, email: &str) -> serde_json::Value {
+    match provider {
+        Provider::GitHub => serde_json::json!({
+            "id": fresh_digits().parse::<u64>().unwrap(), "login": login, "email": email
+        }),
+        Provider::Discord => serde_json::json!({
+            "id": fresh_digits(), "username": login, "discriminator": "0",
+            "verified": true, "email": email
+        }),
+        Provider::Google => serde_json::json!({
+            "sub": fresh_digits(), "name": login, "email": email, "email_verified": true
+        }),
+    }
+}
+
+/// The real app for `provider` with every endpoint moved to the fake at
+/// `addr`: the real scopes and paths, the fake's host.
+fn fake_app(provider: Provider, addr: SocketAddr) -> App {
+    let real = provider.app(fake_credentials());
+    let moved = |url: &str| format!("http://{addr}{}", path_of(url));
+    App {
+        auth_url: moved(&real.auth_url),
+        token_url: moved(&real.token_url),
+        user_url: moved(&real.user_url),
+        ..real
+    }
+}
+
+/// The server with sign-in registered for each provider against its fake,
+/// on a free port; a browser at it. The public URL is that port under
+/// `scheme`: the browser follows paths, so `https` works without TLS and
+/// gives the production cookie attributes.
+async fn server_with(
+    db: PgPool,
+    fakes: &[(Provider, SocketAddr)],
+    scheme: &str,
+) -> (http::Browser, TempDir) {
+    let dir = scratch_dir!();
+    let (listener, addr) = http::bind_free_port().await;
+    let apps = fakes
+        .iter()
+        .map(|(provider, fake)| fake_app(*provider, *fake))
+        .collect();
+    let state = AppState {
+        db,
+        blobs: Arc::new(FsBlobStore::new(dir.path())),
+        auth: Arc::new(Auth::new(apps, format!("{scheme}://{addr}")).expect("an auth")),
+    };
+    http::serve_listener(listener, state);
+    (http::Browser::new(addr), dir)
+}
+
+/// The server with GitHub alone, against the fake at `github`.
 async fn server_with_github(
     db: PgPool,
     github: SocketAddr,
     scheme: &str,
 ) -> (http::Browser, TempDir) {
-    let dir = scratch_dir!();
-    let (listener, addr) = http::bind_free_port().await;
-    let app = App {
-        provider: Provider::GitHub,
-        credentials: Credentials {
-            client_id: "fake-id".to_owned(),
-            client_secret: "fake-secret".to_owned(),
-        },
-        auth_url: format!("http://{github}/login/oauth/authorize"),
-        token_url: format!("http://{github}/login/oauth/access_token"),
-        user_url: format!("http://{github}/user"),
-        scopes: Vec::new(),
-    };
-    let state = AppState {
-        db,
-        blobs: Arc::new(FsBlobStore::new(dir.path())),
-        auth: Arc::new(Auth::new(vec![app], format!("{scheme}://{addr}")).expect("an auth")),
-    };
-    http::serve_listener(listener, state);
-    (http::Browser::new(addr), dir)
+    server_with(db, &[(Provider::GitHub, github)], scheme).await
 }
 
 /// Every attribute a cookie line has to carry, named in the failure.
@@ -173,25 +247,28 @@ fn path_and_query(url: &str) -> (Url, String) {
     (url, path)
 }
 
-/// Drive the browser through the sign-in: the redirect to the fake, the
+/// Drive the browser from `start` (a `/auth/{provider}` URL, perhaps with
+/// a query) through the sign-in: the redirect to the fake at `fake`, the
 /// fake's redirect back, the callback. Returns the callback's response.
-async fn sign_in_through(browser: &mut http::Browser, github: SocketAddr) -> http::Response {
-    let started = browser.get("/auth/github").await;
+async fn drive(
+    browser: &mut http::Browser,
+    start: &str,
+    provider: Provider,
+    fake: SocketAddr,
+) -> http::Response {
+    let started = browser.get(start).await;
     assert_eq!(started.status, 303, "{}", started.body);
     let state_cookie = started.header("set-cookie").expect("the state cookie");
     assert!(state_cookie.starts_with("kiewer_oauth="), "{state_cookie}");
-    assert_attributes(
-        state_cookie,
-        &["HttpOnly", "Secure", "SameSite=Lax", "Path=/auth"],
-    );
+    assert_attributes(state_cookie, &["HttpOnly", "SameSite=Lax", "Path=/auth"]);
     assert_eq!(started.header("cache-control"), Some("private, no-store"));
     let (authorize, authorize_path) = path_and_query(started.header("location").unwrap());
     assert_eq!(
         authorize.port(),
-        Some(github.port()),
-        "sent to the fake GitHub"
+        Some(fake.port()),
+        "sent to the fake {provider}"
     );
-    let back = http::request(github, "GET", &authorize_path, &[], "").await;
+    let back = http::request(fake, "GET", &authorize_path, &[], "").await;
     assert_eq!(back.status, 303, "{}", back.body);
     let (callback, callback_path) = path_and_query(back.header("location").unwrap());
     assert_eq!(
@@ -199,8 +276,22 @@ async fn sign_in_through(browser: &mut http::Browser, github: SocketAddr) -> htt
         Some(browser.addr().port()),
         "sent back to kiewer"
     );
-    assert_eq!(callback.path(), "/auth/github/callback");
+    assert_eq!(callback.path(), format!("/auth/{provider}/callback"));
     browser.get(&callback_path).await
+}
+
+/// A plain sign-in with `provider` against the fake at `fake`.
+async fn sign_in_with(
+    browser: &mut http::Browser,
+    provider: Provider,
+    fake: SocketAddr,
+) -> http::Response {
+    drive(browser, &format!("/auth/{provider}"), provider, fake).await
+}
+
+/// A plain sign-in with GitHub against the fake at `github`.
+async fn sign_in_through(browser: &mut http::Browser, github: SocketAddr) -> http::Response {
+    sign_in_with(browser, Provider::GitHub, github).await
 }
 
 async fn me(browser: &mut http::Browser) -> serde_json::Value {
@@ -218,6 +309,11 @@ async fn a_person_signs_in_picks_a_handle_stays_signed_in_and_signs_out() {
     let (_fake, github) = fake_github("Octo_Cat").await;
     let (mut browser, _dir) = server_with_github(db.clone(), github, "https").await;
 
+    let started = browser.get("/auth/github").await;
+    assert_attributes(
+        started.header("set-cookie").expect("the state cookie"),
+        &["Secure"],
+    );
     let signed_in = sign_in_through(&mut browser, github).await;
     assert_eq!(signed_in.status, 303, "{}", signed_in.body);
     assert_eq!(
@@ -312,9 +408,17 @@ async fn pick_a_handle(browser: &mut http::Browser, db: &PgPool) -> String {
         refused.body
     );
 
-    let other = account::sign_in(db, Provider::GitHub, &fresh("gh"), "someone")
-        .await
-        .unwrap();
+    let other = account::sign_in(
+        db,
+        Provider::GitHub,
+        &ProviderUser {
+            id: fresh("gh"),
+            login: "someone".to_owned(),
+            email: None,
+        },
+    )
+    .await
+    .unwrap();
     let taken: Handle = fresh("taken").parse().unwrap();
     account::choose_handle(db, other.account_id, &taken)
         .await
@@ -336,6 +440,80 @@ async fn pick_a_handle(browser: &mut http::Browser, db: &PgPool) -> String {
     assert_eq!(chosen.status, 303, "{}", chosen.body);
     assert_eq!(chosen.header("location"), Some("/"));
     handle
+}
+
+#[test_case(Provider::Discord, "identify email"; "discord with identify and email")]
+#[test_case(Provider::Google, "openid email profile"; "google with openid email and profile")]
+#[tokio::test]
+async fn a_person_signs_in_with_another_provider(provider: Provider, scope: &str) {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let email = format!("{}@example.com", fresh("mail"));
+    let (fake, addr) = fake_provider(provider, fresh_user(provider, "Nelly", &email)).await;
+    let (mut browser, _dir) = server_with(db.clone(), &[(provider, addr)], "https").await;
+
+    let signed_in = sign_in_with(&mut browser, provider, addr).await;
+    assert_eq!(signed_in.status, 303, "{}", signed_in.body);
+    assert_eq!(signed_in.header("location"), Some("/welcome"));
+    assert_eq!(
+        fake.lock().unwrap().scope.as_deref(),
+        Some(scope),
+        "the scopes the provider was asked for"
+    );
+    assert_eq!(
+        me(&mut browser).await,
+        serde_json::json!({"signed_in": true, "handle": null})
+    );
+    let welcome = browser.get("/welcome").await;
+    assert!(
+        welcome.body.contains(r#"value="nelly""#),
+        "prefilled from the provider's login: {}",
+        welcome.body
+    );
+    let row: (String, String, Option<String>) =
+        sqlx::query_as("SELECT provider, provider_login, email FROM identity WHERE email = $1")
+            .bind(&email)
+            .fetch_one(&db)
+            .await
+            .expect("the identity row");
+    assert_eq!(
+        row,
+        (
+            provider.to_string(),
+            "Nelly".to_owned(),
+            Some(email.clone())
+        )
+    );
+}
+
+#[tokio::test]
+async fn the_front_page_links_only_the_registered_providers() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (_github, github) = fake_github("x").await;
+    let (_discord, discord) =
+        fake_provider(Provider::Discord, fresh_user(Provider::Discord, "x", "x@x")).await;
+    let (mut browser, _dir) = server_with(
+        db,
+        &[(Provider::GitHub, github), (Provider::Discord, discord)],
+        "https",
+    )
+    .await;
+    let page = browser.get("/").await;
+    assert_eq!(page.status, 200);
+    assert!(
+        page.body.contains(r#"href="/auth/github""#),
+        "{}",
+        page.body
+    );
+    assert!(page.body.contains("Sign in with Discord"), "{}", page.body);
+    assert!(
+        !page.body.contains("/auth/google"),
+        "Google has no app here: absent, not broken: {}",
+        page.body
+    );
 }
 
 #[tokio::test]
@@ -519,8 +697,16 @@ async fn me_ignores_a_cookie_that_is_not_a_session_id() {
 async fn sign_in_with_an_unregistered_provider_is_not_found() {
     let (state, _dir) = anonymous_state();
     let addr = http::serve_on_free_port(state).await;
-    let (status, _) = http::get(addr, "/auth/github").await;
-    assert_eq!(status, 404);
+    for provider in Provider::ALL {
+        let (status, _) = http::get(addr, &format!("/auth/{provider}")).await;
+        assert_eq!(status, 404, "{provider}");
+    }
     let (status, _) = http::get(addr, "/auth/myspace").await;
     assert_eq!(status, 404);
+    let (status, body) = http::get(addr, "/").await;
+    assert_eq!(status, 200);
+    assert!(
+        !body.contains("Sign in with"),
+        "no provider, no link: {body}"
+    );
 }

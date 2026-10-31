@@ -10,8 +10,8 @@
 <!-- Filled by the script below from /api/me: this page is the same for
      everyone and cacheable (ADR 0003), so nothing in it may depend on
      the session. -->
-<span id="signed-out"><a href="/auth/github" rel="nofollow">Sign in with GitHub</a></span>
-<span id="signed-in" hidden><a id="handle" href="/welcome">Pick your handle</a> <form method="post" action="/auth/sign-out" style="display:inline"><button type="submit">Sign out</button></form></span>
+<span id="signed-out">{% for provider in providers %}<a href="/auth/{{ provider }}" rel="nofollow">Sign in with {{ provider.name() }}</a> {% endfor %}</span>
+<span id="signed-in" hidden><a id="handle" href="/welcome">Pick your handle</a> <a href="/settings">Settings</a> <form method="post" action="/auth/sign-out" style="display:inline"><button type="submit">Sign out</button></form></span>
 </nav>
 <h1>kiewer</h1>
 <p>A site for uploading and sharing KiCad designs, rendered in the browser.</p>

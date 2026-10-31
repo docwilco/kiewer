@@ -198,7 +198,7 @@ pub async fn callback(
         }
         Err(error) => return Err(error),
     };
-    let signed_in = account::sign_in(&state.db, provider, &user.id, &user.login).await?;
+    let signed_in = account::sign_in(&state.db, provider, &user).await?;
     let id = session::start(&state.db, signed_in.account_id).await?;
     tracing::info!(%provider, new_account = signed_in.is_new, "signed in");
     let jar = jar.add(session_cookie(id, state.auth.secure_cookies()));

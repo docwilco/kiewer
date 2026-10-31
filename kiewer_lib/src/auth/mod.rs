@@ -1,10 +1,12 @@
 //! Sign-in through an OAuth2 provider: the authorization-code exchange
 //! with PKCE, then one call for who the person is. One module per
-//! provider's particulars ([`github`]); the flow is shared, so Discord and
-//! Google (docs/v1-scope.md, Accounts and access) add a variant, an
-//! [`App`] and a user-parsing arm, nothing else.
+//! provider's particulars ([`github`], [`discord`], [`google`]); the flow
+//! is shared, so a provider is a variant, an [`App`] and a user-parsing
+//! arm, nothing else (docs/v1-scope.md, Accounts and access).
 
+pub mod discord;
 pub mod github;
+pub mod google;
 
 use std::fmt;
 use std::str::FromStr;
@@ -19,22 +21,58 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 /// A sign-in provider. The wire name (`github`) is the URL segment
-/// (`/auth/github`) and the `identity.provider` column.
+/// (`/auth/github`), the `identity.provider` column and the middle of its
+/// environment variables (`OAUTH_GITHUB_CLIENT_ID`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     GitHub,
+    Discord,
+    Google,
 }
 
 impl Provider {
-    /// Every provider, in code order.
-    pub const ALL: [Provider; 1] = [Provider::GitHub];
+    /// Every provider, in code order: the order of the sign-in links.
+    pub const ALL: [Provider; 3] = [Provider::GitHub, Provider::Discord, Provider::Google];
 
     /// The wire name.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Provider::GitHub => "github",
+            Provider::Discord => "discord",
+            Provider::Google => "google",
+        }
+    }
+
+    /// The name people know the provider by, for a page.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Provider::GitHub => "GitHub",
+            Provider::Discord => "Discord",
+            Provider::Google => "Google",
+        }
+    }
+
+    /// The names of the two environment variables that hold this
+    /// provider's [`Credentials`]: the client id, then the secret.
+    #[must_use]
+    pub fn env_names(self) -> (&'static str, &'static str) {
+        match self {
+            Provider::GitHub => ("OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET"),
+            Provider::Discord => ("OAUTH_DISCORD_CLIENT_ID", "OAUTH_DISCORD_CLIENT_SECRET"),
+            Provider::Google => ("OAUTH_GOOGLE_CLIENT_ID", "OAUTH_GOOGLE_CLIENT_SECRET"),
+        }
+    }
+
+    /// The app registered at this provider, on its real endpoints.
+    #[must_use]
+    pub fn app(self, credentials: Credentials) -> App {
+        match self {
+            Provider::GitHub => github::app(credentials),
+            Provider::Discord => discord::app(credentials),
+            Provider::Google => google::app(credentials),
         }
     }
 
@@ -46,6 +84,8 @@ impl Provider {
     pub fn parse_user(self, body: &serde_json::Value) -> Result<ProviderUser> {
         match self {
             Provider::GitHub => github::parse_user(body),
+            Provider::Discord => discord::parse_user(body),
+            Provider::Google => google::parse_user(body),
         }
     }
 }
@@ -97,12 +137,15 @@ pub struct App {
     pub scopes: Vec<String>,
 }
 
-/// Who a provider says signed in: its own stable id for the person, and
-/// the login it shows, which prefills the handle.
+/// Who a provider says signed in: its own stable id for the person, the
+/// login it shows, which prefills the handle and names the identity in
+/// settings, and the email it vouches for, kept on the identity and never
+/// used to find an account (docs/v1-scope.md: no merge by email).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderUser {
     pub id: String,
     pub login: String,
+    pub email: Option<String>,
 }
 
 /// A sign-in just started: where to send the browser, and what the
@@ -308,6 +351,8 @@ mod tests {
     use super::*;
 
     #[test_case(Provider::GitHub, "github")]
+    #[test_case(Provider::Discord, "discord")]
+    #[test_case(Provider::Google, "google")]
     fn a_provider_round_trips_through_its_wire_name(provider: Provider, wire: &str) {
         assert_eq!(provider.as_str(), wire);
         assert_eq!(wire.parse::<Provider>().unwrap(), provider);
@@ -389,6 +434,32 @@ mod tests {
             !start.authorize_url.contains(&start.verifier),
             "the verifier stays home"
         );
+    }
+
+    #[test_case(Provider::GitHub, "https://api.github.com/user", &[]; "github asks no scope")]
+    #[test_case(Provider::Discord, "https://discord.com/api/users/@me", &["identify", "email"]; "discord identify and email against users me")]
+    #[test_case(Provider::Google, "https://openidconnect.googleapis.com/v1/userinfo", &["openid", "email", "profile"]; "google openid connect userinfo")]
+    fn each_provider_has_its_user_endpoint_and_scopes(
+        provider: Provider,
+        user_url: &str,
+        scopes: &[&str],
+    ) {
+        let app = provider.app(Credentials {
+            client_id: "id".to_owned(),
+            client_secret: "secret".to_owned(),
+        });
+        assert_eq!(app.provider, provider);
+        assert_eq!(app.user_url, user_url);
+        assert_eq!(app.scopes, scopes);
+        assert!(app.auth_url.starts_with("https://"), "{}", app.auth_url);
+        assert!(app.token_url.starts_with("https://"), "{}", app.token_url);
+    }
+
+    #[test_case(Provider::GitHub, "GitHub")]
+    #[test_case(Provider::Discord, "Discord")]
+    #[test_case(Provider::Google, "Google")]
+    fn a_provider_has_the_name_people_know_it_by(provider: Provider, name: &str) {
+        assert_eq!(provider.name(), name);
     }
 
     #[test]

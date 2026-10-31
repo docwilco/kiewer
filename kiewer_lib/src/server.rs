@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tokio::net::TcpListener;
 
-use crate::auth::{Auth, github};
+use crate::auth::Auth;
 use crate::blob::BlobStore;
 use crate::blob::fs::FsBlobStore;
 use crate::blob::gcs::GcsBlobStore;
@@ -17,14 +17,17 @@ use crate::web::{AppState, serve, shutdown_signal};
 /// variables are set. With none, the server runs and every sign-in link
 /// answers 404, which the log says once at startup.
 fn auth(config: &Config) -> Result<Auth> {
-    let mut apps = Vec::new();
-    if let Some(credentials) = &config.github {
-        apps.push(github::app(credentials.clone()));
-    }
+    let apps = config
+        .oauth
+        .iter()
+        .map(|(provider, credentials)| provider.app(credentials.clone()))
+        .collect();
     let auth = Auth::new(apps, config.public_url.clone())?;
     let providers = auth.providers();
     if providers.is_empty() {
-        tracing::warn!("sign-in is off: no provider app is configured (OAUTH_GITHUB_CLIENT_ID)");
+        tracing::warn!(
+            "sign-in is off: no provider app is configured (OAUTH_<PROVIDER>_CLIENT_ID and _SECRET)"
+        );
     } else {
         tracing::info!(?providers, public_url = %config.public_url, "sign-in on");
     }

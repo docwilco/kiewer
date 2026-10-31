@@ -19,7 +19,8 @@ pub fn app(credentials: Credentials) -> App {
 }
 
 /// The person behind `GET /user`: the numeric `id`, which survives a
-/// rename, and the `login`.
+/// rename, the `login`, and the public profile's `email` when there is
+/// one (GitHub shows only an address it has verified).
 pub(super) fn parse_user(body: &serde_json::Value) -> Result<ProviderUser> {
     let missing = |field: &str| Error::OAuth {
         provider: Provider::GitHub,
@@ -34,9 +35,15 @@ pub(super) fn parse_user(body: &serde_json::Value) -> Result<ProviderUser> {
         .and_then(serde_json::Value::as_str)
         .filter(|login| !login.is_empty())
         .ok_or_else(|| missing("a login"))?;
+    let email = body
+        .get("email")
+        .and_then(serde_json::Value::as_str)
+        .filter(|email| !email.is_empty())
+        .map(ToOwned::to_owned);
     Ok(ProviderUser {
         id: id.to_string(),
         login: login.to_owned(),
+        email,
     })
 }
 
@@ -45,14 +52,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_user_is_the_id_and_the_login() {
-        let body = serde_json::json!({"login": "octocat", "id": 583_231, "name": "The Octocat"});
+    fn the_user_is_the_id_the_login_and_the_public_email() {
+        let body = serde_json::json!({"login": "octocat", "id": 583_231, "name": "The Octocat", "email": null});
         assert_eq!(
             parse_user(&body).unwrap(),
             ProviderUser {
                 id: "583231".to_owned(),
-                login: "octocat".to_owned()
+                login: "octocat".to_owned(),
+                email: None,
             }
+        );
+        let body =
+            serde_json::json!({"login": "octocat", "id": 583_231, "email": "octocat@github.com"});
+        assert_eq!(
+            parse_user(&body).unwrap().email.as_deref(),
+            Some("octocat@github.com")
         );
     }
 

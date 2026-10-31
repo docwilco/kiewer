@@ -28,18 +28,33 @@ in the hook as in a shell; CI sets it against a service container that
 matches `compose.yaml`. The schema is `migrations/` (its README has the
 naming rule).
 
-Sign-in needs a GitHub OAuth app of your own, one per environment
-(docs/v1-scope.md, Q57): at https://github.com/settings/developers, New
-OAuth App, any name, homepage `http://localhost:8080`, callback URL
-`http://localhost:8080/auth/github/callback` (the path is fixed; the
-origin is `PUBLIC_URL`, which defaults to localhost on `PORT`). Generate a
-client secret and put both in `.env` as `OAUTH_GITHUB_CLIENT_ID` and
-`OAUTH_GITHUB_CLIENT_SECRET`, the names `infra/` hands Cloud Run too.
-Without them the server runs with sign-in off and `/auth/github` answers
-404. Cookies are `Secure` under an `https` `PUBLIC_URL`, so a dev box over
-`http` works in every browser. The sign-in tests use a fake GitHub on
-loopback and need no app. Production and staging get their registrations
-through Secret Manager, not `.env`.
+Sign-in needs an OAuth app of your own at each provider you want, one per
+environment (docs/v1-scope.md, Q57). The callback URL to register is
+`PUBLIC_URL` (default `http://localhost:8080`, localhost on `PORT`) plus
+`/auth/<provider>/callback`; the client id and secret go in `.env` as
+`OAUTH_<PROVIDER>_CLIENT_ID` and `OAUTH_<PROVIDER>_CLIENT_SECRET`, the
+names `infra/` hands Cloud Run too. A provider with neither variable is
+left off the front page and its `/auth/<provider>` answers 404; one
+variable without the other fails startup naming the missing one.
+
+- GitHub: https://github.com/settings/developers, New OAuth App, any name,
+  homepage `http://localhost:8080`, callback
+  `http://localhost:8080/auth/github/callback`; generate a client secret.
+  Variables `OAUTH_GITHUB_*`.
+- Discord: https://discord.com/developers/applications, New Application,
+  OAuth2, add the redirect `http://localhost:8080/auth/discord/callback`;
+  the client id and secret are on that page. The server asks the
+  `identify` and `email` scopes. Variables `OAUTH_DISCORD_*`.
+- Google: https://console.cloud.google.com/apis/credentials, Create
+  credentials, OAuth client ID, Web application, authorised redirect URI
+  `http://localhost:8080/auth/google/callback`; the consent screen needs
+  the `email` and `profile` scopes and, while it is in testing, your
+  account as a test user. Variables `OAUTH_GOOGLE_*`.
+
+Cookies are `Secure` under an `https` `PUBLIC_URL`, so a dev box over
+`http` works in every browser. The sign-in tests use a fake of each
+provider on loopback and need no app. Production and staging get their
+registrations through Secret Manager, not `.env`.
 
 The GCS store test (`kiewer_lib/tests/gcs_blob_store.rs`) runs the same way
 when `KIEWER_GCS_EMULATOR` names a

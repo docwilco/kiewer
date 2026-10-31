@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use sqlx::PgPool;
 
-use crate::auth::Provider;
+use crate::auth::{Provider, ProviderUser};
 use crate::error::{Error, Result};
 
 /// An account's row id.
@@ -128,19 +128,15 @@ pub struct SignedIn {
     pub is_new: bool,
 }
 
-/// The account behind `provider`'s user `provider_user_id`, made on first
-/// sight. `login` is what the provider shows for the person now and
-/// replaces what the identity kept.
+/// The account behind `provider`'s `user`, made on first sight; the
+/// identity is found by the provider's id alone, never by the email or
+/// the login, which both change hands. The login and the email are what
+/// the provider shows now and replace what the identity kept.
 ///
 /// # Errors
 ///
 /// [`Error::Db`] when Postgres refuses.
-pub async fn sign_in(
-    db: &PgPool,
-    provider: Provider,
-    provider_user_id: &str,
-    login: &str,
-) -> Result<SignedIn> {
+pub async fn sign_in(db: &PgPool, provider: Provider, user: &ProviderUser) -> Result<SignedIn> {
     // One outcome, one transaction, and a write first: a fresh account is
     // made, the identity is inserted pointing at it or found pointing at
     // another, and in the second case the fresh account goes again. The
@@ -151,16 +147,17 @@ pub async fn sign_in(
         .fetch_one(&mut *tx)
         .await?;
     let account_id: AccountId = sqlx::query_scalar(
-        "INSERT INTO identity (provider, provider_user_id, account_id, provider_login)
-         VALUES ($1, $2, $3, $4)
+        "INSERT INTO identity (provider, provider_user_id, account_id, provider_login, email)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (provider, provider_user_id)
-         DO UPDATE SET provider_login = EXCLUDED.provider_login
+         DO UPDATE SET provider_login = EXCLUDED.provider_login, email = EXCLUDED.email
          RETURNING account_id",
     )
     .bind(provider.as_str())
-    .bind(provider_user_id)
+    .bind(&user.id)
     .bind(fresh)
-    .bind(login)
+    .bind(&user.login)
+    .bind(&user.email)
     .fetch_one(&mut *tx)
     .await?;
     let is_new = account_id == fresh;
@@ -181,7 +178,7 @@ pub async fn sign_in(
     Ok(SignedIn {
         account_id,
         handle,
-        provider_login: login.to_owned(),
+        provider_login: user.login.clone(),
         is_new,
     })
 }

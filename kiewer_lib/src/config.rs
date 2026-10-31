@@ -2,10 +2,11 @@
 //! read once at startup, so a missing or malformed one fails before the
 //! server listens, naming the variable.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::auth::Credentials;
+use crate::auth::{Credentials, Provider};
 use crate::error::{Error, Result};
 
 /// The port when `PORT` is unset: Cloud Run's default, so a dev box and
@@ -66,10 +67,13 @@ pub struct Config {
     /// OAuth variables are the deploy contract in `infra/` (its README
     /// lists them; a retired one is a breaking Release).
     pub public_url: String,
-    /// `OAUTH_GITHUB_CLIENT_ID` and `OAUTH_GITHUB_CLIENT_SECRET`: the
-    /// GitHub OAuth app (README, Development), or `None` with both unset,
-    /// which turns GitHub sign-in off.
-    pub github: Option<Credentials>,
+    /// `OAUTH_<PROVIDER>_CLIENT_ID` and `OAUTH_<PROVIDER>_CLIENT_SECRET`
+    /// for PROVIDER in GITHUB, DISCORD, GOOGLE
+    /// ([`Provider::env_names`]): the OAuth app registered at each
+    /// provider (README, Development). A provider with both unset is
+    /// absent here and from the sign-in links, never an error; one of a
+    /// pair alone is.
+    pub oauth: BTreeMap<Provider, Credentials>,
 }
 
 /// The pair of variables for one provider's app: both, or neither.
@@ -79,9 +83,9 @@ pub struct Config {
 /// [`Error::Env`] naming the one of the pair that is unset.
 fn oauth_app(
     var: &impl Fn(&str) -> Option<String>,
-    id_name: &'static str,
-    secret_name: &'static str,
+    provider: Provider,
 ) -> Result<Option<Credentials>> {
+    let (id_name, secret_name) = provider.env_names();
     let read = |name: &str| var(name).filter(|value| !value.is_empty());
     match (read(id_name), read(secret_name)) {
         (None, None) => Ok(None),
@@ -148,13 +152,18 @@ impl Config {
             || format!("http://localhost:{port}"),
             |url| url.trim_end_matches('/').to_owned(),
         );
-        let github = oauth_app(&var, "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET")?;
+        let mut oauth = BTreeMap::new();
+        for provider in Provider::ALL {
+            if let Some(credentials) = oauth_app(&var, provider)? {
+                oauth.insert(provider, credentials);
+            }
+        }
         Ok(Self {
             port,
             database_url,
             blobs,
             public_url,
-            github,
+            oauth,
         })
     }
 }
@@ -188,11 +197,11 @@ mod tests {
         );
         assert_eq!(config.database_url, "postgres://x");
         assert_eq!(config.public_url, "http://localhost:8080");
-        assert_eq!(config.github, None, "sign-in is off without the app");
+        assert!(config.oauth.is_empty(), "sign-in is off without an app");
     }
 
     #[test]
-    fn the_github_app_is_both_variables_or_neither() {
+    fn a_provider_app_is_both_variables_or_neither() {
         let config = Config::from_vars(vars(&[
             ("DATABASE_URL", "postgres://x"),
             ("PUBLIC_URL", "https://kiewer.example/"),
@@ -205,11 +214,16 @@ mod tests {
             "no trailing slash"
         );
         assert_eq!(
-            config.github,
-            Some(Credentials {
+            config.oauth.get(&Provider::GitHub),
+            Some(&Credentials {
                 client_id: "id".to_owned(),
                 client_secret: "secret".to_owned()
             })
+        );
+        assert_eq!(
+            config.oauth.len(),
+            1,
+            "a provider without variables is absent, not an error"
         );
         let err = Config::from_vars(vars(&[
             ("DATABASE_URL", "postgres://x"),
@@ -236,6 +250,40 @@ mod tests {
                 err,
                 Error::Env {
                     name: "OAUTH_GITHUB_CLIENT_ID",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn every_provider_reads_its_own_pair() {
+        let config = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("OAUTH_DISCORD_CLIENT_ID", "d-id"),
+            ("OAUTH_DISCORD_CLIENT_SECRET", "d-secret"),
+            ("OAUTH_GOOGLE_CLIENT_ID", "g-id"),
+            ("OAUTH_GOOGLE_CLIENT_SECRET", "g-secret"),
+        ]))
+        .expect("valid");
+        assert_eq!(
+            config.oauth.keys().copied().collect::<Vec<_>>(),
+            [Provider::Discord, Provider::Google],
+            "GitHub unset: absent"
+        );
+        assert_eq!(config.oauth[&Provider::Discord].client_id, "d-id");
+        assert_eq!(config.oauth[&Provider::Google].client_secret, "g-secret");
+        let err = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("OAUTH_GOOGLE_CLIENT_SECRET", "g-secret"),
+        ]))
+        .expect_err("half an app");
+        assert!(
+            matches!(
+                err,
+                Error::Env {
+                    name: "OAUTH_GOOGLE_CLIENT_ID",
                     ..
                 }
             ),

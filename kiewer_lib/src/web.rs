@@ -89,11 +89,16 @@ pub async fn shutdown_signal() {
 #[template(path = "index.html")]
 struct Index {
     build: String,
+    /// The providers with an app registered: one sign-in link each. Server
+    /// configuration, the same for everyone, so the page stays cacheable
+    /// (ADR 0003).
+    providers: Vec<crate::auth::Provider>,
 }
 
-async fn index() -> Result<Html<String>> {
+async fn index(State(state): State<AppState>) -> Result<Html<String>> {
     let page = Index {
         build: crate::build::line(),
+        providers: state.auth.providers(),
     };
     Ok(Html(page.render()?))
 }
