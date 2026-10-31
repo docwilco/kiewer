@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-GitHub Issues in `drwilco/kiewer` via `gh`; no local clone or remote yet, so pass `-R drwilco/kiewer`. See `docs/agents/issue-tracker.md`.
+GitHub Issues in `docwilco/kiewer` via `gh`, inferred from the `origin` remote. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

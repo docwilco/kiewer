@@ -12,7 +12,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
 
-Repo: `drwilco/kiewer`. This folder is not yet a git clone, so `gh` cannot infer the repo: pass `-R drwilco/kiewer` on every `gh issue` / `gh pr` call until a remote exists. Once `git remote -v` points at GitHub, drop the flag.
+Repo: `docwilco/kiewer`, the `origin` remote; `gh` infers it when run inside the clone.
 
 ## Pull requests as a triage surface
 
