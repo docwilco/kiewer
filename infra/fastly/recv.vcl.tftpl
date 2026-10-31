@@ -7,6 +7,11 @@
 # empty 200, which would be cached as the object. Nothing legitimate sends
 # it here.
 unset req.http.X-Http-Method-Override;
+# X-Kiewer-Origin is this configuration's own mark, set below for a blob
+# read and read by the sign, fetch and deliver snippets. A client that
+# sent it would have a Cloud Run page cached for a year as if it were a
+# blob, so whatever arrives under that name is dropped first.
+unset req.http.X-Kiewer-Origin;
 
 declare local var.bucket STRING;
 

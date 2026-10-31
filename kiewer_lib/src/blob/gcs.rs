@@ -20,7 +20,7 @@ use google_cloud_storage::builder::storage::ClientBuilder;
 use google_cloud_storage::client::Storage;
 use google_cloud_storage::model_ext::ReadRange;
 
-use super::{BlobHash, BlobStore, Put, PutReceipt, gunzip, gzip, verified};
+use super::{BlobHash, BlobStore, Put, PutReceipt, blocking, gunzip, gzip, object_name, verified};
 use crate::error::{Error, Result};
 
 /// What the store was doing when GCS failed it; the `op` of
@@ -103,12 +103,6 @@ impl GcsBlobStore {
         &self.bucket
     }
 
-    /// The object a blob lives at: `<first two hex>/<hash>.gz`.
-    fn object_of(hash: &BlobHash) -> String {
-        let name = hash.to_string();
-        format!("{}/{name}.gz", &name[..2])
-    }
-
     fn failed(&self, op: BlobOp, hash: BlobHash, source: google_cloud_storage::Error) -> Error {
         Error::Gcs {
             op,
@@ -130,12 +124,12 @@ impl BlobStore for GcsBlobStore {
         // Hashing and compression are CPU work; off the runtime's threads.
         // The bytes are copied once for the move into the task.
         let owned = bytes.to_vec();
-        let (hash, compressed) = tokio::task::spawn_blocking(move || {
+        let (hash, compressed) = blocking(move || {
             let hash = BlobHash::of(&owned);
-            gzip(&owned).map(|compressed| (hash, compressed))
+            let compressed = gzip(&owned)?;
+            Ok((hash, compressed))
         })
-        .await
-        .expect("the blocking gzip neither panics nor is cancelled")?;
+        .await?;
         // A blob already there is the common case of a re-upload: one
         // metadata request settles it without sending the bytes. The write
         // is still a create (generation 0), not an overwrite, so two writers
@@ -149,11 +143,7 @@ impl BlobStore for GcsBlobStore {
         }
         let write = self
             .client
-            .write_object(
-                &self.resource,
-                Self::object_of(&hash),
-                Bytes::from(compressed),
-            )
+            .write_object(&self.resource, object_name(&hash), Bytes::from(compressed))
             .set_if_generation_match(0)
             .set_content_encoding("gzip")
             .set_content_type("application/octet-stream")
@@ -185,7 +175,7 @@ impl BlobStore for GcsBlobStore {
     }
 
     async fn get(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
-        let object = Self::object_of(hash);
+        let object = object_name(hash);
         // The client asks for gzip and gets the stored bytes, never a
         // transcoded copy: it says so in its docs, and the checksums it
         // verifies are of the stored bytes.
@@ -204,15 +194,16 @@ impl BlobStore for GcsBlobStore {
             let chunk = chunk.map_err(|source| self.failed(BlobOp::Get, *hash, source))?;
             compressed.extend_from_slice(&chunk);
         }
-        let bytes = tokio::task::spawn_blocking(move || gunzip(&compressed))
-            .await
-            .expect("the blocking gunzip neither panics nor is cancelled")
-            .map_err(|source| Error::ReadBlob {
-                hash: *hash,
-                path: self.url_of(&object),
+        let (hash, url) = (*hash, self.url_of(&object));
+        let bytes = blocking(move || {
+            gunzip(&compressed).map_err(|source| Error::ReadBlob {
+                hash,
+                path: url,
                 source,
-            })?;
-        verified(hash, bytes).map(Some)
+            })
+        })
+        .await?;
+        verified(&hash, bytes).map(Some)
     }
 
     async fn exists(&self, hash: &BlobHash) -> Result<bool> {
@@ -222,7 +213,7 @@ impl BlobStore for GcsBlobStore {
         // byte is the cost.
         let read = self
             .client
-            .read_object(&self.resource, Self::object_of(hash))
+            .read_object(&self.resource, object_name(hash))
             .set_read_range(ReadRange::head(1))
             .send()
             .await;
@@ -231,19 +222,5 @@ impl BlobStore for GcsBlobStore {
             Err(source) if source.http_status_code() == Some(NOT_FOUND) => Ok(false),
             Err(source) => Err(self.failed(BlobOp::Exists, *hash, source)),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn objects_follow_the_shared_layout() {
-        let hash = BlobHash::of(b"kiewer");
-        assert_eq!(
-            GcsBlobStore::object_of(&hash),
-            "ad/ad8e964fa89208513d804735d67ba5e70ac9154e3658b8ffd9eea31853860ad2.gz"
-        );
     }
 }

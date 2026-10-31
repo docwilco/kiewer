@@ -16,10 +16,10 @@ resource "google_secret_manager_secret" "database_url" {
   depends_on = [google_project_service.apis]
 }
 
-# postgres:///<db>?host=/cloudsql/<connection name>: the empty host and the
-# host= query parameter are how sqlx names a unix socket directory, and
-# /cloudsql/<connection name> is where Cloud Run puts the instance's
-# socket (run.tf, the cloudsql volume).
+# postgres://<role>:<password>@/<db>?host=/cloudsql/<connection name>: the
+# empty host and the host= query parameter are how sqlx names a unix
+# socket directory, and /cloudsql/<connection name> is where Cloud Run
+# puts the instance's socket (run.tf, the cloudsql volume).
 resource "google_secret_manager_secret_version" "database_url" {
   for_each = local.environments
 
@@ -37,11 +37,17 @@ resource "google_secret_manager_secret" "oauth_client_secret" {
   depends_on = [google_project_service.apis]
 }
 
+# A version for the registered providers only (run.tf gives the service
+# the variables for those alone); an unregistered provider's secret
+# waits empty for its first version.
 resource "google_secret_manager_secret_version" "oauth_client_secret" {
-  for_each = local.oauth_registrations
+  for_each = {
+    for key, r in local.oauth_registrations : key => r
+    if contains(local.oauth_registered[r.environment], r.provider)
+  }
 
   secret      = google_secret_manager_secret.oauth_client_secret[each.key].id
-  secret_data = try(var.oauth_clients[each.value.environment][each.value.provider].client_secret, "unset")
+  secret_data = var.oauth_clients[each.value.environment][each.value.provider].client_secret
 }
 
 # One token for both environments: the two hostnames are one Fastly
@@ -55,8 +61,10 @@ resource "google_secret_manager_secret" "fastly_api_token" {
 }
 
 resource "google_secret_manager_secret_version" "fastly_api_token" {
+  count = local.fastly_api_token_given ? 1 : 0
+
   secret      = google_secret_manager_secret.fastly_api_token.id
-  secret_data = var.fastly_api_token != "" ? var.fastly_api_token : "unset"
+  secret_data = var.fastly_api_token
 }
 
 # Each runtime service account reads its own environment's secrets and

@@ -19,11 +19,24 @@ locals {
 
   oauth_providers = toset(["github", "discord", "google"])
 
-  # Every (environment, provider) pair, for the OAuth secrets.
+  # Every (environment, provider) pair, for the OAuth secrets: a secret
+  # exists for each, a version only for the registered ones.
   oauth_registrations = {
     for pair in setproduct(keys(local.environments), local.oauth_providers) :
     "${pair[0]}-${pair[1]}" => { environment = pair[0], provider = pair[1] }
   }
+
+  # Per environment, the providers var.oauth_clients has a registration
+  # for. Which providers exist is not a secret; the map they come from is,
+  # so the set is marked nonsensitive to key resources and blocks.
+  oauth_registered = {
+    for env in keys(local.environments) : env => toset([
+      for provider in local.oauth_providers : provider
+      if nonsensitive(can(var.oauth_clients[env][provider]))
+    ])
+  }
+
+  fastly_api_token_given = nonsensitive(var.fastly_api_token != "")
 
   # Bucket names are global, so the project id prefixes them.
   blob_bucket = { for env, e in local.environments : env => "${var.project_id}-${e.service}-blobs" }
@@ -34,13 +47,17 @@ locals {
   # not depend on the Cloud Run services, whose environment carries the
   # Fastly service id for purges; the other way round would be a cycle.
   run_host = { for env, e in local.environments : env => "${e.service}-${data.google_project.this.number}.${var.region}.run.app" }
-
-  # The object key of a blob in a bucket, the same layout the filesystem
-  # store uses (kiewer_lib/src/blob): <first two hex>/<hash>.gz. Fastly's
-  # rewrite in fastly/recv.vcl.tftpl and the GCS store spell the same path.
-  blob_key_layout = "<first two hex>/<hash>.gz"
 }
 
+# The object key of a blob in a bucket is <first two hex>/<hash>.gz, the
+# layout every blob store writes (kiewer_lib/src/blob, object_name); the
+# rewrite in fastly/recv.vcl.tftpl spells the same path.
+
+# The project's number, for the deterministic Cloud Run host. Read after
+# the Resource Manager API is on, which on a fresh project it may not be;
+# the price is that the number, and the hosts built from it, are known
+# only at the first apply.
 data "google_project" "this" {
   project_id = var.project_id
+  depends_on = [google_project_service.apis]
 }

@@ -63,8 +63,9 @@ resource "google_artifact_registry_repository" "kiewer" {
     id     = "delete-the-rest"
     action = "DELETE"
     condition {
-      tag_state  = "ANY"
-      older_than = "1d"
+      tag_state = "ANY"
+      # A day, in the seconds form the API takes.
+      older_than = "86400s"
     }
   }
 

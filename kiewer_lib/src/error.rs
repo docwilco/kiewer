@@ -103,12 +103,11 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Exit {
-    /// I/O, including the blob store's files and objects.
+    /// I/O, including the blob store's files.
     Io = 3,
     /// A blob that is corrupt or a hash that does not parse.
     Blob = 4,
-    /// The environment is missing or malformed, or a client cannot be
-    /// built from it.
+    /// The environment is missing or malformed.
     Config = 5,
     /// Postgres, including migrations.
     Db = 6,

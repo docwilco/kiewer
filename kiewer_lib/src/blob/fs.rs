@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 
-use super::{BlobHash, BlobStore, Put, PutReceipt, gunzip, gzip, verified};
+use super::{BlobHash, BlobStore, Put, PutReceipt, blocking, gunzip, gzip, object_name, verified};
 use crate::error::{Error, Result};
 
 /// Blobs under one directory. Cheap to clone: a path.
@@ -28,8 +28,7 @@ impl FsBlobStore {
     }
 
     fn path_of(&self, hash: &BlobHash) -> PathBuf {
-        let name = hash.to_string();
-        self.root.join(&name[..2]).join(format!("{name}.gz"))
+        self.root.join(object_name(hash))
     }
 
     fn put_sync(&self, bytes: &[u8]) -> Result<PutReceipt> {
@@ -98,19 +97,6 @@ impl FsBlobStore {
             }),
         }
     }
-}
-
-/// Run blocking filesystem work off the runtime's threads. A task that
-/// does not finish (a panic in it, a runtime shutting down) is a failure
-/// of the store, reported, never a panic of the caller.
-async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T> + Send + 'static,
-) -> Result<T> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|join| Error::Failed {
-            reason: format!("the filesystem store's blocking task did not finish: {join}"),
-        })?
 }
 
 #[async_trait]

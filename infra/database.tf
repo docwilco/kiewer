@@ -5,8 +5,10 @@
 # connection rides on, with no authorized network, so nothing reaches it
 # without IAM.
 resource "google_sql_database_instance" "kiewer" {
-  name             = "kiewer"
-  database_version = "POSTGRES_17"
+  name = "kiewer"
+  # The major compose.yaml and CI's service container run; the three move
+  # together.
+  database_version = "POSTGRES_16"
   region           = var.region
   # A destroy of this configuration never takes the instance; lift this
   # by hand first if that is ever meant.

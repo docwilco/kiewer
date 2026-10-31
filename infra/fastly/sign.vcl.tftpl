@@ -8,11 +8,12 @@
 #   string to sign = <method> LF <Content-MD5> LF <Content-Type> LF <Date> LF <resource>
 # Content-MD5 and Content-Type are empty on a read; Date is the header set
 # just before; the resource is the path-style URL, bucket included, which
-# recv already made the request URL. A HEAD is signed as a GET because
-# Fastly sends a GET to the origin for it.
+# recv already made the request URL. The method signed is bereq.method,
+# the one the origin sees: a HEAD becomes a GET on a miss (Fastly fetches
+# the body to cache it) and stays a HEAD on a pass.
 if (req.http.X-Kiewer-Origin == "gcs") {
   set bereq.http.Date = now;
-  set bereq.http.Authorization = "AWS ${access_id}:" digest.hmac_sha1_base64("${secret}", if(req.method == "HEAD", "GET", req.method) LF LF LF bereq.http.Date LF bereq.url.path);
+  set bereq.http.Authorization = "AWS ${access_id}:" digest.hmac_sha1_base64("${secret}", bereq.method LF LF LF bereq.http.Date LF bereq.url.path);
   # Blobs are stored gzip with Content-Encoding: gzip (ADR 0002). Asking
   # for gzip keeps GCS from transcoding, so the cached object is the
   # stored bytes and the Content-Encoding reaches the browser.

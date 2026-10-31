@@ -25,7 +25,7 @@ pub enum BlobStoreConfig {
     /// The GCS store on the bucket `BLOB_BUCKET` names, the variable the
     /// Terraform in `infra/` gives the Cloud Run services; with
     /// `KIEWER_GCS_EMULATOR` beside it, on that emulator (its base URL)
-    /// with no credentials.
+    /// with no credentials. The emulator variable alone changes nothing.
     Gcs {
         bucket: String,
         emulator: Option<String>,
@@ -134,16 +134,15 @@ impl Config {
                 reason: "is not set; see README, Development".to_owned(),
             })?;
         let set = |name: &str| var(name).filter(|value| !value.is_empty());
-        let blobs = match (set("BLOB_BUCKET"), set("KIEWER_GCS_EMULATOR")) {
-            (Some(bucket), emulator) => BlobStoreConfig::Gcs { bucket, emulator },
-            (None, Some(_)) => {
-                return Err(Error::Env {
-                    name: "KIEWER_GCS_EMULATOR",
-                    reason: "is set without BLOB_BUCKET, the bucket it would stand in for"
-                        .to_owned(),
-                });
-            }
-            (None, None) => BlobStoreConfig::Filesystem {
+        // The emulator variable means something only beside a bucket: a dev
+        // box exports it for the GCS store test and still runs the server
+        // on the directory.
+        let blobs = match set("BLOB_BUCKET") {
+            Some(bucket) => BlobStoreConfig::Gcs {
+                bucket,
+                emulator: set("KIEWER_GCS_EMULATOR"),
+            },
+            None => BlobStoreConfig::Filesystem {
                 root: set("KIEWER_BLOB_DIR")
                     .map_or_else(|| PathBuf::from(DEFAULT_BLOB_DIR), PathBuf::from),
             },
@@ -300,21 +299,17 @@ mod tests {
     }
 
     #[test]
-    fn an_emulator_without_a_bucket_names_itself() {
-        let err = Config::from_vars(vars(&[
+    fn an_emulator_without_a_bucket_leaves_the_filesystem_store() {
+        let config = Config::from_vars(vars(&[
             ("DATABASE_URL", "postgres://x"),
             ("KIEWER_GCS_EMULATOR", "http://127.0.0.1:4443"),
         ]))
-        .expect_err("an emulator stands in for a bucket");
-        assert!(
-            matches!(
-                err,
-                Error::Env {
-                    name: "KIEWER_GCS_EMULATOR",
-                    ..
-                }
-            ),
-            "{err}"
+        .expect("the test's export does not change the server's store");
+        assert_eq!(
+            config.blobs,
+            BlobStoreConfig::Filesystem {
+                root: PathBuf::from(DEFAULT_BLOB_DIR)
+            }
         );
     }
 

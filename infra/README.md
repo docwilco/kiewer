@@ -49,7 +49,7 @@ Read the plan before the apply: on the first run it creates everything; after th
 
 2. DNS: CNAME the two hostnames (`terraform output hostnames`) to the same Fastly target the other `*.drwil.co` names use; the certificate already covers them.
 
-3. The values that exist only once the services have hostnames: register the OAuth applications per environment and provider (callback URLs on the hostnames), make a Fastly API token with purge scope on the `kiewer` service, put them in `terraform.tfvars` (`oauth_clients`, `fastly_api_token`; the example file shows the shape), and apply again. Until then the secrets hold the placeholder `unset`.
+3. The values that exist only once the services have hostnames: register the OAuth applications per environment and provider (callback URLs on the hostnames), make a Fastly API token with purge scope on the `kiewer` service, put them in `terraform.tfvars` (`oauth_clients`, `fastly_api_token`; the example file shows the shape), and apply again. Until then the services get no variables for them and the server runs with sign-in off and no purges.
 
 ## What a plan shows after a CI deploy
 
@@ -57,18 +57,18 @@ Nothing. CI changes only the image and what `gcloud run deploy` writes with it, 
 
 ## The server's environment
 
-What `run.tf` gives each service, the contract the server reads. Secret-backed values come from Secret Manager's latest version.
+What `run.tf` gives each service, the names `kiewer_lib::config` reads. Secret-backed values come from Secret Manager's latest version. A provider without a registration in `oauth_clients` gets neither of its two variables and its secret has no version, which the server reads as that provider turned off; the same for the Fastly token while `fastly_api_token` is empty. Nothing is ever set to a placeholder.
 
 | Variable | Value |
 | --- | --- |
-| `PUBLIC_URL` | `https://<hostname>`, for absolute URLs |
+| `PUBLIC_URL` | `https://<hostname>`, for absolute URLs and the sign-in callbacks |
 | `DATABASE_URL` | secret: `postgres://<role>:<password>@/<database>?host=/cloudsql/<connection name>` |
-| `BLOB_BUCKET` | the environment's blob bucket; objects at `<first two hex>/<hash>.gz` |
+| `BLOB_BUCKET` | the environment's blob bucket, which makes the GCS store the blob store; objects at `<first two hex>/<hash>.gz` |
 | `THUMBNAIL_QUEUE` | the environment's Cloud Tasks queue, as `projects/…/locations/…/queues/…` |
 | `FASTLY_SERVICE_ID` | the service to purge on |
-| `FASTLY_API_TOKEN` | secret: the token to purge with |
-| `OAUTH_<GITHUB,DISCORD,GOOGLE>_CLIENT_ID` | the registration's client id |
-| `OAUTH_<GITHUB,DISCORD,GOOGLE>_CLIENT_SECRET` | secret: the registration's client secret |
+| `FASTLY_API_TOKEN` | secret: the token to purge with; only once given |
+| `OAUTH_<GITHUB,DISCORD,GOOGLE>_CLIENT_ID` | the registration's client id; only once registered |
+| `OAUTH_<GITHUB,DISCORD,GOOGLE>_CLIENT_SECRET` | secret: the registration's client secret; only once registered |
 
 Cloud Run sets `PORT`. A retired variable is a breaking Release (AGENTS.md, Deploy).
 

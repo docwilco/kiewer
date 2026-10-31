@@ -134,6 +134,30 @@ pub fn gunzip(compressed: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// The name a blob is stored under, in every store: `<first two hex>/<hash>.gz`,
+/// a path under the filesystem store's root and an object key in a bucket,
+/// so a directory and a bucket hold the same bytes under the same names,
+/// and Fastly's rewrite (infra/fastly/recv.vcl.tftpl) finds them.
+#[must_use]
+pub fn object_name(hash: &BlobHash) -> String {
+    let name = hash.to_string();
+    format!("{}/{name}.gz", &name[..2])
+}
+
+/// Run a store's blocking work (hashing, compression, the filesystem) off
+/// the runtime's threads. A task that does not finish (a panic in it, a
+/// runtime shutting down) is a failure of the store, reported, never a
+/// panic of the caller.
+pub(crate) async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|join| Error::Failed {
+            reason: format!("the blob store's blocking task did not finish: {join}"),
+        })?
+}
+
 /// The bytes read back under `hash`, checked against it. Every store calls
 /// this on a `get`, so a damaged object fails loudly rather than rendering.
 ///
@@ -171,6 +195,15 @@ mod tests {
     #[test_case("abababababababababababababababababababababababababababababababab", true; "64 hex")]
     fn hash_text_must_be_64_hex_characters(text: &str, parses: bool) {
         assert_eq!(text.parse::<BlobHash>().is_ok(), parses);
+    }
+
+    #[test]
+    fn objects_are_named_by_their_hash_under_a_two_hex_shard() {
+        let hash = BlobHash::of(b"kiewer");
+        assert_eq!(
+            object_name(&hash),
+            "ad/ad8e964fa89208513d804735d67ba5e70ac9154e3658b8ffd9eea31853860ad2.gz"
+        );
     }
 
     #[test]

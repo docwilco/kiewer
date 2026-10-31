@@ -38,9 +38,9 @@ variable "oauth_clients" {
     The OAuth registrations per environment (production, staging) and
     provider (github, discord, google): client id and client secret. Each
     environment has its own registrations (docs/v1-scope.md, Q57). An
-    environment or provider left out gets the placeholder "unset", so the
-    first apply needs no registration done yet; the server then fails the
-    sign-in flow for that provider until a real value is applied.
+    environment or provider left out gets no variables and no secret
+    version, which the server reads as that provider turned off, so the
+    first apply needs no registration done yet.
   EOT
   type = map(map(object({
     client_id     = string
@@ -51,7 +51,7 @@ variable "oauth_clients" {
 }
 
 variable "fastly_api_token" {
-  description = "A Fastly API token with purge scope on the kiewer service, for the server's Surrogate-Key purges. Made by hand in the Fastly control panel (the provider cannot mint tokens). Empty means the placeholder \"unset\" until a token is applied."
+  description = "A Fastly API token with purge scope on the kiewer service, for the server's Surrogate-Key purges. Made by hand in the Fastly control panel (the provider cannot mint tokens). Empty means the services get no FASTLY_API_TOKEN and the secret has no version until a token is applied."
   type        = string
   default     = ""
   sensitive   = true

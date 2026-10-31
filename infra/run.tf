@@ -80,27 +80,37 @@ resource "google_service_account_iam_member" "run_acts_as_itself" {
 }
 
 locals {
-  # Plain environment per service; the secret-backed ones are below. The
-  # server reads these names; README.md lists them as the contract.
+  # The environment per service, the names kiewer_lib::config reads;
+  # README.md lists them. A provider with no registration in
+  # var.oauth_clients gets no variables at all, neither id nor secret,
+  # which the server reads as that provider turned off; a placeholder
+  # value would read as a registration. The same for the Fastly token.
+  # The registered set is derived from a sensitive variable, so it is
+  # marked nonsensitive to key the env blocks: which providers exist is
+  # not a secret, their values are.
   run_env = {
-    for env, e in local.environments : env => {
-      PUBLIC_URL              = "https://${e.hostname}"
-      BLOB_BUCKET             = google_storage_bucket.blobs[env].name
-      THUMBNAIL_QUEUE         = google_cloud_tasks_queue.thumbnails[env].id
-      FASTLY_SERVICE_ID       = fastly_service_vcl.kiewer.id
-      OAUTH_GITHUB_CLIENT_ID  = try(var.oauth_clients[env]["github"].client_id, "unset")
-      OAUTH_DISCORD_CLIENT_ID = try(var.oauth_clients[env]["discord"].client_id, "unset")
-      OAUTH_GOOGLE_CLIENT_ID  = try(var.oauth_clients[env]["google"].client_id, "unset")
-    }
+    for env, e in local.environments : env => merge(
+      {
+        PUBLIC_URL        = "https://${e.hostname}"
+        BLOB_BUCKET       = google_storage_bucket.blobs[env].name
+        THUMBNAIL_QUEUE   = google_cloud_tasks_queue.thumbnails[env].id
+        FASTLY_SERVICE_ID = fastly_service_vcl.kiewer.id
+      },
+      {
+        for provider in local.oauth_registered[env] :
+        "OAUTH_${upper(provider)}_CLIENT_ID" => var.oauth_clients[env][provider].client_id
+      },
+    )
   }
   run_secret_env = {
-    for env, e in local.environments : env => {
-      DATABASE_URL                = google_secret_manager_secret.database_url[env].secret_id
-      FASTLY_API_TOKEN            = google_secret_manager_secret.fastly_api_token.secret_id
-      OAUTH_GITHUB_CLIENT_SECRET  = google_secret_manager_secret.oauth_client_secret["${env}-github"].secret_id
-      OAUTH_DISCORD_CLIENT_SECRET = google_secret_manager_secret.oauth_client_secret["${env}-discord"].secret_id
-      OAUTH_GOOGLE_CLIENT_SECRET  = google_secret_manager_secret.oauth_client_secret["${env}-google"].secret_id
-    }
+    for env, e in local.environments : env => merge(
+      { DATABASE_URL = google_secret_manager_secret.database_url[env].secret_id },
+      local.fastly_api_token_given ? { FASTLY_API_TOKEN = google_secret_manager_secret.fastly_api_token.secret_id } : {},
+      {
+        for provider in local.oauth_registered[env] :
+        "OAUTH_${upper(provider)}_CLIENT_SECRET" => google_secret_manager_secret.oauth_client_secret["${env}-${provider}"].secret_id
+      },
+    )
   }
 }
 
