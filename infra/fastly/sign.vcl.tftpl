@@ -1,0 +1,24 @@
+# vcl_miss and vcl_pass: sign the origin request to GCS. Rendered by
+# Terraform (fastly.tf) with the HMAC key of the kiewer-fastly service
+# account (storage.tf), which has read on both buckets.
+#
+# GCS accepts an HMAC key with the legacy AWS signature, the scheme
+# Fastly's own GCS guide uses:
+#   Authorization: AWS <access id>:<base64(hmac-sha1(secret, string to sign))>
+#   string to sign = <method> LF <Content-MD5> LF <Content-Type> LF <Date> LF <resource>
+# Content-MD5 and Content-Type are empty on a read; Date is the header set
+# just before; the resource is the path-style URL, bucket included, which
+# recv already made the request URL. A HEAD is signed as a GET because
+# Fastly sends a GET to the origin for it.
+if (req.http.X-Kiewer-Origin == "gcs") {
+  set bereq.http.Date = now;
+  set bereq.http.Authorization = "AWS ${access_id}:" digest.hmac_sha1_base64("${secret}", if(req.method == "HEAD", "GET", req.method) LF LF LF bereq.http.Date LF bereq.url.path);
+  # Blobs are stored gzip with Content-Encoding: gzip (ADR 0002). Asking
+  # for gzip keeps GCS from transcoding, so the cached object is the
+  # stored bytes and the Content-Encoding reaches the browser.
+  set bereq.http.Accept-Encoding = "gzip";
+  # Nothing of the client's reaches the bucket.
+  unset bereq.http.Cookie;
+  unset bereq.http.X-Forwarded-Host;
+  unset bereq.http.X-Kiewer-Origin;
+}

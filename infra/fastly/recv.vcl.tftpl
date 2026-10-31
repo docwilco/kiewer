@@ -1,0 +1,36 @@
+# vcl_recv: the hostname picks the environment, the path picks the origin.
+# Rendered by Terraform (fastly.tf) with the staging hostname and the two
+# bucket names; the production hostname is the default, so a request for
+# any other attached domain is production's.
+
+# GCS treats X-Http-Method-Override: HEAD on a GET as a HEAD and answers an
+# empty 200, which would be cached as the object. Nothing legitimate sends
+# it here.
+unset req.http.X-Http-Method-Override;
+
+declare local var.bucket STRING;
+
+if (req.http.host == "${staging_hostname}") {
+  set req.backend = F_run_staging;
+  set var.bucket = "${staging_bucket}";
+} else {
+  set req.backend = F_run_production;
+  set var.bucket = "${production_bucket}";
+}
+
+# The origin sees the run.app host (override_host); the hostname the
+# client used travels here. The server builds absolute URLs from
+# PUBLIC_URL and never needs it, but a log line does.
+set req.http.X-Forwarded-Host = req.http.host;
+
+# A blob read: /blob/<64 hex> for GET or HEAD. The URL becomes the
+# path-style GCS URL of the object, /<bucket>/<first two hex>/<hash>.gz,
+# the layout the blob stores write (kiewer_lib/src/blob). Anything else
+# under /blob/ (a short hash, a POST) stays with the server, which serves
+# blobs from its store too (docs/v1-scope.md, N6).
+if ((req.method == "GET" || req.method == "HEAD") && req.url.path ~ "^/blob/([0-9a-f]{2})([0-9a-f]{62})$") {
+  set req.backend = F_gcs;
+  set req.url = "/" + var.bucket + "/" + re.group.1 + "/" + re.group.1 + re.group.2 + ".gz";
+  # Read by the sign, fetch and deliver snippets; never sent to an origin.
+  set req.http.X-Kiewer-Origin = "gcs";
+}

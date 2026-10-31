@@ -1,2 +1,10 @@
 .env
 /target
+# Terraform (infra/): the providers, plans and the operator's variables stay
+# local; .terraform.lock.hcl is committed, it pins the providers.
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/*.tfplan
+infra/terraform.tfvars
+infra/*.auto.tfvars

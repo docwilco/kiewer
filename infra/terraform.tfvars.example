@@ -1,0 +1,21 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Every variable is
+# described in variables.tf; the ones below are the ones with no default
+# or with a value worth setting before the first apply.
+
+project_id = "my-gcp-project"
+
+# The OAuth registrations, once made: callback URLs are on the hostnames
+# in variables.tf. Leave a provider or an environment out until it exists.
+# oauth_clients = {
+#   production = {
+#     github  = { client_id = "...", client_secret = "..." }
+#     discord = { client_id = "...", client_secret = "..." }
+#     google  = { client_id = "...", client_secret = "..." }
+#   }
+#   staging = {
+#     github  = { client_id = "...", client_secret = "..." }
+#   }
+# }
+
+# A Fastly API token with purge scope on the kiewer service, once made.
+# fastly_api_token = "..."

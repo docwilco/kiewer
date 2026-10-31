@@ -12,3 +12,11 @@ CI runs the same script. Run a single stage with `scripts/checks.sh clippy`.
 
 Clippy is pedantic with no blanket allows: every finding is fixed or carries a
 site-level `#[expect(..., reason = "...")]` naming the invariant that makes it safe.
+
+## Infrastructure
+
+GCP and Fastly are Terraform in `infra/`, applied by hand from a workstation;
+CI only deploys Cloud Run revisions with the identity it defines there.
+`infra/README.md` is the procedure: bootstrapping the state bucket, the apply,
+setting the three repository variables from the outputs, and what a plan after
+a CI deploy should show.
