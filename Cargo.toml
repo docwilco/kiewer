@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["kicad_core", "kiewer_viewer", "kiewer_lib", "kiewer"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# floor found with cargo msrv find, 2026-10-31
+rust-version = "1.85.1"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/docwilco/kiewer"
+
+[workspace.lints.rust]
+# an unsafe fn body gets no implicit unsafe powers: every unsafe operation
+# carries its own block and its own SAFETY comment
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+# every unsafe block carries a // SAFETY: comment
+undocumented_unsafe_blocks = "warn"

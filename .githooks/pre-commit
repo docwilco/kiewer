@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Tracked pre-commit hook. Enable once per clone:
+#   git config core.hooksPath .githooks
+#
+# The checks run against a snapshot of the index, in a directory of its own,
+# never against the working tree. Two consequences:
+#
+#   * the hook validates exactly what the commit will contain, so unstaged
+#     edits can neither break a good commit nor rescue a broken one;
+#   * the snapshot builds into its own target directory, so you can keep
+#     editing and running cargo in the working tree while the hook runs.
+#
+# Everything CI runs, from the single source: scripts/checks.sh
+set -euo pipefail
+
+# Directories nothing cargo builds lives under. A commit that touches only
+# these, or markdown files at the root, runs no checks: the snapshot below
+# could not come out red, the run would only cost the minute. Add a local
+# issue tracker's directory (.scratch) when the repo has one.
+prose_dirs=(docs viewer-drop)
+
+prose_only=1
+while IFS= read -r path; do
+  under_prose=0
+  for dir in "${prose_dirs[@]}"; do
+    case "$path" in "$dir"/*) under_prose=1 ;; esac
+  done
+  [ "$under_prose" = 1 ] && continue
+  case "$path" in
+    */*) prose_only=0; break ;;
+    *.md) ;;
+    *) prose_only=0; break ;;
+  esac
+done < <(git diff --cached --name-only)
+if [ "$prose_only" = 1 ]; then
+  echo "pre-commit: prose only (${prose_dirs[*]}/, root *.md); checks skipped."
+  exit 0
+fi
+
+command -v rsync >/dev/null || {
+  echo "pre-commit: rsync is required (apt install rsync)." >&2
+  exit 1
+}
+
+git_dir="$(git rev-parse --absolute-git-dir)"
+root="$(git rev-parse --show-toplevel)"
+
+# The snapshot lives outside the repository, one directory per worktree, keyed
+# by the worktree's git directory. Anywhere inside the repository would put it
+# under the checkout's own Cargo.toml, and cargo walks up from the manifest it
+# is building: it would either claim the snapshot as a stray member of the
+# outer workspace or read the outer .cargo/config.toml. Deleting the directory
+# is always safe; the next commit rebuilds it, cold.
+cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/git-pre-commit-snapshots"
+snapshot="$cache_root/$(basename "$root")-$(printf '%s' "$git_dir" |
+  sha256sum | cut -c1-12)"
+mkdir -p "$cache_root"
+
+# One commit at a time per worktree: concurrent runs would race on the
+# snapshot directory and on its build lock.
+exec 9>"$snapshot.lock"
+flock -n 9 || {
+  echo "pre-commit: another commit is already running its checks here." >&2
+  exit 1
+}
+
+# cargo-sweep keeps both build directories from growing without bound. Cargo
+# never removes an artifact: any change to a dependency list or a feature set
+# gives the same crate a new hash and the old files stay (one manifest change
+# left a workspace 12 GiB of stale test binaries). The working tree's own
+# target is swept here, before CARGO_TARGET_DIR is redirected below, so the
+# sweep sees whatever this shell builds into. Its measure is age: the last
+# read of a unit's fingerprint, which relatime refreshes at most once a day,
+# so three days keeps everything built or checked daily and drops the rest.
+# A release build a daemon runs from goes cold after three unused days.
+# Skipped while a build holds a profile's lock, and when cargo-sweep is
+# missing, with a line saying so either way.
+#
+# rustc's incremental cache is outside cargo-sweep's reach: one directory per
+# crate id, which is a hash of the same metadata, so every cause of a stale
+# artifact in deps leaves an orphaned directory of object files here, and
+# neither rustc nor cargo ever removes one. A fresh unit never opens its
+# directory, so use cannot be seen; the directory's mtime is its last
+# compile, and one not compiled in three days belongs to a hash that will
+# not be compiled again.
+sweep_incremental() {  # $1: a target directory
+  local old
+  old=$(find "$1"/*/incremental -mindepth 1 -maxdepth 1 -type d -mtime +3 \
+    2>/dev/null || true)
+  [ -n "$old" ] || return 0
+  echo "pre-commit: removing $(printf '%s\n' "$old" | wc -l) incremental" \
+    "directories not compiled in three days under $1"
+  printf '%s\n' "$old" | xargs -d '\n' rm -rf --
+}
+busy=0
+for lock in "$root"/target/*/.cargo-lock; do
+  if [ -e "$lock" ] && ! flock -n "$lock" true; then busy=1; fi
+done
+if [ "$busy" = 1 ]; then
+  echo "pre-commit: a build holds the working tree's target; its sweep is skipped."
+else
+  sweep_incremental "$root/target"
+  if command -v cargo-sweep >/dev/null; then
+    cargo sweep --time 3 "$root"
+  else
+    echo "pre-commit: cargo-sweep is missing (cargo install cargo-sweep --locked); no sweep."
+  fi
+fi
+
+# Export the index git is about to commit. Git points GIT_INDEX_FILE at a
+# temporary index for partial commits, and checkout-index honours it, so the
+# snapshot tracks the real commit content in every commit mode.
+export_dir="$(mktemp -d "$cache_root/export.XXXXXX")"
+trap 'rm -rf "$export_dir"' EXIT
+git checkout-index --all --force --prefix="$export_dir/"
+
+# Sync the export onto the persistent snapshot. The export stamps every file
+# with the current time; --checksum transfers only files whose content really
+# changed, and leaving -t off means the untouched ones keep their old mtimes,
+# so cargo rebuilds only what moved. -p keeps the executable bits.
+mkdir -p "$snapshot"
+rsync -rp --checksum --delete --exclude='/target' "$export_dir/" "$snapshot/"
+
+# Never share a build directory with the working tree, whatever this shell has
+# CARGO_TARGET_DIR set to. The exclude above keeps --delete off this path.
+export CARGO_TARGET_DIR="$snapshot/target"
+
+# The snapshot's target is swept by use, not age: a stamp before the checks,
+# and once they pass everything they did not touch goes. Cargo marks a fresh
+# unit as used only with mtime-on-use, an unstable switch stable cargo takes
+# with RUSTC_BOOTSTRAP=1 in the environment. The price is that rustc in the
+# snapshot would accept a feature gate stable refuses, and proc-macro2
+# builds with its unstable span API; CI on plain stable is the backstop.
+# Changing the variable between runs reruns every build script that watches
+# it, so it is set on every run, sweep or no sweep. The stamp file lands in
+# the snapshot root; the sweep consumes it, and after a failed run the rsync
+# above deletes it, so nothing older than the run in hand is ever read.
+export RUSTC_BOOTSTRAP=1 CARGO_UNSTABLE_MTIME_ON_USE=true
+have_sweep=0
+if command -v cargo-sweep >/dev/null; then
+  have_sweep=1
+  cargo sweep --stamp "$snapshot"
+fi
+
+# 9>&- keeps the lock fd out of the checks and everything they spawn. Without
+# it a test daemon that outlives its run inherits the lock and blocks the next
+# commit, long after the hook that took it has exited.
+echo "pre-commit: checking the staged tree in $snapshot"
+bash "$snapshot/scripts/checks.sh" all 9>&- || {
+  echo >&2
+  echo "pre-commit: checks failed against the staged tree, which is still in" >&2
+  echo "  $snapshot" >&2
+  echo "Reproduce there: (cd $snapshot && scripts/checks.sh <stage>)" >&2
+  exit 1
+}
+
+sweep_incremental "$CARGO_TARGET_DIR"
+if [ "$have_sweep" = 1 ]; then
+  cargo sweep --file "$snapshot"
+fi

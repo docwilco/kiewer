@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Every job delegates to scripts/checks.sh, the same script the pre-commit
+# hook runs, so CI and local checks cannot drift. Every cargo job runs its
+# command through .github/actions/cargo-cached, which restores a rust-cache
+# carrying the workspace crates, marks what the restored build already
+# covers as fresh, runs the command and trims the target to what the
+# command touched before the save; the action explains.
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: ./scripts/checks.sh fmt
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: ./.github/actions/cargo-cached
+        with:
+          run: ./scripts/checks.sh clippy
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # The programs the code or its tests run. This list, the Dockerfile's
+      # apt layer and the dev-box setup move together: a program one of them
+      # gains, all gain in the same commit. Empty until the first one.
+      # - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends <packages>
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/cargo-cached
+        with:
+          run: ./scripts/checks.sh test
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/cargo-cached
+        with:
+          run: ./scripts/checks.sh docs
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Read rust-version from the manifest(s) so this job never drifts from
+      # what Cargo.toml claims. Lowest version wins in a workspace.
+      - id: msrv
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[].rust_version | select(. != null)' \
+            | sort -V | head -n1)"
+          test -n "$version" || { echo "no rust-version in any Cargo.toml" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      # rust-cache hashes every installed toolchain into its key, and the
+      # runner image's preinstalled stable differs between the image versions
+      # in rotation, so with stable left beside the MSRV toolchain the job's
+      # key followed the runner it landed on and its cache was never found.
+      # Nothing after this step needs stable: the toolchain step above made
+      # the MSRV toolchain the default.
+      - run: rustup toolchain uninstall stable
+      - uses: ./.github/actions/cargo-cached
+        with:
+          run: cargo check --workspace --all-targets

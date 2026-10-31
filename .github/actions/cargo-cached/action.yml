@@ -1,0 +1,164 @@
+# Every cargo job in ci.yml runs its command through this action, so the
+# cache sequence is spelled once: restore a rust-cache, mark what the
+# restored build already covers as fresh, run the command, trim the target
+# to what the command touched, record the commit, save. The derivation and
+# the measurements are agent-config ADR 0003 and ADR 0004; what each step
+# guards:
+#
+# The tree hash. rust-cache's restore prefix is its key minus the last
+# component, the lock hash, and every input lands before that cut. Its
+# key hashes no file under src/ and not the root manifest, and GitHub
+# cache keys are immutable, so a restore that matches the key exactly is
+# never saved again: with the workspace crates in the cache, a commit
+# that edits Rust source alone would restore an exact match and the
+# cached crates would stay as built at the last dependency change. So the
+# hash of the tree (`git rev-parse HEAD^{tree}`) goes as a comment into
+# .cargo/config.toml, which the lock hash reads raw: any changed file
+# moves the lock hash alone (fallback to the newest cache under the
+# prefix, warm, saved under the new key); an identical tree (a rerun, a
+# Release tag on main's commit) is an exact match with no save. The step
+# refuses a tracked .cargo/config.toml, since the append would mark the
+# tree dirty for the build and a version banner would carry it, and
+# writes the line once.
+#
+# The freshness mark. The workspace crates are cached
+# (cache-workspace-crates), and cargo keeps a unit when every source's
+# mtime is at or before its dep-info's, which is the runner's clock at
+# the cached build; actions/checkout gives every file the clock at
+# checkout, newer than any cached unit, so the crates and the test
+# binaries would be rebuilt on every run whatever the cache holds. A
+# commit's time is no answer: a commit made before the previous run saved
+# its cache and pushed after (a commit during the run, a rebase, a clock
+# behind) is older than the dep-info, and cargo would keep the previous
+# push's build. The restored cache carries the sha it was built from
+# (cargo-cached.commit in the cargo home's bin, written below); the step fetches
+# that one commit, diffs it against HEAD, and sets every tracked file the
+# diff does not name to the epoch. The named files keep the checkout's
+# mtime and are rebuilt with their dependants; a file whose bytes did not
+# change is fresh. No recorded commit, a failed fetch or a failed diff
+# touch nothing: everything stays at now and the run rebuilds all, the
+# safe side. The sha's home is the cargo home's bin (CARGO_HOME when set,
+# as rust-cache reads it) because it is one of rust-cache's paths and its
+# cleanup there removes only the names present before the restore; under
+# target/ nothing but build/, .fingerprint/ and deps/ survives the
+# cleanup. What the cache carries of the workspace is what that cleanup
+# keeps: units named for a package or one of its library targets, so the
+# crates, their binaries and their unit-test harnesses; an integration
+# test's unit is named for its file and is dropped at every save, so the
+# integration test binaries are compiled on every run from the cached
+# crates.
+#
+# The sweep. On a non-exact match rust-cache keeps stale artifacts beside
+# rebuilt ones at every save, until the runner's disk fills; `cargo sweep
+# --file` against the stamp removes every unit the run did not touch,
+# the workspace's own units kept with the rest. cargo-sweep reads a
+# unit's newest atime; without the hook's mtime-on-use switch
+# (RUSTC_BOOTSTRAP=1, off limits on plain-stable CI) only the kernel
+# moves atime, and relatime records a read only when atime is at or
+# before mtime or ctime, or a day old. The reset to the epoch makes every
+# read count; noatime would record none, so the step warns. cargo-sweep
+# comes through cargo-binstall. The crate is pinned at its minor (a
+# semver requirement, resolved to the newest match), so a patch comes in
+# on its own and a breaking release waits for a commit; the action at its
+# full version, since cargo-binstall publishes no major tag (`@v1` does
+# not resolve), so a bump of it is a commit. The binary rides in the
+# cached ~/.cargo/bin after the first save, and binstall skips it while
+# it satisfies the requirement.
+#
+# An exact match is never saved, so the reset, stamp, sweep and record
+# are skipped on one; with `save` false (a pull request's release-build
+# job, whose cache only that pull request would read) they are skipped
+# too. The freshness mark runs on every restore: an exact match (a rerun)
+# finds its own commit recorded, the diff names nothing, and every unit
+# is fresh.
+name: cargo-cached
+description: Run a cargo command under a rust-cache that carries the workspace crates, keyed on the tree, a diff against the recorded commit marking what is fresh, a sweep trimming the save
+inputs:
+  run:
+    description: The command, as a job's `run` would take it; several lines are fine.
+    required: true
+  shared-key:
+    description: rust-cache's shared-key; empty keys the cache on the job id.
+    default: ""
+  save:
+    description: Whether rust-cache saves at the end ("true" or "false").
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: The tree hash enters the lock hash
+      shell: bash
+      run: |
+        if git ls-files --error-unmatch .cargo/config.toml >/dev/null 2>&1; then
+          echo "::error::.cargo/config.toml is tracked; this action appends a comment to it, which would mark the tree dirty for the build (the banner would say so). Teach the action another raw-hashed file, or the banner to ignore the line, before tracking it."
+          exit 1
+        fi
+        tree="$(git rev-parse 'HEAD^{tree}')"
+        mkdir -p .cargo
+        line="# cargo-cached: tree $tree"
+        grep -qxF "$line" .cargo/config.toml 2>/dev/null || printf '%s\n' "$line" >> .cargo/config.toml
+        # The recorded commit's file, under rust-cache's own cargo home.
+        echo "CARGO_CACHED_COMMIT=${CARGO_HOME:-$HOME/.cargo}/bin/cargo-cached.commit" >> "$GITHUB_ENV"
+    - uses: Swatinem/rust-cache@v2
+      id: cache
+      with:
+        shared-key: ${{ inputs.shared-key }}
+        save-if: ${{ inputs.save }}
+        cache-workspace-crates: true
+    - name: What the recorded commit already built is fresh
+      shell: bash
+      run: |
+        if [ ! -f "$CARGO_CACHED_COMMIT" ]; then
+          echo "no commit recorded with the cache; every unit is rebuilt"
+          exit 0
+        fi
+        built="$(cat "$CARGO_CACHED_COMMIT")"
+        echo "the cache was built at $built"
+        if ! git fetch --quiet --depth=1 origin "$built"; then
+          echo "::warning::could not fetch $built, the commit the cache was built at; every unit is rebuilt"
+          exit 0
+        fi
+        changed="$(mktemp)"
+        if ! git diff --name-only -z "$built" HEAD > "$changed"; then
+          echo "::warning::could not diff $built against HEAD; every unit is rebuilt"
+          exit 0
+        fi
+        echo "changed since $built: $(tr -cd '\0' < "$changed" | wc -c) file(s)"
+        # NUL-separated throughout: without -z git quotes a path with a byte
+        # outside ASCII, and the quoted name would match nothing and be
+        # marked fresh although it changed. comm, not grep: grep -f splits
+        # its patterns on newlines whatever -z says, and grep -v on a diff
+        # naming every file selects nothing and fails the step.
+        comm -z -23 <(git ls-files -z | LC_ALL=C sort -z) <(LC_ALL=C sort -z < "$changed") \
+          | xargs -0 -r touch -d @0 --
+    - name: cargo-sweep
+      if: inputs.save == 'true' && steps.cache.outputs.cache-hit != 'true'
+      uses: cargo-bins/cargo-binstall@v1.25.2
+    - name: The stamp, after an atime reset of the fingerprints
+      if: inputs.save == 'true' && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        cargo binstall --no-confirm cargo-sweep@0.8
+        options="$(findmnt -no OPTIONS -T .)"
+        case ",$options," in
+          *,relatime,*|*,strictatime,*) ;;
+          *) echo "::warning::the mount records no reads ($options); cargo sweep --file will remove every restored unit and the cache goes cold" ;;
+        esac
+        if [ -d target ]; then
+          find target -path '*/.fingerprint/*' -type f -exec touch -a -d @0 {} +
+        fi
+        cargo sweep --stamp .
+    - name: Run
+      shell: bash
+      run: ${{ inputs.run }}
+    - name: What the run did not touch goes
+      if: inputs.save == 'true' && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      # Consumes the stamp file too.
+      run: cargo sweep --file .
+    - name: The commit this save was built at
+      if: inputs.save == 'true' && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        mkdir -p "$(dirname "$CARGO_CACHED_COMMIT")"
+        git rev-parse HEAD > "$CARGO_CACHED_COMMIT"

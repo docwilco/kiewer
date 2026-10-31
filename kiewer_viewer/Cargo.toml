@@ -1,0 +1,17 @@
+[package]
+name = "kiewer_viewer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# cdylib for the wasm32 build the browser loads; rlib so native tests and
+# the thumbnail renderer link the same code
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -1,0 +1,5 @@
+# Identifiers that clippy::doc_markdown would wrap in backticks but that are
+# proper names, not code, and are not linkable anywhere in this repo. ".."
+# keeps clippy's built-in list. Everything else is answered in code with a
+# site-level #[expect(..., reason = "...")], never here.
+doc-valid-idents = ["..", "KiCad"]
