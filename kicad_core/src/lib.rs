@@ -2,7 +2,8 @@
 //! Compiles to wasm32 for the viewer and natively for the server.
 //!
 //! [`parse_board`] reads a KiCad 9 or 10 `.kicad_pcb` into a
-//! [`model::Board`]. Elements the model has no place for (groups,
+//! [`model::Board`]; [`tessellate::Tessellator`] turns a board's copper
+//! and outline into triangles. Elements the model has no place for (groups,
 //! dimensions, 3D models, plot settings) are skipped; a known element with
 //! a missing or malformed field, an unknown layer name, or a format older
 //! than KiCad 9 is an [`Error`], never a panic.
@@ -14,8 +15,10 @@
 
 pub mod board;
 pub mod error;
+pub mod geometry;
 pub mod model;
 pub mod sexpr;
+pub mod tessellate;
 
 pub use board::parse_board;
 pub use error::{Error, MIN_BOARD_VERSION, Result};

@@ -13,6 +13,10 @@ workspace = true
 # no tokio, no web-sys, no crate that needs the operating system.
 [dependencies]
 derive_more = { version = "2", default-features = false, features = ["display", "error"] }
+# Fill and stroke tessellation (tessellate.rs): the triangles the viewer
+# draws and the thumbnail renderer will draw. std only: no serde, no
+# debugger hooks.
+lyon_tessellation = { version = "1", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 test-case = "3"
