@@ -1,9 +1,10 @@
-//! What the workspace's tests share: cargo's scratch directory and the
-//! behaviour every blob store has to show.
+//! What the workspace's tests share: cargo's scratch directory, the
+//! behaviour every blob store has to show, and a bare HTTP client.
 
 pub use tempfile::{TempDir, tempdir_in};
 
 pub mod blob_store_suite;
+pub mod http;
 
 /// A fresh directory under cargo's scratch directory, removed on drop.
 ///

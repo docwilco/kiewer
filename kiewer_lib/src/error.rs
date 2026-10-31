@@ -1,4 +1,5 @@
-//! The one error type of the library and the executable over it.
+//! The one error type of the library and the executable over it, and the
+//! exit code each kind maps to.
 
 use std::path::PathBuf;
 
@@ -38,6 +39,19 @@ pub enum Error {
     #[display("not a blob hash: {_0:?}")]
     #[from(ignore)]
     MalformedHash(#[error(not(source))] String),
+    /// An environment variable the server needs is missing or malformed.
+    #[display("{name} {reason}")]
+    #[from(ignore)]
+    Env { name: &'static str, reason: String },
+    /// Postgres: a connection or a query.
+    #[display("database: {_0}")]
+    Db(sqlx::Error),
+    /// A migration failed, or one that ran has since been edited.
+    #[display("migration: {_0}")]
+    Migrate(sqlx::migrate::MigrateError),
+    /// A page template did not render.
+    #[display("template: {_0}")]
+    Template(askama::Error),
     /// A store that failed for a reason of its own (a test double, a
     /// remote service).
     #[display("{reason}")]
@@ -47,3 +61,87 @@ pub enum Error {
 
 /// The library's result type.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// The process exit code for each kind of failure. Explicit discriminants
+/// from 3, so a duplicate is a compile error; 0, 1, 2, 101 and 126 up are
+/// never assigned ([`Exit::reserved`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Exit {
+    /// I/O, including the blob store's files.
+    Io = 3,
+    /// A blob that is corrupt or a hash that does not parse.
+    Blob = 4,
+    /// The environment is missing or malformed.
+    Config = 5,
+    /// Postgres, including migrations.
+    Db = 6,
+    /// A page did not render.
+    Template = 7,
+    /// A failure with no better kind.
+    Failed = 8,
+}
+
+impl Exit {
+    /// Every kind, in code order.
+    pub const ALL: [Exit; 6] = [
+        Exit::Io,
+        Exit::Blob,
+        Exit::Config,
+        Exit::Db,
+        Exit::Template,
+        Exit::Failed,
+    ];
+
+    /// The codes never assigned: 0 (success), 1 and 2 (the shell's and a
+    /// usage error), 101 (a Rust panic) and 126 up (the shell's own).
+    #[must_use]
+    pub fn reserved(code: u8) -> bool {
+        matches!(code, 0..=2 | 101 | 126..)
+    }
+
+    /// The code as `std::process::exit` takes it.
+    #[must_use]
+    pub fn code(self) -> i32 {
+        i32::from(self as u8)
+    }
+}
+
+impl Error {
+    /// The exit code for this failure. One `match` with no wildcard: a new
+    /// variant does not compile until it has a kind.
+    #[must_use]
+    pub fn exit_code(&self) -> Exit {
+        match self {
+            Error::Io(_) | Error::WriteBlob { .. } | Error::ReadBlob { .. } => Exit::Io,
+            Error::CorruptBlob { .. } | Error::MalformedHash(_) => Exit::Blob,
+            Error::Env { .. } => Exit::Config,
+            Error::Db(_) | Error::Migrate(_) => Exit::Db,
+            Error::Template(_) => Exit::Template,
+            Error::Failed { .. } => Exit::Failed,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_exit_code_is_reserved() {
+        for exit in Exit::ALL {
+            assert!(!Exit::reserved(exit as u8), "{exit:?} uses a reserved code");
+        }
+    }
+
+    #[test]
+    fn all_lists_every_kind_once() {
+        let mut codes: Vec<u8> = Exit::ALL.iter().map(|exit| *exit as u8).collect();
+        codes.dedup();
+        assert_eq!(codes.len(), Exit::ALL.len());
+        assert!(
+            codes.windows(2).all(|pair| pair[0] < pair[1]),
+            "in code order"
+        );
+    }
+}

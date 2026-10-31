@@ -3,7 +3,7 @@
 # (.githooks/pre-commit) and CI (.github/workflows/ci.yml) both run this
 # script, so what passes locally is exactly what passes in CI.
 #
-# Usage: scripts/checks.sh [fmt|clippy|test|docs|all]   (default: all)
+# Usage: scripts/checks.sh [fmt|clippy|test|docs|wasm|all]   (default: all)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,6 +20,17 @@ stage_clippy() { cargo clippy --workspace --all-targets -- -D warnings; }
 # feature set, another hash and a second compile under `cargo test`.
 stage_test()   { cargo build --workspace --all-targets && cargo test --workspace; }
 stage_docs()   { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps; }
+# The viewer for the browser. The one package by name, not the workspace:
+# the server does not build for wasm32. The feature-unification concern
+# behind "never -p" (rust-conventions) is about duplicate artifacts under
+# one target directory; a --target build has a directory of its own. The
+# target comes from rustup (README, Development; the CI workflow's wasm
+# job), so a missing one is named rather than left to cargo's error.
+stage_wasm() {
+  rustup target list --installed | grep -qx wasm32-unknown-unknown \
+    || { echo "Run 'rustup target add wasm32-unknown-unknown' first." >&2; return 1; }
+  cargo build --target wasm32-unknown-unknown -p kiewer_viewer --lib
+}
 
 run() {
   local name=$1 start
@@ -30,7 +41,7 @@ run() {
 }
 
 case "${1:-all}" in
-  fmt|clippy|test|docs) run "$1" ;;
-  all) for stage in fmt clippy test docs; do run "$stage"; done ;;
-  *) echo "usage: $0 [fmt|clippy|test|docs|all]" >&2; exit 2 ;;
+  fmt|clippy|test|docs|wasm) run "$1" ;;
+  all) for stage in fmt clippy test docs wasm; do run "$stage"; done ;;
+  *) echo "usage: $0 [fmt|clippy|test|docs|wasm|all]" >&2; exit 2 ;;
 esac

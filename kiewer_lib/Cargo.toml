@@ -10,12 +10,19 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+askama = { version = "0.14", default-features = false, features = ["derive", "std"] }
 async-trait = "0.1"
+# http1 only: Fastly and Cloud Run's front end speak HTTP/1.1 to the
+# container; the rest of axum's defaults (json, form, query) come in with
+# the handlers that need them.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 derive_more = { version = "2", features = ["display", "error", "from"] }
 flate2 = "1"
 sha2 = "0.11"
-tokio = { version = "1", features = ["rt"] }
+sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "tls-rustls"] }
+tokio = { version = "1", features = ["net", "rt", "signal", "time"] }
+tracing = "0.1"
 
 [dev-dependencies]
 kiewer_test_support = { path = "../kiewer_test_support" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

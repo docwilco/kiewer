@@ -1,0 +1,26 @@
+# Postgres for a dev box: `docker compose up -d`, then `cargo run` with
+# the DATABASE_URL from .env.example. The server itself runs on the host
+# (cargo run), not in compose, so a rebuild is a cargo build and nothing
+# else. The role, password and database name here, in .env.example and in
+# the CI workflow's postgres service are one triple; a change moves all
+# three in one commit.
+services:
+  postgres:
+    # Major 16, as Cloud SQL runs (infra/) and as CI's service container.
+    image: postgres:16
+    environment:
+      POSTGRES_USER: kiewer
+      POSTGRES_PASSWORD: kiewer
+      POSTGRES_DB: kiewer
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kiewer -d kiewer"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+volumes:
+  postgres:

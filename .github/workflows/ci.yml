@@ -64,11 +64,32 @@ jobs:
     name: Test
     if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
+    # Postgres beside the job, as compose.yaml gives a dev box: the same
+    # major and the same role, password and database triple, so the
+    # DATABASE_URL below is .env.example's. The tests gated on DATABASE_URL
+    # (kiewer_lib/tests/db.rs) run here and skip on a box without it.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: kiewer
+          POSTGRES_PASSWORD: kiewer
+          POSTGRES_DB: kiewer
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kiewer -d kiewer"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://kiewer:kiewer@127.0.0.1:5432/kiewer
     steps:
       - uses: actions/checkout@v5
       # The programs the code or its tests run. This list, the Dockerfile's
       # apt layer and the dev-box setup move together: a program one of them
-      # gains, all gain in the same commit. Empty until the first one.
+      # gains, all gain in the same commit. Empty until the first one
+      # (Postgres is a service above, not a program on the runner).
       # - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends <packages>
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/cargo-cached
@@ -85,6 +106,21 @@ jobs:
       - uses: ./.github/actions/cargo-cached
         with:
           run: ./scripts/checks.sh docs
+
+  # The viewer crate for the browser. The target comes with the toolchain
+  # step; a dev box adds it with rustup (README, Development).
+  wasm:
+    name: Viewer for wasm32
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: ./.github/actions/cargo-cached
+        with:
+          run: ./scripts/checks.sh wasm
 
   msrv:
     name: MSRV

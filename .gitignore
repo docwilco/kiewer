@@ -1,5 +1,7 @@
 .env
 /target
+# the filesystem blob store of a dev box (KIEWER_BLOB_DIR, default)
+/blobs
 # Terraform (infra/): the providers, plans and the operator's variables stay
 # local; .terraform.lock.hcl is committed, it pins the providers.
 infra/.terraform/
