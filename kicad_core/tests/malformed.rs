@@ -107,14 +107,17 @@ fn a_missing_or_malformed_field_is_an_error_naming_it(item: &str, message: &str)
 #[test_case("(net 0 \"\") (net 1 \"GND\") (via (at 0 0) (size 0.8) (drill 0.4) (layers \"F.Cu\" \"B.Cu\") (net 7))", "net 7 is not in the net table"; "net number past the table")]
 #[test_case("(net 0 \"\") (via (at 0 0) (size 0.8) (drill 0.4) (layers \"F.Cu\" \"B.Cu\") (net -1))", "net -1 is not in the net table"; "negative net number")]
 #[test_case("(net 1 \"GND\") (net 1 \"VCC\")", "net 1 is declared twice"; "net declared twice")]
+fn a_bad_net_table_reference_is_an_error(item: &str, message: &str) {
+    let error = error_of(&tiny(MIN_BOARD_VERSION, item)).to_string();
+    assert!(error.contains(message), "{error}");
+}
+
 #[test_case("(layers (0 \"F.Cu\" signal) (0 \"F.Cu\" signal))", "layer \"F.Cu\" is declared twice"; "layer declared twice")]
 #[test_case("(layers (0 \"F.Cu\" copper))", "expected a layer type"; "layer with an unknown type")]
-fn a_bad_table_reference_is_an_error(item: &str, message: &str) {
-    let source = if item.starts_with("(layers") {
-        format!("(kicad_pcb (version {MIN_BOARD_VERSION}) {item})")
-    } else {
-        tiny(MIN_BOARD_VERSION, item)
-    };
+#[test_case("(layers (zero \"F.Cu\" signal))", "expected a layer number, found \"zero\""; "layer with a bad number")]
+#[test_case("(general (thickness 1.6))", "expected (layers ...) in (kicad_pcb ...)"; "no layer table")]
+fn a_bad_layer_table_is_an_error(table: &str, message: &str) {
+    let source = format!("(kicad_pcb (version {MIN_BOARD_VERSION}) {table})");
     let error = error_of(&source).to_string();
     assert!(error.contains(message), "{error}");
 }
@@ -168,7 +171,9 @@ fn truncated(source: &str, offset: usize) -> &str {
 #[test]
 fn truncations_at_regular_offsets_never_panic() {
     let source = source();
-    let stride = 32_749;
+    // About 250 offsets over the 2 MB board; a prime stride so the cuts
+    // do not line up with the file's own rhythm.
+    let stride = 8_191;
     let failures: Vec<usize> = (0..source.len())
         .step_by(stride)
         .filter(|&offset| panics(truncated(source, offset)))
@@ -180,7 +185,7 @@ fn truncations_at_regular_offsets_never_panic() {
 fn truncations_at_seeded_random_offsets_never_panic() {
     let source = source();
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    let offsets: Vec<usize> = (0..48).map(|_| rng.below(source.len())).collect();
+    let offsets: Vec<usize> = (0..128).map(|_| rng.below(source.len())).collect();
     let failures: Vec<usize> = offsets
         .into_iter()
         .filter(|&offset| panics(truncated(source, offset)))
@@ -249,23 +254,36 @@ fn mutate_numbers(source: &str, every: usize, mutant: &str) -> String {
     out
 }
 
-#[test_case("abc"; "a word")]
-#[test_case("1e999"; "infinity")]
-#[test_case("-"; "a sign")]
-#[test_case(""; "nothing")]
-#[test_case("1.2.3"; "two points")]
-#[test_case("NaN"; "not a number")]
-#[test_case("99999999999999999999999"; "huge integer")]
-#[test_case("-0.0"; "negative zero, still a number")]
-fn mutated_numbers_never_panic(mutant: &str) {
-    let source = source();
-    for every in [1usize, 7, 1_000] {
-        let mutated = mutate_numbers(source, every, mutant);
-        assert!(
-            !panics(&mutated),
-            "panicked with every {every}th number as {mutant:?}"
-        );
-    }
+#[test_case("abc", 1; "every number a word")]
+#[test_case("abc", 7; "every 7th number a word")]
+#[test_case("abc", 1_000; "every 1000th number a word")]
+#[test_case("1e999", 1; "every number infinity")]
+#[test_case("1e999", 7; "every 7th number infinity")]
+#[test_case("1e999", 1_000; "every 1000th number infinity")]
+#[test_case("-", 1; "every number a sign")]
+#[test_case("-", 7; "every 7th number a sign")]
+#[test_case("-", 1_000; "every 1000th number a sign")]
+#[test_case("", 1; "every number nothing")]
+#[test_case("", 7; "every 7th number nothing")]
+#[test_case("", 1_000; "every 1000th number nothing")]
+#[test_case("1.2.3", 1; "every number two points")]
+#[test_case("1.2.3", 7; "every 7th number two points")]
+#[test_case("1.2.3", 1_000; "every 1000th number two points")]
+#[test_case("NaN", 1; "every number NaN")]
+#[test_case("NaN", 7; "every 7th number NaN")]
+#[test_case("NaN", 1_000; "every 1000th number NaN")]
+#[test_case("99999999999999999999999", 1; "every number a huge integer")]
+#[test_case("99999999999999999999999", 7; "every 7th number a huge integer")]
+#[test_case("99999999999999999999999", 1_000; "every 1000th number a huge integer")]
+#[test_case("-0.0", 1; "every number negative zero, still a number")]
+#[test_case("-0.0", 7; "every 7th number negative zero, still a number")]
+#[test_case("-0.0", 1_000; "every 1000th number negative zero, still a number")]
+fn mutated_numbers_never_panic(mutant: &str, every: usize) {
+    let mutated = mutate_numbers(source(), every, mutant);
+    assert!(
+        !panics(&mutated),
+        "panicked with every {every}th number as {mutant:?}"
+    );
 }
 
 #[test]

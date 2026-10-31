@@ -10,7 +10,11 @@ pub const MIN_BOARD_VERSION: u32 = 20_241_229;
 ///
 /// Every failure names where in the text it was found (1-based line and
 /// byte offset) and what was expected there; a malformed file is never a
-/// panic.
+/// panic. The position is why `Malformed` carries fields rather than
+/// being the conventions' bare `Malformed(String)`: a 2 MB board with one
+/// bad number is only diagnosable by line, and the callers that show the
+/// error (the upload page, the viewer) want the line as a value, not
+/// parsed back out of the message.
 #[derive(Debug, Clone, PartialEq, Eq, Display, Error)]
 pub enum Error {
     /// The text is not a board this crate accepts: an unbalanced

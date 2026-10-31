@@ -36,6 +36,11 @@ impl LayerId {
     pub fn index(self) -> usize {
         usize::from(self.0)
     }
+
+    /// The id of the layer at `index`, or `None` past what an id can hold.
+    pub(crate) fn from_index(index: usize) -> Option<Self> {
+        u16::try_from(index).ok().map(LayerId)
+    }
 }
 
 /// Index of a net in [`Board::nets`].
@@ -247,9 +252,11 @@ pub struct Text {
     pub text: String,
     /// What the text is to its footprint.
     pub role: TextRole,
-    /// Where it is anchored.
+    /// Where it is anchored: on the board, or in the footprint's frame for
+    /// a footprint's text.
     pub at: Point,
-    /// Rotation in degrees.
+    /// Rotation in degrees, as the file writes it: for a footprint's text
+    /// that is the absolute angle, the footprint's rotation included.
     pub rotation: f64,
     /// The layer it is drawn on.
     pub layer: LayerId,
@@ -564,8 +571,7 @@ impl Board {
         self.layers
             .iter()
             .position(|layer| layer.name == name)
-            .and_then(|index| u16::try_from(index).ok())
-            .map(LayerId)
+            .and_then(LayerId::from_index)
     }
 
     /// The copper layers, in file order.
@@ -574,7 +580,7 @@ impl Board {
             .iter()
             .enumerate()
             .filter(|(_, layer)| layer.is_copper())
-            .filter_map(|(index, layer)| Some((LayerId(u16::try_from(index).ok()?), layer)))
+            .filter_map(|(index, layer)| Some((LayerId::from_index(index)?, layer)))
     }
 
     /// The board-level graphics on `Edge.Cuts`: the outline and its

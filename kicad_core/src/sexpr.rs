@@ -488,14 +488,15 @@ mod tests {
     #[test_case("1.2.3"; "two points")]
     #[test_case("0x10"; "hex")]
     #[test_case("-"; "sign only")]
-    #[test_case("\"1\""; "quoted is still a number")]
     fn number_rejects_what_is_not_finite_decimal(text: &str) {
         let node = read(&format!("(w {text})")).expect("reads");
-        if text == "\"1\"" {
-            assert_eq!(node.number(0), Ok(1.0));
-        } else {
-            assert!(node.number(0).is_err(), "{text} parsed as a number");
-        }
+        assert!(node.number(0).is_err(), "{text} parsed as a number");
+    }
+
+    #[test]
+    fn a_quoted_number_is_still_a_number() {
+        let node = read("(w \"1.5\")").expect("reads");
+        assert_eq!(node.number(0), Ok(1.5));
     }
 
     #[test]

@@ -52,18 +52,7 @@ fn pins_the_zone_and_fill_counts() {
     assert_eq!(board.zones.len(), 5, "board-level zones");
     let fills: usize = board.all_zones().map(|zone| zone.fills.len()).sum();
     assert_eq!(fills, 19, "stored fills");
-    assert_eq!(
-        board
-            .all_pads()
-            .filter(|pad| pad.kind == PadKind::ThroughHole)
-            .count()
-            + board
-                .all_pads()
-                .filter(|pad| pad.kind != PadKind::ThroughHole)
-                .count(),
-        296,
-        "pads"
-    );
+    assert_eq!(board.all_pads().count(), 296, "pads");
 }
 
 #[test]
@@ -149,8 +138,12 @@ fn through_hole_pads_are_on_every_copper_layer() {
         .all_pads()
         .find(|pad| pad.kind == PadKind::ThroughHole)
         .expect("a through-hole pad");
-    assert!(copper.iter().all(|id| pad.layers.contains(id)));
     assert_eq!(pad.layers.len(), 6, "four copper and two mask layers");
+    assert_eq!(
+        pad.layers.get(..4),
+        Some(copper.as_slice()),
+        "*.Cu expands in stack order, F.Cu first"
+    );
     assert!(pad.drill.is_some());
 }
 
@@ -309,6 +302,9 @@ const KICAD9_BOARD: &str = r#"(kicad_pcb
     (pad "1" thru_hole oval (at -1 0 90) (size 1 2) (drill oval 0.5 1 (offset 0.1 0)) (layers "*.Cu" "*.Mask") (net 1 "GND"))
     (pad "2" smd rect (at 1 0) (size 1 1) (layers "B.Cu" "B.Fab") (net 2 "VCC"))
     (pad "" np_thru_hole circle (at 0 0) (size 1 1) (drill 1) (layers "*.Cu" "*.Mask"))
+    (pad "3" thru_hole oval (at 2 0) (size 1 2) (drill oval 0.6) (layers "*.Cu"))
+    (pad "4" smd custom (at 3 0) (size 0.5 0.5) (drill (offset 0.2 0)) (layers "B.Cu")
+      (primitives (gr_bbox (start -1 -1) (end 1 1)) (gr_circle (center 0 0) (end 0.5 0) (width 0) (fill yes))))
   )
 )"#;
 
@@ -397,6 +393,19 @@ fn a_kicad9_board_reads_its_zone_footprint_and_pads() {
     assert_eq!(fp.pads[1].net.map(NetId::index), Some(1));
     assert_eq!(fp.pads[2].net, None);
     assert_eq!(fp.pads[2].kind, PadKind::NpThroughHole);
+
+    let slot = fp.pads[3].drill.expect("an oval hole with one size");
+    assert_eq!((slot.size.width, slot.size.height), (0.6, 0.6));
+    let offset_only = &fp.pads[4];
+    assert_eq!(
+        offset_only.drill, None,
+        "a (drill (offset ...)) with no size is no hole"
+    );
+    assert_eq!(
+        offset_only.primitives.len(),
+        1,
+        "the gr_bbox hint is not a primitive"
+    );
 }
 
 #[test_case("F.Cu", true)]

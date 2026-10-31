@@ -45,7 +45,7 @@ pub fn parse_board(source: &str) -> Result<Board> {
     }
 
     let mut parser = Parser::default();
-    parser.layers(root.require("layers")?)?;
+    parser.read_layer_table(root.require("layers")?)?;
     for net in root.children("net") {
         parser.declare_net(net)?;
     }
@@ -69,11 +69,7 @@ pub fn parse_board(source: &str) -> Result<Board> {
         match node.head()? {
             "generator" => board.generator = Some(node.atom(0)?.to_owned()),
             "generator_version" => board.generator_version = Some(node.atom(0)?.to_owned()),
-            "general" => {
-                if let Some(thickness) = node.child("thickness") {
-                    board.thickness = Some(thickness.number(0)?);
-                }
-            }
+            "general" => board.thickness = optional_number(node, "thickness")?,
             "footprint" => board.footprints.push(parser.footprint(node)?),
             "segment" => board.segments.push(parser.segment(node)?),
             "arc" => board.arcs.push(parser.track_arc(node)?),
@@ -106,7 +102,9 @@ struct Parser {
 }
 
 impl Parser {
-    fn layers(&mut self, table: &Node) -> Result<()> {
+    /// The `(layers ...)` table: one `(ordinal "name" type ["user name"])`
+    /// per layer, in stack order.
+    fn read_layer_table(&mut self, table: &Node) -> Result<()> {
         for entry in table.lists() {
             let ordinal = entry.head()?;
             let ordinal = ordinal
@@ -128,9 +126,8 @@ impl Parser {
                 }
             };
             let user_name = entry.atom_opt(2).map(str::to_owned);
-            let id = u16::try_from(self.layer_table.len())
-                .map(LayerId)
-                .map_err(|_| entry.error("more layers than the model holds"))?;
+            let id = LayerId::from_index(self.layer_table.len())
+                .ok_or_else(|| entry.error("more layers than the model holds"))?;
             if self.layer_by_name.insert(name.clone(), id).is_some() {
                 return Err(entry.error(format!("layer {name:?} is declared twice")));
             }
@@ -214,8 +211,9 @@ impl Parser {
 
     /// The layers a `(layers ...)` names, wildcards expanded: `*.Cu` is
     /// every copper layer, `*.Mask` every layer ending in `.Mask`, `F&B.Cu`
-    /// the two outer copper layers. A wildcard that matches nothing adds
-    /// nothing; a plain name that is not in the table is an error.
+    /// the two outer copper layers. A wildcard expands in the table's
+    /// stack order. A wildcard that matches nothing adds nothing; a plain
+    /// name that is not in the table is an error.
     fn layer_set(&self, node: &Node) -> Result<Vec<LayerId>> {
         let mut ids: Vec<LayerId> = Vec::new();
         let mut add = |id: LayerId| {
@@ -226,9 +224,9 @@ impl Parser {
         for index in 0..node.args().len() {
             let name = node.atom(index)?;
             if let Some(suffix) = name.strip_prefix('*') {
-                for (layer_name, &id) in &self.layer_by_name {
-                    if layer_name.ends_with(suffix) {
-                        add(id);
+                for layer in &self.layer_table {
+                    if layer.name.ends_with(suffix) {
+                        add(self.layer_named(node, &layer.name)?);
                     }
                 }
             } else if let Some(suffix) = name.strip_prefix("F&B") {
@@ -339,17 +337,18 @@ impl Parser {
         };
         let (at, rotation) = at(node.require("at")?)?;
         let size = size(node.require("size")?)?;
-        let drill = node.child("drill").map(drill).transpose()?;
+        let drill = node.child("drill").map(drill).transpose()?.flatten();
         let layers = self.layer_set(node.require("layers")?)?;
         let net = self.net(node)?;
-        let round_radius_ratio = node
-            .child("roundrect_rratio")
-            .map(|n| n.number(0))
-            .transpose()?;
+        let round_radius_ratio = optional_number(node, "roundrect_rratio")?;
         let mut primitives = Vec::new();
         if let Some(list) = node.child("primitives") {
+            // Shapes only: KiCad also writes a (gr_bbox ...) hint there,
+            // and may add more, so what is not a shape is skipped.
             for primitive in list.lists() {
-                primitives.push(drawing(primitive)?);
+                if is_shape(primitive.head()?) {
+                    primitives.push(drawing(primitive)?);
+                }
             }
         }
         Ok(Pad {
@@ -385,9 +384,6 @@ impl Parser {
             self.layer_named(layers, layers.atom(0)?)?,
             self.layer_named(layers, layers.atom(1)?)?,
         ];
-        let free = node
-            .child("free")
-            .is_some_and(|free| free.atom_opt(0) != Some("no"));
         Ok(Via {
             kind,
             at,
@@ -395,7 +391,7 @@ impl Parser {
             drill,
             layers,
             net: self.net(node)?,
-            free,
+            free: flag(node, "free"),
         })
     }
 
@@ -470,10 +466,7 @@ impl Parser {
         let (at, rotation) = at(node.require("at")?)?;
         let layer_node = node.require("layer")?;
         let layer = self.layer(layer_node)?;
-        let hidden = node.has_flag("hide")
-            || node
-                .child("hide")
-                .is_some_and(|hide| hide.atom_opt(0) != Some("no"));
+        let hidden = node.has_flag("hide") || flag(node, "hide");
         let mut font = Font {
             face: None,
             size: Size {
@@ -491,12 +484,9 @@ impl Parser {
                 if let Some(size_node) = font_node.child("size") {
                     font.size = size(size_node)?;
                 }
-                font.thickness = font_node
-                    .child("thickness")
-                    .map(|n| n.number(0))
-                    .transpose()?;
-                font.bold = font_node.has_flag("bold") || yes(font_node, "bold");
-                font.italic = font_node.has_flag("italic") || yes(font_node, "italic");
+                font.thickness = optional_number(font_node, "thickness")?;
+                font.bold = font_node.has_flag("bold") || flag(font_node, "bold");
+                font.italic = font_node.has_flag("italic") || flag(font_node, "italic");
             }
             if let Some(justify_node) = effects.child("justify") {
                 if justify_node.has_flag("left") {
@@ -526,10 +516,12 @@ impl Parser {
     }
 }
 
-/// Whether `(name yes)` is among the children.
-fn yes(node: &Node, name: &str) -> bool {
+/// A boolean child: `(name yes)` or `(name no)` as KiCad 8 and later write
+/// them, or a bare `(name)` from older files, which meant yes. Absent is
+/// no. The one reading for `hide`, `free`, `bold` and `italic`.
+fn flag(node: &Node, name: &str) -> bool {
     node.child(name)
-        .is_some_and(|child| child.atom_opt(0) == Some("yes"))
+        .is_some_and(|child| child.atom_opt(0) != Some("no"))
 }
 
 /// The first value of the child `name`, when the child is present.
@@ -537,6 +529,12 @@ fn optional_text(node: &Node, name: &str) -> Result<Option<String>> {
     node.child(name)
         .map(|child| child.atom(0).map(str::to_owned))
         .transpose()
+}
+
+/// The first value of the child `name` as a number, when the child is
+/// present.
+fn optional_number(node: &Node, name: &str) -> Result<Option<f64>> {
+    node.child(name).map(|child| child.number(0)).transpose()
 }
 
 /// A `(start x y)`, `(end x y)`, `(xy x y)`: two numbers.
@@ -565,26 +563,39 @@ fn at(node: &Node) -> Result<(Point, f64)> {
     Ok((point(node)?, rotation))
 }
 
-/// A `(drill [oval] d [h] [(offset x y)])`.
-fn drill(node: &Node) -> Result<Drill> {
-    let size = if node.atom_opt(0) == Some("oval") {
-        Size {
-            width: node.number(1)?,
-            height: node.number(2)?,
-        }
-    } else {
-        let diameter = node.number(0)?;
-        Size {
-            width: diameter,
-            height: diameter,
-        }
+/// A `(drill [oval] [d [h]] [(offset x y)])`. KiCad writes each part only
+/// when it has something to say: the second size only when it differs
+/// from the first, no size at all for a surface-mount pad whose shape is
+/// merely offset. No size is no hole.
+fn drill(node: &Node) -> Result<Option<Drill>> {
+    let oval = node.atom_opt(0) == Some("oval");
+    let first = usize::from(oval);
+    let Some(_) = node.atom_opt(first) else {
+        return Ok(None);
+    };
+    let width = node.number(first)?;
+    let height = match node.atom_opt(first + 1) {
+        Some(_) => node.number(first + 1)?,
+        None => width,
     };
     let offset = node
         .child("offset")
         .map(point)
         .transpose()?
         .unwrap_or_default();
-    Ok(Drill { size, offset })
+    Ok(Some(Drill {
+        size: Size { width, height },
+        offset,
+    }))
+}
+
+/// Whether a list head names a shape [`drawing`] reads.
+fn is_shape(head: &str) -> bool {
+    let kind = head
+        .strip_prefix("gr_")
+        .or_else(|| head.strip_prefix("fp_"))
+        .unwrap_or(head);
+    matches!(kind, "line" | "arc" | "circle" | "rect" | "poly" | "curve")
 }
 
 /// The points of a `(pts ...)`: each `(xy ...)` one point, each
