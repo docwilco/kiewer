@@ -9,4 +9,10 @@ repository.workspace = true
 [lints]
 workspace = true
 
+# Everything here builds for wasm32-unknown-unknown as well as natively:
+# no tokio, no web-sys, no crate that needs the operating system.
 [dependencies]
+derive_more = { version = "2", default-features = false, features = ["display", "error"] }
+
+[dev-dependencies]
+test-case = "3"

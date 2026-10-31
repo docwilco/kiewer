@@ -1022,6 +1022,10 @@ dependencies = [
 [[package]]
 name = "kicad_core"
 version = "0.1.0"
+dependencies = [
+ "derive_more",
+ "test-case",
+]
 
 [[package]]
 name = "kiewer"
