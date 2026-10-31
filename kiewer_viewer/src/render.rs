@@ -308,10 +308,10 @@ impl Renderer {
     /// The multisampled texture the frame is drawn into before the
     /// resolve, remade when the target's size changes.
     fn msaa_view(&mut self, device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
-        if let Some(msaa) = &self.msaa {
-            if msaa.size == size {
-                return msaa.view.clone();
-            }
+        if let Some(msaa) = &self.msaa
+            && msaa.size == size
+        {
+            return msaa.view.clone();
         }
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("msaa"),

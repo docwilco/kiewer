@@ -59,7 +59,7 @@ impl FromStr for BlobHash {
             return Err(malformed());
         }
         let mut out = [0u8; 32];
-        for (slot, pair) in out.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+        for (slot, pair) in out.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
             let pair = std::str::from_utf8(pair).map_err(|_| malformed())?;
             *slot = u8::from_str_radix(pair, 16).map_err(|_| malformed())?;
         }

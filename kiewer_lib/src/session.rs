@@ -54,8 +54,8 @@ fn from_hex(text: &str, what: &str) -> Result<[u8; 32]> {
         return Err(malformed());
     }
     let mut out = [0u8; 32];
-    for (slot, pair) in out.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
-        let (high, low) = (digit(pair[0]), digit(pair[1]));
+    for (slot, &[first, second]) in out.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
+        let (high, low) = (digit(first), digit(second));
         *slot = match (high, low) {
             (Some(high), Some(low)) => (high << 4) | low,
             _ => return Err(malformed()),

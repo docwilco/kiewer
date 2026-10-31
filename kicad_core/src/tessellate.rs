@@ -39,17 +39,20 @@ impl Mesh {
 
     /// The corners of every triangle, in order.
     pub fn triangles(&self) -> impl Iterator<Item = [Point; 3]> + '_ {
-        self.indices.chunks_exact(3).filter_map(|corners| {
-            let corner = |i: usize| {
-                let index = *corners.get(i)?;
-                let position = self.positions.get(usize::try_from(index).ok()?)?;
-                Some(Point {
-                    x: f64::from(position[0]),
-                    y: f64::from(position[1]),
-                })
-            };
-            Some([corner(0)?, corner(1)?, corner(2)?])
-        })
+        self.indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .filter_map(|&[a, b, c]| {
+                let corner = |index: u32| {
+                    let position = self.positions.get(usize::try_from(index).ok()?)?;
+                    Some(Point {
+                        x: f64::from(position[0]),
+                        y: f64::from(position[1]),
+                    })
+                };
+                Some([corner(a)?, corner(b)?, corner(c)?])
+            })
     }
 
     /// The box around every vertex, or `None` for an empty mesh.
@@ -590,10 +593,8 @@ impl MeshBuilder {
             strokes.push((on_board(points), primitive.width));
         } else if primitive.width > 0.0 {
             let mut points = on_board(points);
-            if closed {
-                if let Some(first) = points.first().copied() {
-                    points.push(first);
-                }
+            if closed && let Some(first) = points.first().copied() {
+                points.push(first);
             }
             strokes.push((points, primitive.width));
         }
