@@ -32,12 +32,6 @@ impl BlobHash {
     pub fn of(bytes: &[u8]) -> Self {
         Self(Sha256::digest(bytes).into())
     }
-
-    /// The raw digest.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
 }
 
 impl fmt::Display for BlobHash {
@@ -59,7 +53,7 @@ impl FromStr for BlobHash {
     type Err = Error;
 
     fn from_str(text: &str) -> Result<Self> {
-        let malformed = || Error::MalformedHash(text.to_owned());
+        let malformed = || Error::Malformed(format!("not a blob hash: {text:?}"));
         if text.len() != 64 {
             return Err(malformed());
         }
@@ -81,9 +75,9 @@ pub enum Put {
     Existed,
 }
 
-/// The result of a `put`: the blob's hash and whether it was new.
+/// What a `put` hands back: the blob's hash and whether it was new.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Stored {
+pub struct PutReceipt {
     pub hash: BlobHash,
     pub outcome: Put,
 }
@@ -98,7 +92,7 @@ pub trait BlobStore: Send + Sync {
     /// # Errors
     ///
     /// When the store cannot write.
-    async fn put(&self, bytes: &[u8]) -> Result<Stored>;
+    async fn put(&self, bytes: &[u8]) -> Result<PutReceipt>;
 
     /// The uncompressed bytes under this hash, or `None` when the store
     /// has no such blob.
@@ -159,6 +153,8 @@ pub fn verified(hash: &BlobHash, bytes: Vec<u8>) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use test_case::test_case;
+
     use super::*;
 
     #[test]
@@ -169,11 +165,11 @@ mod tests {
         assert_eq!(text.parse::<BlobHash>().expect("parses"), hash);
     }
 
-    #[test]
-    fn hash_text_must_be_64_hex_characters() {
-        assert!("abc".parse::<BlobHash>().is_err());
-        assert!("zz".repeat(32).parse::<BlobHash>().is_err());
-        assert!("ab".repeat(32).parse::<BlobHash>().is_ok());
+    #[test_case("abc", false; "too short")]
+    #[test_case("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", false; "not hex")]
+    #[test_case("abababababababababababababababababababababababababababababababab", true; "64 hex")]
+    fn hash_text_must_be_64_hex_characters(text: &str, parses: bool) {
+        assert_eq!(text.parse::<BlobHash>().is_ok(), parses);
     }
 
     #[test]

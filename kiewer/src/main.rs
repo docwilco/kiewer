@@ -23,9 +23,7 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
-            // The code is 3..=8 by construction (Exit's discriminants), so
-            // it fits the u8 ExitCode takes.
-            ExitCode::from(error.exit_code() as u8)
+            ExitCode::from(error.exit_code().code())
         }
     }
 }

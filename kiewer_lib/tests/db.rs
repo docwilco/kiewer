@@ -6,9 +6,8 @@
 use std::sync::Arc;
 
 use kiewer_lib::blob::fs::FsBlobStore;
-use kiewer_lib::web::{AppState, serve};
+use kiewer_lib::web::AppState;
 use kiewer_test_support::{http, scratch_dir};
-use tokio::net::TcpListener;
 
 fn database_url() -> Option<String> {
     let url = std::env::var("DATABASE_URL").ok()?;
@@ -53,9 +52,7 @@ async fn health_is_ok_with_a_database() {
         db: kiewer_lib::db::connect(&url).await.expect("connect"),
         blobs: Arc::new(FsBlobStore::new(dir.path())),
     };
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(serve(listener, state, std::future::pending()));
+    let addr = http::serve_on_free_port(state).await;
     let (status, body) = http::get(addr, "/healthz").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body.trim(), "ok");

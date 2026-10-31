@@ -29,6 +29,21 @@ until the first table.
 Clippy is pedantic with no blanket allows: every finding is fixed or carries a
 site-level `#[expect(..., reason = "...")]` naming the invariant that makes it safe.
 
+### Exit codes
+
+The executable's non-zero exits, each a kind of `kiewer_lib::error::Error`
+(`Exit` there renders this table; a test keeps the two equal). 0 is success;
+1, 2, 101 and 126 up are never assigned.
+
+| Code | Kind | Meaning |
+|---|---|---|
+| 3 | Io | I/O, including the blob store's files |
+| 4 | Blob | a blob that is corrupt or a hash that does not parse |
+| 5 | Config | the environment is missing or malformed |
+| 6 | Db | Postgres, including migrations |
+| 7 | Template | a page did not render |
+| 8 | Failed | a failure with no better kind |
+
 ## Infrastructure
 
 GCP and Fastly are Terraform in `infra/`, applied by hand from a workstation;

@@ -10,18 +10,20 @@ use kiewer_lib::web::{AppState, serve};
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use tokio::net::TcpListener;
 
-/// A server on 127.0.0.1 at a port the OS picks, with a pool pointed at a
-/// closed port so a database touch fails fast instead of hanging.
-async fn start() -> (SocketAddr, TempDir) {
+/// A state whose pool points at a closed port, so a database touch fails
+/// instead of hanging, with the blob store under cargo's scratch directory.
+fn state() -> (AppState, TempDir) {
     let dir = scratch_dir!();
     let state = AppState {
         db: kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
         blobs: Arc::new(FsBlobStore::new(dir.path())),
     };
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(serve(listener, state, std::future::pending()));
-    (addr, dir)
+    (state, dir)
+}
+
+async fn start() -> (SocketAddr, TempDir) {
+    let (state, dir) = state();
+    (http::serve_on_free_port(state).await, dir)
 }
 
 #[tokio::test]
@@ -49,11 +51,7 @@ async fn health_reports_an_unreachable_database() {
 
 #[tokio::test]
 async fn the_server_stops_when_told() {
-    let dir = scratch_dir!();
-    let state = AppState {
-        db: kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
-        blobs: Arc::new(FsBlobStore::new(dir.path())),
-    };
+    let (state, _dir) = state();
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(serve(listener, state, async {

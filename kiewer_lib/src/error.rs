@@ -35,10 +35,12 @@ pub enum Error {
     #[display("blob {hash} is corrupt: its bytes hash to {actual}")]
     #[from(ignore)]
     CorruptBlob { hash: BlobHash, actual: BlobHash },
-    /// A text that should have been a blob hash: 64 hex characters.
-    #[display("not a blob hash: {_0:?}")]
+    /// A text that does not parse (a blob hash that is not 64 hex
+    /// characters). The message is the value: nothing matches on which
+    /// expectation failed.
+    #[display("{_0}")]
     #[from(ignore)]
-    MalformedHash(#[error(not(source))] String),
+    Malformed(#[error(not(source))] String),
     /// An environment variable the server needs is missing or malformed.
     #[display("{name} {reason}")]
     #[from(ignore)]
@@ -100,10 +102,36 @@ impl Exit {
         matches!(code, 0..=2 | 101 | 126..)
     }
 
-    /// The code as `std::process::exit` takes it.
+    /// The code as a process exit status.
     #[must_use]
-    pub fn code(self) -> i32 {
-        i32::from(self as u8)
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// What each kind means, for the table.
+    #[must_use]
+    pub fn meaning(self) -> &'static str {
+        match self {
+            Exit::Io => "I/O, including the blob store's files",
+            Exit::Blob => "a blob that is corrupt or a hash that does not parse",
+            Exit::Config => "the environment is missing or malformed",
+            Exit::Db => "Postgres, including migrations",
+            Exit::Template => "a page did not render",
+            Exit::Failed => "a failure with no better kind",
+        }
+    }
+
+    /// The exit codes as a markdown table, the block README.md carries; a
+    /// test keeps the two equal.
+    #[must_use]
+    pub fn table() -> String {
+        use std::fmt::Write as _;
+        let mut out = String::from("| Code | Kind | Meaning |\n|---|---|---|\n");
+        for exit in Exit::ALL {
+            // Writing to a String cannot fail.
+            let _ = writeln!(out, "| {} | {exit:?} | {} |", exit.code(), exit.meaning());
+        }
+        out
     }
 }
 
@@ -114,7 +142,7 @@ impl Error {
     pub fn exit_code(&self) -> Exit {
         match self {
             Error::Io(_) | Error::WriteBlob { .. } | Error::ReadBlob { .. } => Exit::Io,
-            Error::CorruptBlob { .. } | Error::MalformedHash(_) => Exit::Blob,
+            Error::CorruptBlob { .. } | Error::Malformed(_) => Exit::Blob,
             Error::Env { .. } => Exit::Config,
             Error::Db(_) | Error::Migrate(_) => Exit::Db,
             Error::Template(_) => Exit::Template,
@@ -132,6 +160,16 @@ mod tests {
         for exit in Exit::ALL {
             assert!(!Exit::reserved(exit as u8), "{exit:?} uses a reserved code");
         }
+    }
+
+    #[test]
+    fn the_readme_carries_the_table() {
+        let readme = include_str!("../../README.md");
+        assert!(
+            readme.contains(&Exit::table()),
+            "README.md's exit-code table is out of date; it should read:\n{}",
+            Exit::table()
+        );
     }
 
     #[test]

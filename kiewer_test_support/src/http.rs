@@ -4,8 +4,22 @@
 
 use std::net::SocketAddr;
 
+use kiewer_lib::web::{AppState, serve};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
+
+/// The server over `state` on 127.0.0.1 at a port the OS picks, running
+/// until the test's runtime ends; its address.
+///
+/// # Panics
+///
+/// When the loopback port cannot be bound.
+pub async fn serve_on_free_port(state: AppState) -> SocketAddr {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(serve(listener, state, std::future::pending()));
+    addr
+}
 
 /// `GET path` at `addr`: the status code and the response body.
 ///
