@@ -130,7 +130,7 @@ async fn a_second_provider_is_linked_to_the_account_and_signs_in_to_it() {
     let linked = account::link(&db, alice.account_id, Provider::Discord, &discord)
         .await
         .expect("link");
-    assert_eq!(linked, Linked::Now);
+    assert_eq!(linked, Linked::Added);
     // Linking the same identity again is nothing new.
     let again = account::link(&db, alice.account_id, Provider::Discord, &discord)
         .await

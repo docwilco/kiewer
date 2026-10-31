@@ -9,20 +9,19 @@ use axum::Form;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, Redirect, Response};
-use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 
 use super::AppState;
-use super::auth::{personal, session_cookie_removal, settled};
-use crate::account::{self, Identity};
+use super::auth::{Settled, personal, session_cookie_removal};
+use crate::account::{self, Handle, Identity};
 use crate::auth::Provider;
 use crate::error::Result;
 use crate::session::{self, ListedSession, SessionKey};
 
 #[derive(Template)]
 #[template(path = "settings.html")]
-struct Account {
-    handle: String,
+struct AccountPage {
+    handle: Handle,
     /// The identities that sign in to the account, oldest first.
     identities: Vec<Identity>,
     /// Registered providers with no identity on the account yet: one link
@@ -44,13 +43,9 @@ pub struct AccountQuery {
 pub async fn account(
     State(state): State<AppState>,
     Query(query): Query<AccountQuery>,
-    jar: CookieJar,
+    settled: Settled,
 ) -> Result<Response> {
-    let (jar, _, session) = match settled(&state, jar).await? {
-        Ok(found) => found,
-        Err(response) => return Ok(response),
-    };
-    let identities = account::identities(&state.db, session.account_id).await?;
+    let identities = account::identities(&state.db, settled.account_id).await?;
     let linkable = state
         .auth
         .providers()
@@ -61,21 +56,21 @@ pub async fn account(
                 .any(|identity| identity.provider == *provider)
         })
         .collect();
-    let page = Account {
-        handle: session
-            .handle
-            .map(|handle| handle.to_string())
-            .unwrap_or_default(),
+    let page = AccountPage {
+        handle: settled.handle,
         identities,
         linkable,
         refused: query.refused,
     };
-    Ok(personal(jar, (StatusCode::OK, Html(page.render()?))))
+    Ok(personal(
+        settled.jar,
+        (StatusCode::OK, Html(page.render()?)),
+    ))
 }
 
 #[derive(Template)]
 #[template(path = "sessions.html")]
-struct Sessions {
+struct SessionsPage {
     /// The account's live sessions, most recently seen first.
     sessions: Vec<ListedSession>,
 }
@@ -85,15 +80,14 @@ const SESSIONS: &str = "/settings/sessions";
 /// `GET /settings/sessions`: when each session started and was last seen,
 /// the current one marked, a revoke for each other one and for all of
 /// them at once.
-pub async fn sessions(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
-    let (jar, id, session) = match settled(&state, jar).await? {
-        Ok(found) => found,
-        Err(response) => return Ok(response),
+pub async fn sessions(State(state): State<AppState>, settled: Settled) -> Result<Response> {
+    let page = SessionsPage {
+        sessions: session::list(&state.db, settled.account_id, &settled.id).await?,
     };
-    let page = Sessions {
-        sessions: session::list(&state.db, session.account_id, &id).await?,
-    };
-    Ok(personal(jar, (StatusCode::OK, Html(page.render()?))))
+    Ok(personal(
+        settled.jar,
+        (StatusCode::OK, Html(page.render()?)),
+    ))
 }
 
 /// The revoke form's one field: the session's key as the page printed
@@ -109,37 +103,29 @@ pub struct RevokeForm {
 /// own key is a sign-out: the cookie goes with the row.
 pub async fn revoke(
     State(state): State<AppState>,
-    jar: CookieJar,
+    settled: Settled,
     Form(form): Form<RevokeForm>,
 ) -> Result<Response> {
-    let (jar, id, session) = match settled(&state, jar).await? {
-        Ok(found) => found,
-        Err(response) => return Ok(response),
-    };
     let Ok(key) = form.key.parse::<SessionKey>() else {
         return Ok(personal(
-            jar,
+            settled.jar,
             (StatusCode::BAD_REQUEST, "that is not a session key\n"),
         ));
     };
-    session::revoke(&state.db, session.account_id, &key).await?;
-    if key == id.key() {
+    session::revoke(&state.db, settled.account_id, &key).await?;
+    if key == settled.id.key() {
         tracing::info!("the current session revoked itself");
         return Ok(personal(
-            jar.remove(session_cookie_removal()),
+            settled.jar.remove(session_cookie_removal()),
             Redirect::to("/"),
         ));
     }
-    Ok(personal(jar, Redirect::to(SESSIONS)))
+    Ok(personal(settled.jar, Redirect::to(SESSIONS)))
 }
 
 /// `POST /settings/sessions/revoke-others`: end every session of the
 /// account but this browser's.
-pub async fn revoke_others(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
-    let (jar, id, session) = match settled(&state, jar).await? {
-        Ok(found) => found,
-        Err(response) => return Ok(response),
-    };
-    session::revoke_others(&state.db, session.account_id, &id).await?;
-    Ok(personal(jar, Redirect::to(SESSIONS)))
+pub async fn revoke_others(State(state): State<AppState>, settled: Settled) -> Result<Response> {
+    session::revoke_others(&state.db, settled.account_id, &settled.id).await?;
+    Ok(personal(settled.jar, Redirect::to(SESSIONS)))
 }

@@ -7,15 +7,16 @@
 
 use askama::Template;
 use axum::Form;
-use axum::extract::{Path, Query, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::StatusCode;
 use axum::http::header::CACHE_CONTROL;
+use axum::http::request::Parts;
 use axum::response::{Html, IntoResponse, Json, Redirect, Response};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
-use crate::account::{self, Handle, Linked};
+use crate::account::{self, AccountId, Handle, Linked};
 use crate::auth::Provider;
 use crate::error::{Error, Result};
 use crate::session::{self, LIFETIME_DAYS, Session, SessionId};
@@ -51,28 +52,34 @@ pub(super) fn session_cookie_removal() -> Cookie<'static> {
 }
 
 /// Why a browser went to a provider: to sign in, or, signed in already,
-/// to link the provider's identity to its account from settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// to link the provider's identity to its account from settings. The wire
+/// name (`?intent=link`, the state cookie's third segment) is
+/// [`Intent::as_str`]; serde spells it the same, which a test holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Intent {
-    #[serde(skip)]
     SignIn,
     Link,
 }
 
 impl Intent {
-    /// The word the state cookie carries for a link; a sign-in carries
-    /// none, so a cookie from before linking existed still reads.
-    const LINK: &str = "link";
+    /// The wire name.
+    fn as_str(self) -> &'static str {
+        match self {
+            Intent::SignIn => "signin",
+            Intent::Link => "link",
+        }
+    }
 }
 
 /// The state, the verifier and, for a link, the intent in one cookie,
 /// dot-separated: the first two are base64url, which has no dot, and a
-/// dot needs no percent-encoding.
+/// dot needs no percent-encoding. A sign-in carries no third segment, so
+/// a cookie from before linking existed still reads.
 fn oauth_cookie(state: &str, verifier: &str, intent: Intent, secure: bool) -> Cookie<'static> {
     let value = match intent {
         Intent::SignIn => format!("{state}.{verifier}"),
-        Intent::Link => format!("{state}.{verifier}.{}", Intent::LINK),
+        Intent::Link => format!("{state}.{verifier}.{}", Intent::Link.as_str()),
     };
     Cookie::build((OAUTH_COOKIE, value))
         .http_only(true)
@@ -95,7 +102,7 @@ fn parse_oauth_cookie(value: &str) -> Option<(String, String, Intent)> {
     let verifier = parts.next()?;
     let intent = match parts.next() {
         None => Intent::SignIn,
-        Some(Intent::LINK) => Intent::Link,
+        Some(word) if word == Intent::Link.as_str() => Intent::Link,
         Some(_) => return None,
     };
     if parts.next().is_some() {
@@ -138,19 +145,50 @@ pub(super) fn personal(jar: CookieJar, response: impl IntoResponse) -> Response 
     (jar, [NO_STORE], response).into_response()
 }
 
-/// The settings page's guard, shared with `web/settings.rs`: the session
-/// of a signed-in person with a handle, or where anyone else goes: home
-/// without a session, the welcome page without a handle.
-pub(super) async fn settled(
-    state: &AppState,
-    jar: CookieJar,
-) -> Result<std::result::Result<(CookieJar, SessionId, Session), Response>> {
-    let (jar, found) = current(state, jar).await?;
-    Ok(match found {
-        Some((id, session)) if session.handle.is_some() => Ok((jar, id, session)),
-        Some(_) => Err(personal(jar, Redirect::to("/welcome"))),
-        None => Err(personal(jar, Redirect::to("/"))),
-    })
+/// A signed-in person with a handle, as the settings pages
+/// (`web/settings.rs`) take them: the extractor runs the guard, and its
+/// rejection is where anyone else goes (home without a session, the
+/// welcome page without a handle) or a database error's 500. The jar
+/// comes along, renewed, for the response.
+pub(super) struct Settled {
+    pub jar: CookieJar,
+    pub id: SessionId,
+    pub account_id: AccountId,
+    pub handle: Handle,
+}
+
+impl FromRequestParts<AppState> for Settled {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> std::result::Result<Self, Response> {
+        let jar = match CookieJar::from_request_parts(parts, state).await {
+            Ok(jar) => jar,
+            Err(never) => match never {},
+        };
+        let (jar, found) = current(state, jar)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        match found {
+            Some((
+                id,
+                Session {
+                    account_id,
+                    handle: Some(handle),
+                    ..
+                },
+            )) => Ok(Settled {
+                jar,
+                id,
+                account_id,
+                handle,
+            }),
+            Some(_) => Err(personal(jar, Redirect::to("/welcome"))),
+            None => Err(personal(jar, Redirect::to("/"))),
+        }
+    }
 }
 
 const SIGN_IN_FIRST: &str = "sign in first, then link the provider from settings\n";
@@ -243,7 +281,12 @@ pub async fn callback(
     let jar = jar.remove(oauth_cookie_removal());
     if let Some(error) = query.error {
         tracing::info!(%provider, error, "sign-in declined or refused at the provider");
-        return Ok(personal(jar, Redirect::to("/")));
+        // Back to where the person was: settings for a link, home else.
+        let next = match stored {
+            Some((_, _, Intent::Link)) => "/settings",
+            _ => "/",
+        };
+        return Ok(personal(jar, Redirect::to(next)));
     }
     let (code, verifier, intent) = match (query.code, query.state, stored) {
         (Some(code), Some(echoed), Some((expected, verifier, intent))) if echoed == expected => {
@@ -306,7 +349,7 @@ async fn link(
     let linked = account::link(&state.db, session.account_id, provider, user).await?;
     tracing::info!(%provider, ?linked, "provider link");
     let next = match linked {
-        Linked::Now | Linked::Already => "/settings".to_owned(),
+        Linked::Added | Linked::Already => "/settings".to_owned(),
         Linked::ToAnotherAccount => format!("/settings?refused={provider}"),
     };
     Ok(personal(jar, Redirect::to(&next)))
@@ -440,4 +483,49 @@ pub async fn me(State(state): State<AppState>, jar: CookieJar) -> Result<Respons
         },
     };
     Ok(personal(jar, Json(me)))
+}
+
+#[cfg(test)]
+mod tests {
+    use test_case::test_case;
+
+    use super::*;
+
+    #[test_case(Intent::SignIn, "signin")]
+    #[test_case(Intent::Link, "link")]
+    fn an_intent_has_one_wire_name(intent: Intent, wire: &str) {
+        assert_eq!(intent.as_str(), wire);
+        assert_eq!(
+            serde_json::to_string(&intent).unwrap(),
+            format!("{wire:?}"),
+            "the query's spelling is the cookie's"
+        );
+    }
+
+    #[test_case("s.v", Some(("s", "v", Intent::SignIn)); "a sign-in from before linking existed")]
+    #[test_case("s.v.link", Some(("s", "v", Intent::Link)); "a link")]
+    #[test_case("s.v.bogus", None; "a word that is not an intent")]
+    #[test_case("s.v.link.x", None; "a fourth segment")]
+    #[test_case("s", None; "no verifier")]
+    #[test_case("", None; "empty")]
+    fn the_state_cookie_reads_as_state_verifier_and_intent(
+        value: &str,
+        parsed: Option<(&str, &str, Intent)>,
+    ) {
+        assert_eq!(
+            parse_oauth_cookie(value),
+            parsed.map(|(s, v, i)| (s.to_owned(), v.to_owned(), i))
+        );
+    }
+
+    #[test]
+    fn a_link_cookie_round_trips() {
+        let cookie = oauth_cookie("state", "verifier", Intent::Link, true);
+        assert_eq!(
+            parse_oauth_cookie(cookie.value()),
+            Some(("state".to_owned(), "verifier".to_owned(), Intent::Link))
+        );
+        let cookie = oauth_cookie("state", "verifier", Intent::SignIn, true);
+        assert_eq!(cookie.value(), "state.verifier");
+    }
 }

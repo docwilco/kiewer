@@ -247,10 +247,6 @@ pub struct ListedSession {
     pub current: bool,
 }
 
-/// The time as the page shows it: UTC, ISO 8601 to the second, formatted
-/// by Postgres so the code carries no time library.
-const ISO_UTC: &str = r#"to_char(%s AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')"#;
-
 /// `account`'s live sessions, most recently seen first, with the one
 /// behind `current` marked.
 ///
@@ -263,15 +259,21 @@ pub async fn list(
     account: AccountId,
     current: &SessionId,
 ) -> Result<Vec<ListedSession>> {
-    let sql = format!(
-        "SELECT id_hash, {created}, {seen} FROM session
-         WHERE account_id = $1 AND expires_at > now()
-         ORDER BY last_seen_at DESC, created_at DESC",
-        created = ISO_UTC.replace("%s", "created_at"),
-        seen = ISO_UTC.replace("%s", "last_seen_at"),
-    );
-    let rows: Vec<(Vec<u8>, String, String)> =
-        sqlx::query_as(&sql).bind(account).fetch_all(db).await?;
+    // One read on the pool: nothing else records this outcome. The times
+    // are formatted here, UTC and ISO 8601 to the second, so the code
+    // carries no time library; a literal statement, so a plan check can
+    // read it.
+    let rows: Vec<(Vec<u8>, String, String)> = sqlx::query_as(
+        r#"SELECT id_hash,
+                  to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                  to_char(last_seen_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+           FROM session
+           WHERE account_id = $1 AND expires_at > now()
+           ORDER BY last_seen_at DESC, created_at DESC"#,
+    )
+    .bind(account)
+    .fetch_all(db)
+    .await?;
     let current = current.key();
     rows.into_iter()
         .map(|(hash, created_at, last_seen_at)| {
@@ -296,6 +298,7 @@ pub async fn list(
 ///
 /// [`Error::Db`] when Postgres refuses.
 pub async fn revoke(db: &PgPool, account: AccountId, key: &SessionKey) -> Result<()> {
+    // One statement on the pool: the revoke is the whole outcome.
     sqlx::query("DELETE FROM session WHERE id_hash = $1 AND account_id = $2")
         .bind(key.as_bytes())
         .bind(account)
@@ -310,6 +313,7 @@ pub async fn revoke(db: &PgPool, account: AccountId, key: &SessionKey) -> Result
 ///
 /// [`Error::Db`] when Postgres refuses.
 pub async fn revoke_others(db: &PgPool, account: AccountId, current: &SessionId) -> Result<()> {
+    // One statement on the pool: the revoke is the whole outcome.
     sqlx::query("DELETE FROM session WHERE account_id = $1 AND id_hash <> $2")
         .bind(account)
         .bind(current.key().as_bytes())

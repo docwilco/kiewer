@@ -1,8 +1,10 @@
 //! Sign-in through an OAuth2 provider: the authorization-code exchange
 //! with PKCE, then one call for who the person is. One module per
-//! provider's particulars ([`github`], [`discord`], [`google`]); the flow
-//! is shared, so a provider is a variant, an [`App`] and a user-parsing
-//! arm, nothing else (docs/v1-scope.md, Accounts and access).
+//! provider's particulars ([`github`], [`discord`], [`google`]: the
+//! endpoints, the scopes, the shape of the user answer); the flow is
+//! shared. A provider is a [`Provider`] variant, whose `match` arms give
+//! its names and its module, and nothing else (docs/v1-scope.md,
+//! Accounts and access).
 
 pub mod discord;
 pub mod github;

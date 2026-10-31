@@ -529,21 +529,26 @@ async fn sign_up_with_github(browser: &mut http::Browser, github: SocketAddr) ->
     handle
 }
 
+#[test_case(Provider::Discord; "discord")]
+#[test_case(Provider::Google; "google")]
 #[tokio::test]
-async fn a_signed_in_person_links_discord_from_settings_and_signs_in_with_it() {
+async fn a_signed_in_person_links_another_provider_from_settings_and_signs_in_with_it(
+    provider: Provider,
+) {
     let Some(db) = pool_from_env().await else {
         return;
     };
     let (_github, github) = fake_github("Octo").await;
     let email = format!("{}@example.com", fresh("octo"));
-    let (_discord, discord) = fake_provider(
-        Provider::Discord,
-        fresh_user(Provider::Discord, "octo_d", &email),
-    )
-    .await;
+    let (_other, other) = fake_provider(provider, fresh_user(provider, "octo_d", &email)).await;
+    // The third provider has no app here.
+    let absent = Provider::ALL
+        .into_iter()
+        .find(|p| *p != Provider::GitHub && *p != provider)
+        .unwrap();
     let (mut browser, _dir) = server_with(
         db.clone(),
-        &[(Provider::GitHub, github), (Provider::Discord, discord)],
+        &[(Provider::GitHub, github), (provider, other)],
         "https",
     )
     .await;
@@ -561,8 +566,8 @@ async fn a_signed_in_person_links_discord_from_settings_and_signs_in_with_it() {
     assert!(
         settings
             .body
-            .contains(r#"href="/auth/discord?intent=link""#),
-        "Discord is registered and not linked: offered: {}",
+            .contains(&format!(r#"href="/auth/{provider}?intent=link""#)),
+        "{provider} is registered and not linked: offered: {}",
         settings.body
     );
     assert!(
@@ -571,16 +576,16 @@ async fn a_signed_in_person_links_discord_from_settings_and_signs_in_with_it() {
         settings.body
     );
     assert!(
-        !settings.body.contains("/auth/google"),
-        "Google has no app: absent: {}",
+        !settings.body.contains(&format!("/auth/{absent}")),
+        "{absent} has no app: absent: {}",
         settings.body
     );
 
     let linked = drive(
         &mut browser,
-        "/auth/discord?intent=link",
-        Provider::Discord,
-        discord,
+        &format!("/auth/{provider}?intent=link"),
+        provider,
+        other,
     )
     .await;
     assert_eq!(linked.status, 303, "{}", linked.body);
@@ -588,7 +593,7 @@ async fn a_signed_in_person_links_discord_from_settings_and_signs_in_with_it() {
     assert!(browser.cookie("kiewer_oauth").is_none());
     let settings = browser.get("/settings").await;
     assert!(
-        settings.body.contains("Discord")
+        settings.body.contains(provider.name())
             && settings.body.contains("octo_d")
             && settings.body.contains(&email),
         "the new identity is listed with its login and email: {}",
@@ -608,10 +613,56 @@ async fn a_signed_in_person_links_discord_from_settings_and_signs_in_with_it() {
     // A sign-in with the linked provider lands on the same account.
     browser.post_form("/auth/sign-out", "").await;
     assert_eq!(me(&mut browser).await["signed_in"], false);
-    let back = sign_in_with(&mut browser, Provider::Discord, discord).await;
+    let back = sign_in_with(&mut browser, provider, other).await;
     assert_eq!(back.status, 303, "{}", back.body);
     assert_eq!(back.header("location"), Some("/"), "a handle already");
     assert_eq!(me(&mut browser).await["handle"], handle);
+}
+
+#[tokio::test]
+async fn a_link_whose_session_ended_on_the_way_is_refused_and_a_declined_one_returns_to_settings() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (_github, github) = fake_github("olga").await;
+    let (_discord, discord) = fake_provider(
+        Provider::Discord,
+        fresh_user(Provider::Discord, "olga_d", "olga@example.com"),
+    )
+    .await;
+    let (mut browser, _dir) = server_with(
+        db,
+        &[(Provider::GitHub, github), (Provider::Discord, discord)],
+        "https",
+    )
+    .await;
+    sign_up_with_github(&mut browser, github).await;
+
+    let started = browser.get("/auth/discord?intent=link").await;
+    assert_eq!(started.status, 303, "{}", started.body);
+    let (_, authorize_path) = path_and_query(started.header("location").unwrap());
+    let back = http::request(discord, "GET", &authorize_path, &[], "").await;
+    let (_, callback_path) = path_and_query(back.header("location").unwrap());
+    // The session ends while the browser is at the provider.
+    browser.post_form("/auth/sign-out", "").await;
+    let refused = browser.get(&callback_path).await;
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert!(refused.body.contains("sign in"), "{}", refused.body);
+    assert_eq!(refused.header("cache-control"), Some("private, no-store"));
+    assert!(
+        browser.cookie("kiewer_session").is_none(),
+        "a dead link is not made a sign-in"
+    );
+
+    // Declining at the provider during a link goes back to settings.
+    sign_in_through(&mut browser, github).await;
+    browser.get("/auth/discord?intent=link").await;
+    let declined = browser
+        .get("/auth/discord/callback?error=access_denied")
+        .await;
+    assert_eq!(declined.status, 303, "{}", declined.body);
+    assert_eq!(declined.header("location"), Some("/settings"));
+    assert_eq!(me(&mut browser).await["signed_in"], true);
 }
 
 #[tokio::test]
@@ -768,6 +819,7 @@ async fn the_sessions_page_lists_the_accounts_sessions_and_revokes_them() {
         .await;
     assert_eq!(others.status, 303, "{}", others.body);
     assert_eq!(others.header("location"), Some("/settings/sessions"));
+    assert_eq!(others.header("cache-control"), Some("private, no-store"));
     assert_eq!(me(&mut tablet).await["signed_in"], false);
     assert_eq!(me(&mut laptop).await["signed_in"], true);
     let page = laptop.get("/settings/sessions").await;
@@ -793,6 +845,7 @@ async fn a_revoke_takes_the_accounts_own_keys_and_a_session() {
         .post_form("/settings/sessions/revoke", "key=not-a-key")
         .await;
     assert_eq!(bad.status, 400, "{}", bad.body);
+    assert_eq!(bad.header("cache-control"), Some("private, no-store"));
     let (_other_github, other_github) = fake_github("kim").await;
     let (mut kim, _dir2) = server_with_github(db, other_github, "https").await;
     sign_in_through(&mut kim, other_github).await;
@@ -1008,16 +1061,22 @@ async fn me_ignores_a_cookie_that_is_not_a_session_id() {
     assert_eq!(me["signed_in"], false);
 }
 
+#[test_case("github"; "github without an app")]
+#[test_case("discord"; "discord without an app")]
+#[test_case("google"; "google without an app")]
+#[test_case("myspace"; "not a provider")]
 #[tokio::test]
-async fn sign_in_with_an_unregistered_provider_is_not_found() {
+async fn sign_in_with_an_unregistered_provider_is_not_found(provider: &str) {
     let (state, _dir) = anonymous_state();
     let addr = http::serve_on_free_port(state).await;
-    for provider in Provider::ALL {
-        let (status, _) = http::get(addr, &format!("/auth/{provider}")).await;
-        assert_eq!(status, 404, "{provider}");
-    }
-    let (status, _) = http::get(addr, "/auth/myspace").await;
+    let (status, _) = http::get(addr, &format!("/auth/{provider}")).await;
     assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn the_front_page_offers_no_sign_in_without_a_provider() {
+    let (state, _dir) = anonymous_state();
+    let addr = http::serve_on_free_port(state).await;
     let (status, body) = http::get(addr, "/").await;
     assert_eq!(status, 200);
     assert!(

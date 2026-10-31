@@ -189,7 +189,7 @@ pub async fn sign_in(db: &PgPool, provider: Provider, user: &ProviderUser) -> Re
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Linked {
     /// The identity is the account's from now on.
-    Now,
+    Added,
     /// It was the account's already; the login and email were brought up
     /// to date.
     Already,
@@ -230,7 +230,7 @@ pub async fn link(
     .fetch_optional(db)
     .await?;
     Ok(match row {
-        Some((true,)) => Linked::Now,
+        Some((true,)) => Linked::Added,
         Some((false,)) => Linked::Already,
         None => Linked::ToAnotherAccount,
     })
@@ -253,6 +253,7 @@ pub struct Identity {
 /// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
 /// names a provider the code no longer knows.
 pub async fn identities(db: &PgPool, account: AccountId) -> Result<Vec<Identity>> {
+    // One read on the pool: a page's listing, part of no write.
     let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT provider, provider_login, email FROM identity
          WHERE account_id = $1 ORDER BY created_at, provider",

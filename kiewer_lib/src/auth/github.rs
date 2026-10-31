@@ -49,24 +49,23 @@ pub(super) fn parse_user(body: &serde_json::Value) -> Result<ProviderUser> {
 
 #[cfg(test)]
 mod tests {
+    use test_case::test_case;
+
     use super::*;
 
-    #[test]
-    fn the_user_is_the_id_the_login_and_the_public_email() {
-        let body = serde_json::json!({"login": "octocat", "id": 583_231, "name": "The Octocat", "email": null});
+    #[test_case(&serde_json::json!({"login": "octocat", "id": 583_231, "name": "The Octocat", "email": null}), None; "no public email")]
+    #[test_case(&serde_json::json!({"login": "octocat", "id": 583_231, "email": "octocat@github.com"}), Some("octocat@github.com"); "a public email")]
+    fn the_user_is_the_id_the_login_and_the_public_email(
+        body: &serde_json::Value,
+        email: Option<&str>,
+    ) {
         assert_eq!(
-            parse_user(&body).unwrap(),
+            parse_user(body).unwrap(),
             ProviderUser {
                 id: "583231".to_owned(),
                 login: "octocat".to_owned(),
-                email: None,
+                email: email.map(ToOwned::to_owned),
             }
-        );
-        let body =
-            serde_json::json!({"login": "octocat", "id": 583_231, "email": "octocat@github.com"});
-        assert_eq!(
-            parse_user(&body).unwrap().email.as_deref(),
-            Some("octocat@github.com")
         );
     }
 
