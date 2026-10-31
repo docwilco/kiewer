@@ -187,17 +187,21 @@ jobs:
       # A project's smoke test goes here, between the build and the push:
       # a run of the image against what it needs, so what is pushed is
       # what ran. Without one, the push follows the build.
-      - if: github.event_name == 'push'
+      #
+      # The push and the deploy wait for the GCP variables: until the
+      # Terraform in infra/ has produced them, a push to main builds the
+      # image and ships nothing, and the run stays green.
+      - if: github.event_name == 'push' && vars.GCP_PROJECT_ID != ''
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SA }}
-      - if: github.event_name == 'push'
+      - if: github.event_name == 'push' && vars.GCP_PROJECT_ID != ''
         uses: google-github-actions/setup-gcloud@v2
-      - if: github.event_name == 'push'
+      - if: github.event_name == 'push' && vars.GCP_PROJECT_ID != ''
         run: gcloud auth configure-docker europe-west4-docker.pkg.dev --quiet
       - name: Push the image as its short hash
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && vars.GCP_PROJECT_ID != ''
         id: push
         # The digest line is what the release job will name; its own
         # line names the same digest.
@@ -213,7 +217,7 @@ jobs:
       # by digest. gcloud waits for the new revision to become ready and
       # fails the job if it does not; traffic moves only on success.
       - name: Deploy to staging
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && vars.GCP_PROJECT_ID != ''
         run: |
           gcloud run deploy kiewer-staging --project "${{ vars.GCP_PROJECT_ID }}" \
             --region europe-west4 --image "${{ steps.push.outputs.digest }}" --quiet
