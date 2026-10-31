@@ -16,5 +16,9 @@ repository = "https://github.com/docwilco/kiewer"
 unsafe_op_in_unsafe_fn = "warn"
 
 [workspace.lints.clippy]
+# Pedantic with no blanket allows: every finding is fixed or carries a
+# site-level #[expect(..., reason = "...")] naming the invariant that makes
+# it safe.
+pedantic = { level = "warn", priority = -1 }
 # every unsafe block carries a // SAFETY: comment
 undocumented_unsafe_blocks = "warn"
