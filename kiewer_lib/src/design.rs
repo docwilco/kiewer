@@ -713,6 +713,16 @@ impl DesignHead {
             .or_else(|| named_like("kicad_pcb"))
             .or_else(|| self.shallowest("kicad_sch"))
     }
+
+    /// Whether the revision opens on its schematic: it has no board for
+    /// the viewer and a root sheet to show instead (docs/v1-scope.md,
+    /// Schematic). Every page that shows a revision (the design page,
+    /// its branch and revision forms) sends the browser to the schematic
+    /// page when this holds.
+    #[must_use]
+    pub fn opens_on_schematic(&self) -> bool {
+        self.board().is_none() && self.schematic().is_some()
+    }
 }
 
 /// The design at `/{handle}/{slug}` with the head of its default branch,

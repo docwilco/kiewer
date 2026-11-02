@@ -117,12 +117,12 @@ pub fn build(sheet: &Sheet, format: wgpu::TextureFormat) -> Option<SheetScene> {
 }
 
 /// `position` (millimetres, f32) relative to `origin`, the difference
-/// taken in f64.
+/// taken in f64; the highlight appends its geometry the same way.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "relative to the sheet's centre a position is under a metre, which f32 holds to a tenth of a micrometre"
 )]
-fn relative(position: [f32; 2], origin: Point) -> [f32; 2] {
+pub(crate) fn relative(position: [f32; 2], origin: Point) -> [f32; 2] {
     [
         (f64::from(position[0]) - origin.x) as f32,
         (f64::from(position[1]) - origin.y) as f32,

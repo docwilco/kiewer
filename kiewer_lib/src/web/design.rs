@@ -186,6 +186,17 @@ pub(super) async fn show(
             None => not_found(),
         });
     };
+    // A revision with no board and a schematic opens on its first sheet:
+    // the schematic page at the same branch or revision.
+    if shown.opens_on_schematic() {
+        let sheet = schematic::url_at(
+            &handle,
+            &shown.design.slug,
+            &shown.design.default_branch,
+            at,
+        );
+        return Ok(Redirect::to(&sheet).into_response());
+    }
     let description = description::of(&state.db, shown.design.id).await?;
     let settings = SettingsView::of(&handle, &shown.design, &description);
     Ok(Html(design_page(&shown, &description, settings)?).into_response())

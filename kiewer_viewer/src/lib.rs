@@ -20,6 +20,7 @@ pub mod labels;
 pub mod render;
 pub mod scene;
 pub mod schematic;
+pub mod sheet_highlight;
 pub mod view;
 #[cfg(target_arch = "wasm32")]
 pub mod web;

@@ -14,6 +14,10 @@
 //! is framed with [`FOOTPRINT_MARGIN`] free around it; a pad picked from
 //! the net's list is panned to, and zoomed to only when it is under
 //! [`PAD_MIN_PX`] across on screen, so a pick never throws the zoom away.
+//!
+//! The hovered-and-pinned state is a [`Pick`] over any kind of hit, so
+//! the sheet's highlight (`crate::sheet_highlight`) keeps the same
+//! model; the copper and the camera rules here are the board's.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -48,13 +52,95 @@ pub const PAD_MIN_PX: f64 = 24.0;
 /// scene's own indices: the highlight's slice of that layer.
 type HighlightRange = (Layer, Range<u32>);
 
+/// What a hit is on: its net. The board's hits and the sheet's
+/// (`crate::sheet_highlight`) both keep their state in a [`Pick`].
+pub trait OnNet: Copy {
+    /// The net's id.
+    type Net: Copy + PartialEq + std::fmt::Debug;
+    /// The net the hit is on.
+    fn net(self) -> Self::Net;
+}
+
+impl OnNet for Hit {
+    type Net = NetId;
+
+    fn net(self) -> NetId {
+        self.net
+    }
+}
+
+/// The net under the pointer and the one a click pinned: the
+/// interaction model of docs/v1-scope.md, Net interaction, for hits of
+/// any kind. Hover names the net, a click pins it, a click on nothing
+/// clears the pin, Escape clears both, and the pin outlives the pointer
+/// leaving.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pick<H: OnNet> {
+    hovered: Option<H>,
+    pinned: Option<H::Net>,
+}
+
+impl<H: OnNet> Default for Pick<H> {
+    fn default() -> Self {
+        Self {
+            hovered: None,
+            pinned: None,
+        }
+    }
+}
+
+impl<H: OnNet> Pick<H> {
+    /// The net a frame highlights: the pinned one, else the hovered
+    /// item's.
+    #[must_use]
+    pub fn active(&self) -> Option<H::Net> {
+        self.pinned.or(self.hovered.map(OnNet::net))
+    }
+
+    /// What the pointer is over.
+    #[must_use]
+    pub fn hovered(&self) -> Option<H> {
+        self.hovered
+    }
+
+    /// The net a click pinned.
+    #[must_use]
+    pub fn pinned(&self) -> Option<H::Net> {
+        self.pinned
+    }
+
+    /// The pointer is over `hit` (or over nothing). Whether the net a
+    /// frame highlights changed, so a frame is due.
+    pub fn hover(&mut self, hit: Option<H>) -> bool {
+        let before = self.active();
+        self.hovered = hit;
+        self.active() != before
+    }
+
+    /// A click on `hit` pins its net; a click on nothing clears the pin.
+    /// Whether the net a frame highlights changed.
+    pub fn pin(&mut self, hit: Option<H>) -> bool {
+        let before = self.active();
+        self.pinned = hit.map(OnNet::net);
+        self.active() != before
+    }
+
+    /// Escape: nothing pinned, nothing hovered. Whether the net a frame
+    /// highlights changed.
+    pub fn clear(&mut self) -> bool {
+        let before = self.active();
+        self.pinned = None;
+        self.hovered = None;
+        before.is_some()
+    }
+}
+
 /// The highlight state of one board. The default is no board: nothing to
 /// hit, nothing highlighted.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Highlight {
     index: Index,
-    hovered: Option<Hit>,
-    pinned: Option<NetId>,
+    pick: Pick<Hit>,
     /// Each net's copper by layer, tessellated the first time it is
     /// highlighted.
     meshes: BTreeMap<NetId, Vec<(Layer, Mesh)>>,
@@ -91,44 +177,37 @@ impl Highlight {
     /// item's.
     #[must_use]
     pub fn active(&self) -> Option<NetId> {
-        self.pinned.or(self.hovered.map(|hit| hit.net))
+        self.pick.active()
     }
 
     /// What the pointer is over.
     #[must_use]
     pub fn hovered(&self) -> Option<Hit> {
-        self.hovered
+        self.pick.hovered()
     }
 
     /// The net a click pinned.
     #[must_use]
     pub fn pinned(&self) -> Option<NetId> {
-        self.pinned
+        self.pick.pinned()
     }
 
     /// The pointer is over `hit` (or over nothing). Whether the net a
     /// frame highlights changed, so a frame is due.
     pub fn hover(&mut self, hit: Option<Hit>) -> bool {
-        let before = self.active();
-        self.hovered = hit;
-        self.active() != before
+        self.pick.hover(hit)
     }
 
     /// A click on `hit` pins its net; a click on nothing clears the pin.
     /// Whether the net a frame highlights changed.
     pub fn pin(&mut self, hit: Option<Hit>) -> bool {
-        let before = self.active();
-        self.pinned = hit.map(|hit| hit.net);
-        self.active() != before
+        self.pick.pin(hit)
     }
 
     /// Escape: nothing pinned, nothing hovered. Whether the net a frame
     /// highlights changed.
     pub fn clear(&mut self) -> bool {
-        let before = self.active();
-        self.pinned = None;
-        self.hovered = None;
-        before.is_some()
+        self.pick.clear()
     }
 
     /// The GPU no longer holds the highlight's geometry (the scene was
@@ -141,7 +220,7 @@ impl Highlight {
     /// `via: GND`, `track: GND`, `zone: GND`; empty over nothing.
     #[must_use]
     pub fn tooltip(&self, board: &Board) -> String {
-        let Some(hit) = self.hovered else {
+        let Some(hit) = self.hovered() else {
             return String::new();
         };
         let net = board.net(hit.net).map_or("", |net| net.name.as_str());

@@ -12,6 +12,7 @@
   header h1 { font-size: 1em; font-weight: normal; margin: 0; }
   header a { color: inherit; }
   header button { font: inherit; }
+  #sheet-path { font-family: monospace; }
   #stage { flex: 1; position: relative; min-height: 0; }
   /* touch-action: none, so a two-finger pinch reaches the pointer events
      instead of zooming the page. */
@@ -20,11 +21,31 @@
   #error { position: absolute; left: 0.8em; right: 0.8em; top: 0.8em; padding: 0.6em 0.8em; background: #f3c2c2; border-radius: 4px; white-space: pre-wrap; }
   #hint { position: absolute; left: 0.8em; bottom: 0.6em; opacity: 0.6; }
   #zoom { position: absolute; right: 0.8em; bottom: 0.6em; opacity: 0.8; font-variant-numeric: tabular-nums; }
+  /* The sheet panel: the tree, one row per sheet, indented by depth. */
+  #sheets { position: absolute; left: 0.8em; top: 0.8em; max-height: 60%; overflow: auto; padding: 0.3em 0.6em; background: rgba(255, 255, 255, 0.9); border: 1px solid #ccc; border-radius: 4px; }
+  #sheets ol { list-style: none; margin: 0; padding: 0; }
+  #sheets li { margin: 0.1em 0; }
+  #sheets a { color: inherit; text-decoration: none; }
+  #sheets a:hover { text-decoration: underline; }
+  #sheets li[aria-current="page"] > a { font-weight: bold; }
+  #sheets .missing { opacity: 0.6; }
+  /* The net block: the tooltip beside the pointer, the pinned net's
+     pins, and the search box, to the right. */
+  #net { position: absolute; right: 0.8em; top: 0.8em; max-height: 60%; display: flex; flex-direction: column; gap: 0.5em; align-items: flex-end; }
+  #net-tip { position: absolute; padding: 0.2em 0.5em; background: rgba(255, 255, 255, 0.95); border: 1px solid #999; border-radius: 3px; white-space: nowrap; pointer-events: none; font-size: 13px; }
+  #net-pinned { padding: 0.3em 0.6em; background: rgba(255, 255, 255, 0.9); border: 1px solid #ccc; border-radius: 4px; overflow: auto; min-height: 0; }
+  #net-pinned p { margin: 0.2em 0; display: flex; gap: 0.6em; align-items: baseline; }
+  #net-pinned ul { list-style: none; margin: 0.3em 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(5em, 1fr)); gap: 0.1em 0.6em; }
+  #net-pinned button, #net-search button, #net-search input { font: inherit; }
+  #net-pinned li button { background: none; border: none; color: inherit; padding: 0; cursor: pointer; text-decoration: underline dotted; }
+  #net-search { display: flex; gap: 0.4em; align-items: baseline; margin: 0; }
+  #net-search input { width: 8em; }
+  #net-miss { color: #a33; }
 </style>
 </head>
 <body>
 <header>
-  <h1><a href="/">kiewer</a> / {{ title }} / schematic</h1>
+  <h1><a href="/">kiewer</a> / {{ title }} / schematic <span id="sheet-path"></span></h1>
   {% if let Some(url) = design_url %}<a href="{{ url }}">board</a>{% endif %}
   <button id="fit" type="button" title="Home">Fit</button>
   <span id="status"></span>
@@ -32,7 +53,28 @@
 <div id="stage">
   <canvas id="sheet"></canvas>
   <p id="error" hidden></p>
-  <p id="hint">wheel zooms, ctrl+wheel and shift+wheel pan, middle or right drag pans, + and - zoom, Home fits</p>
+  <nav id="sheets" aria-label="sheets"{% if sheets.len() < 2 %} hidden{% endif %}>
+    <ol>
+    {% for sheet in sheets %}
+      <li data-index="{{ sheet.index }}" data-parent="{% if let Some(parent) = sheet.parent %}{{ parent }}{% endif %}" data-symbol="{% if let Some(symbol) = sheet.symbol %}{{ symbol }}{% endif %}" data-fragment="{{ sheet.fragment }}" data-path="{{ sheet.path }}" data-url="{% if let Some(url) = sheet.url %}{{ url }}{% endif %}" style="padding-left: {{ sheet.depth }}em">
+        {% if sheet.url.is_some() %}<a href="#{{ sheet.fragment }}">{{ sheet.name }}</a>{% else %}<span class="missing" title="this sheet's file is not in the revision">{{ sheet.name }}</span>{% endif %}
+      </li>
+    {% endfor %}
+    </ol>
+  </nav>
+  <span id="net-tip" hidden></span>
+  <div id="net" hidden>
+    <div id="net-pinned" hidden>
+      <p><b id="net-name"></b> <button id="net-clear" type="button" title="Escape">clear</button></p>
+      <ul id="net-pads"></ul>
+    </div>
+    <form id="net-search">
+      <span id="net-miss"></span>
+      <input id="net-query" type="search" placeholder="reference, e.g. U1" title="pan to a symbol by its reference designator" autocomplete="off">
+      <button type="submit">Go</button>
+    </form>
+  </div>
+  <p id="hint">wheel zooms, ctrl+wheel and shift+wheel pan, middle or right drag pans, + and - zoom, Home fits, click a sheet symbol to enter it</p>
   <p id="zoom"></p>
 </div>
 <p hidden><small>{{ build }}</small></p>
@@ -60,14 +102,16 @@
 </script>
 <script type="module">
 // The same gestures as the board page (viewer.html), handed to the same
-// wasm Viewer in device pixels; only the load call differs. The bindings
-// are KiCad's (docs/v1-scope.md, Rendering, Zoom).
+// wasm Viewer in device pixels; the load is per sheet, picked by the URL
+// fragment from the panel's rows. The bindings are KiCad's
+// (docs/v1-scope.md, Rendering, Zoom).
 import init, { Viewer } from "/viewer/kiewer_viewer.js";
 
 const canvas = document.getElementById("sheet");
 const status = document.getElementById("status");
 const errorBox = document.getElementById("error");
 const zoomBox = document.getElementById("zoom");
+const sheetPath = document.getElementById("sheet-path");
 let viewer = null;
 let frame = 0;
 let gesturing = false;
@@ -87,6 +131,7 @@ function schedule() {
     frame = 0;
     try { viewer.render(); } catch (e) { fail(e); }
     showZoom();
+    window.dispatchEvent(new Event("kiewer-frame"));
   });
 }
 function showZoom() {
@@ -183,6 +228,62 @@ window.addEventListener("keydown", function (e) {
 });
 new ResizeObserver(resize).observe(canvas);
 
+// The sheet tree (docs/v1-scope.md, Schematic; the server side is
+// kiewer_lib/src/web/schematic.rs): one row per sheet in the panel, the
+// root first, each with its sheet path as the fragment carries it
+// (`sheet=power/reg`) and the URL of its file. The fragment names the
+// sheet shown; a change to it (a panel link, a click on a sheet symbol,
+// the back button) loads that sheet, and a reload restores it. A
+// fragment naming no sheet shows the root.
+const sheets = Array.from(document.querySelectorAll("#sheets li")).map(function (li) {
+  const number = function (text) { return text === "" ? null : Number(text); };
+  return {
+    index: number(li.dataset.index),
+    parent: number(li.dataset.parent),
+    symbol: number(li.dataset.symbol),
+    fragment: li.dataset.fragment,
+    path: li.dataset.path,
+    url: li.dataset.url || null,
+    element: li,
+  };
+});
+let current = null;
+function sheetNamed(hash) {
+  const pair = String(hash || "").replace(/^#/, "").split("&")
+    .map(function (p) { return p.split("="); })
+    .find(function (p) { return p[0] === "sheet"; });
+  const fragment = pair ? "sheet=" + pair.slice(1).join("=") : "";
+  return sheets.find(function (s) { return s.fragment === fragment; }) || sheets[0] || null;
+}
+async function showSheet(entry) {
+  if (!viewer || !entry || entry === current) return;
+  if (!entry.url) { fail("the sheet " + entry.path + " is not in this revision"); return; }
+  const response = await fetch(entry.url);
+  if (!response.ok) throw new Error("the sheet " + entry.path + ": HTTP " + response.status);
+  viewer.load_schematic(await response.text());
+  current = entry;
+  errorBox.hidden = true;
+  sheets.forEach(function (s) {
+    if (s === entry) s.element.setAttribute("aria-current", "page");
+    else s.element.removeAttribute("aria-current");
+  });
+  sheetPath.textContent = entry.path === "/" ? "" : entry.path;
+  window.dispatchEvent(new CustomEvent("kiewer-sheet", { detail: { viewer, schedule, enter } }));
+  schedule();
+}
+// A click on sheet symbol `symbol` of the sheet shown: the child it
+// stands for becomes the fragment, which loads it.
+function enter(symbol) {
+  if (!current) return false;
+  const child = sheets.find(function (s) { return s.parent === current.index && s.symbol === symbol; });
+  if (!child) return false;
+  window.location.hash = "#" + child.fragment;
+  return true;
+}
+window.addEventListener("hashchange", function () {
+  showSheet(sheetNamed(window.location.hash)).catch(function (e) { fail(e && e.message ? e.message : e); });
+});
+
 try {
   await init();
   resize();
@@ -190,13 +291,11 @@ try {
   const samples = viewer.samples();
   status.textContent = viewer.backend() + (samples > 1 ? ", " + samples + "x msaa" : "");
   status.title = viewer.fallback_reasons();
-{% if let Some(url) = schematic_url %}
-  const response = await fetch("{{ url }}");
-  if (!response.ok) throw new Error("the schematic: HTTP " + response.status);
-  viewer.load_schematic(await response.text());
-{% else %}
-  status.textContent += ", no schematic in this revision";
-{% endif %}
+  if (sheets.length) {
+    await showSheet(sheetNamed(window.location.hash));
+  } else {
+    status.textContent += ", no schematic in this revision";
+  }
   schedule();
 } catch (e) {
   fail(e && e.message ? e.message : e);
@@ -254,6 +353,135 @@ if (window.kiewerPanic) {
 } else {
   sendBeacon("failed", errorBox.textContent);
 }
+</script>
+<script type="module">
+// Net interaction and the reference search (docs/v1-scope.md, Net
+// interaction, Search box; the wasm side is the net block of
+// kiewer_viewer/src/web.rs, over kiewer_viewer/src/sheet_highlight.rs and
+// the hit test kicad_core/src/schematic/hit.rs). The board page's block
+// (viewer.html) over the same methods: hovering a wire, a junction, a
+// label, a pin or a sheet pin names its net in a tooltip beside the
+// pointer and dims everything not on that net; a click pins the
+// highlight and lists the net's pins, each a button that pans to the
+// pin; Escape, the clear button, or a click on empty space clears. A
+// click inside a sheet symbol, on nothing netted, enters that sheet. The
+// search box takes a reference designator, whatever its case, and frames
+// the symbol, or says it is not on the sheet. Hover is a mouse move with
+// no button held (a drag is a pan, and a touch has no hover); a click is
+// the browser's own click event, and a left drag or a touch pan that
+// still ends in one is told apart by how far the pointer moved since it
+// went down (CLICK_SLOP), and ignored.
+const CLICK_SLOP = 4;
+const netCanvas = document.getElementById("sheet");
+const netStage = document.getElementById("stage");
+const netBox = document.getElementById("net");
+const netTip = document.getElementById("net-tip");
+const netPinned = document.getElementById("net-pinned");
+const netName = document.getElementById("net-name");
+const netPads = document.getElementById("net-pads");
+const netClear = document.getElementById("net-clear");
+const netSearch = document.getElementById("net-search");
+const netQuery = document.getElementById("net-query");
+const netMiss = document.getElementById("net-miss");
+let netViewer = null;
+let netSchedule = null;
+let netEnter = null;
+let netDown = null;
+
+function netPoint(e) {
+  const r = netCanvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  return [(e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr];
+}
+function hideTip() { netTip.hidden = true; }
+function showTip(e, text) {
+  if (!text) { hideTip(); return; }
+  const r = netStage.getBoundingClientRect();
+  netTip.textContent = text;
+  netTip.style.left = (e.clientX - r.left + 14) + "px";
+  netTip.style.top = (e.clientY - r.top + 14) + "px";
+  netTip.hidden = false;
+}
+// The pinned net's name and its pins, one button per pin.
+function refreshPinned() {
+  const name = netViewer.pinned_net();
+  netPinned.hidden = !name;
+  if (!name) { netPads.replaceChildren(); return; }
+  netName.textContent = name;
+  netPads.replaceChildren();
+  netViewer.net_pads().forEach(function (entry, index) {
+    const [reference, number] = entry.split("\t");
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = number ? reference + "." + number : reference;
+    button.title = "pan to this pin";
+    button.addEventListener("click", function () {
+      if (netViewer.go_to_pad(index)) netSchedule();
+    });
+    item.append(button);
+    netPads.append(item);
+  });
+}
+netCanvas.addEventListener("pointermove", function (e) {
+  if (!netViewer) return;
+  if (e.pointerType !== "mouse" || e.buttons) { hideTip(); return; }
+  const [x, y] = netPoint(e);
+  if (netViewer.hover(x, y)) netSchedule();
+  showTip(e, netViewer.hover_text());
+});
+netCanvas.addEventListener("pointerleave", function () {
+  hideTip();
+  if (netViewer && netViewer.hover_leave()) netSchedule();
+});
+netCanvas.addEventListener("pointerdown", function (e) {
+  netDown = [e.clientX, e.clientY];
+});
+netCanvas.addEventListener("click", function (e) {
+  if (!netViewer) return;
+  if (netDown && Math.hypot(e.clientX - netDown[0], e.clientY - netDown[1]) > CLICK_SLOP) return;
+  const [x, y] = netPoint(e);
+  const symbol = netViewer.sheet_symbol_at(x, y);
+  if (symbol !== undefined && netEnter && netEnter(symbol)) { hideTip(); return; }
+  if (netViewer.click(x, y)) netSchedule();
+  refreshPinned();
+});
+function clearNet() {
+  if (!netViewer) return;
+  hideTip();
+  if (netViewer.clear_net()) netSchedule();
+  refreshPinned();
+}
+netClear.addEventListener("click", clearNet);
+window.addEventListener("keydown", function (e) {
+  if (e.key !== "Escape" || !netViewer) return;
+  if (e.target === netQuery) { netQuery.blur(); return; }
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+  clearNet();
+});
+netSearch.addEventListener("submit", function (e) {
+  e.preventDefault();
+  if (!netViewer) return;
+  const query = netQuery.value.trim();
+  if (!query) { netMiss.textContent = ""; return; }
+  if (netViewer.search_reference(query)) {
+    netMiss.textContent = "";
+    netSchedule();
+  } else {
+    netMiss.textContent = "no " + query + " on this sheet";
+  }
+});
+netQuery.addEventListener("input", function () { netMiss.textContent = ""; });
+// Every sheet load starts afresh: nothing pinned, the search cleared.
+window.addEventListener("kiewer-sheet", function (e) {
+  netViewer = e.detail.viewer;
+  netSchedule = e.detail.schedule;
+  netEnter = e.detail.enter;
+  netMiss.textContent = "";
+  hideTip();
+  refreshPinned();
+  netBox.hidden = false;
+});
 </script>
 </body>
 </html>

@@ -231,11 +231,18 @@ async fn uploading_the_hand_off_files_makes_a_design_shown_with_the_viewer() {
         .await;
     assert_eq!(again.status, 303, "{}", again.body);
     assert_eq!(again.header("location"), Some(design_path.as_str()));
+    // A revision with no board opens on its schematic (tests/schematic.rs
+    // has the page itself).
     let page = http::request(addr, "GET", &design_path, &[], "").await;
-    assert!(page.body.contains("schematic only"), "{}", page.body);
+    assert_eq!(page.status, 303, "{}", page.body);
+    let schematic_path = format!("{design_path}/schematic");
+    assert_eq!(page.header("location"), Some(schematic_path.as_str()));
+    let page = http::request(addr, "GET", &schematic_path, &[], "").await;
+    assert_eq!(page.status, 200, "{}", page.body);
     assert!(
-        page.body.contains("no board in this revision"),
-        "{}",
+        page.body
+            .contains(&format!("/blob/{}", BlobHash::of(SCHEMATIC))),
+        "the sheet is the new revision's: {}",
         page.body
     );
     let (listed, parents, heads): (i64, i64, i64) = sqlx::query_as(

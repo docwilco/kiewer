@@ -18,6 +18,7 @@ use kicad_core::geometry::Bounds;
 use kicad_core::hit::{Hit, find_footprint, footprint_bounds, net_pads};
 use kicad_core::labels::LabelClass;
 use kicad_core::model::{Board, LayerId, Point};
+use kicad_core::schematic::hit::SheetHit;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -30,6 +31,7 @@ use crate::render::label_pipeline::LabelFrame;
 use crate::render::{Backend, MSAA_SAMPLES, Renderer, Target, device_descriptor};
 use crate::scene::{Scene, clear_color};
 use crate::schematic::{self, SheetScene};
+use crate::sheet_highlight::SheetHighlight;
 use crate::view::{Layer, Side, View, ViewState, label_key, palette, parse_label_key};
 
 /// The viewer over one canvas.
@@ -63,6 +65,9 @@ pub struct Viewer {
     /// The net under the pointer and the one a click pinned, with the
     /// hit test over the board (`crate::highlight`).
     highlight: Highlight,
+    /// The same over the sheet, with the sheet as parsed, when a
+    /// schematic was loaded last (`crate::sheet_highlight`).
+    sheet_highlight: Option<SheetHighlight>,
 }
 
 /// A face the page rasterises (docs/v1-scope.md, Fonts), as far as the
@@ -308,6 +313,7 @@ impl Viewer {
             board: None,
             system_faces: BTreeMap::new(),
             highlight: Highlight::default(),
+            sheet_highlight: None,
         })
     }
 
@@ -375,16 +381,18 @@ impl Viewer {
         self.fit_scale = self.camera.scale();
         self.scene = Some(scene);
         self.sheet = None;
+        self.sheet_highlight = None;
         self.highlight = Highlight::new(&board);
         self.board = Some(board);
         self.mirror_for_view();
         Ok(())
     }
 
-    /// Parse a `.kicad_sch` text, tessellate the one sheet, upload it
-    /// and fit the camera to its paper. The sheet replaces any board: no
-    /// views, no font round trip, the paper colour behind it. A parse
-    /// error is the error's message with its line.
+    /// Parse a `.kicad_sch` text, tessellate the one sheet, upload it,
+    /// build its nets and hit test, and fit the camera to its paper. The
+    /// sheet replaces any board: no views, no font round trip, the paper
+    /// colour behind it. A parse error is the error's message with its
+    /// line.
     pub fn load_schematic(&mut self, text: &str) -> core::result::Result<(), JsError> {
         let parsed = kicad_core::parse_schematic(text).map_err(Error::Schematic)?;
         let sheet = schematic::build(&parsed, self.config.format).ok_or(Error::EmptySheet)?;
@@ -396,11 +404,29 @@ impl Viewer {
         self.scene = None;
         self.board = None;
         self.highlight = Highlight::default();
+        self.sheet_highlight = Some(SheetHighlight::new(parsed));
         self.camera.set_mirrored(false);
         self.camera.fit(sheet.bounds);
         self.fit_scale = self.camera.scale();
         self.sheet = Some(sheet);
         Ok(())
+    }
+
+    /// The sheet symbol under the screen point (`x`, `y`), by its index
+    /// among the sheet's sheet symbols (the order the page's sheet panel
+    /// has them in): what a click enters. Nothing when a wire, pin or
+    /// label is there (a sheet pin on the symbol's edge is a net, not a
+    /// way in), over empty space, or without a sheet.
+    #[must_use]
+    pub fn sheet_symbol_at(&self, x: f64, y: f64) -> Option<usize> {
+        if self.sheet_hit_at(x, y).is_some() {
+            return None;
+        }
+        let world = self.camera.screen_to_world(Point { x, y });
+        self.sheet_highlight
+            .as_ref()?
+            .index()
+            .sheet_symbol_at(world)
     }
 
     /// The views of the loaded board, their titles in order; the view
@@ -745,13 +771,21 @@ impl Viewer {
         {
             self.renderer.upload(&self.device, &vertices, &indices);
         }
+        if let (Some(sheet), Some(highlight)) = (&self.sheet, &mut self.sheet_highlight)
+            && let Some((vertices, indices)) = highlight.geometry(sheet)
+        {
+            self.renderer.upload(&self.device, &vertices, &indices);
+        }
         // A sheet, when one is loaded, has its own origin, draws and
-        // paper; otherwise the board's view in force says what is drawn,
-        // dimmed around the highlighted net when there is one.
+        // paper; otherwise the board's view in force says what is drawn.
+        // Either is dimmed around the highlighted net when there is one.
         let (origin, draws, clear) = match (&self.sheet, &self.scene) {
             (Some(sheet), _) => (
                 sheet.origin,
-                sheet.draws.clone(),
+                self.sheet_highlight.as_ref().map_or_else(
+                    || sheet.draws.clone(),
+                    |h| h.draws(sheet, self.config.format),
+                ),
                 schematic::clear_color(self.config.format),
             ),
             (None, Some(scene)) => (
@@ -1008,19 +1042,28 @@ impl Viewer {
 }
 
 /// The net interaction and the reference search (docs/v1-scope.md, Net
-/// interaction, Search box; the state is `crate::highlight`, the hit
-/// test `kicad_core::hit`). The page hands each pointer position here in
-/// device pixels: `hover` on a move, `click` on a click, `hover_leave`
-/// when the pointer leaves the canvas, `clear_net` on Escape. Each says
-/// whether a frame is due. `pinned_net` and `net_pads` are what the page
-/// lists for a pinned net, `go_to_pad` and `search_reference` move the
-/// camera.
+/// interaction, Search box), on the board (the state is
+/// `crate::highlight`, the hit test `kicad_core::hit`) or on the sheet
+/// when a schematic was loaded last (`crate::sheet_highlight`,
+/// `kicad_core::schematic::hit`), so the schematic page's net script is
+/// the board page's. The page hands each pointer position here in device
+/// pixels: `hover` on a move, `click` on a click, `hover_leave` when the
+/// pointer leaves the canvas, `clear_net` on Escape. Each says whether a
+/// frame is due. `pinned_net` and `net_pads` are what the page lists for
+/// a pinned net, `go_to_pad` and `search_reference` move the camera.
 #[wasm_bindgen]
 impl Viewer {
     /// The pointer is at (`x`, `y`): the item there, within [`SLOP_PX`]
     /// pixels, is hovered. Whether the highlight changed, so a frame is
     /// due; the tooltip is [`Viewer::hover_text`].
     pub fn hover(&mut self, x: f64, y: f64) -> bool {
+        if self.sheet_highlight.is_some() {
+            let hit = self.sheet_hit_at(x, y);
+            return self
+                .sheet_highlight
+                .as_mut()
+                .is_some_and(|sheet| sheet.hover(hit));
+        }
         let hit = self.hit_at(x, y);
         self.highlight.hover(hit)
     }
@@ -1028,13 +1071,21 @@ impl Viewer {
     /// The pointer left the canvas: nothing hovered. Whether a frame is
     /// due.
     pub fn hover_leave(&mut self) -> bool {
-        self.highlight.hover(None)
+        match &mut self.sheet_highlight {
+            Some(sheet) => sheet.hover(None),
+            None => self.highlight.hover(None),
+        }
     }
 
     /// What the pointer is over, for the tooltip: `LED6 pad 3: GND`,
-    /// `via: GND`, `track: GND`, `zone: GND`; empty over nothing.
+    /// `via: GND`, `track: GND`, `zone: GND` on a board; `wire: VIN`,
+    /// `R1 pin 2: GND`, `label: VIN`, `junction: VIN`, `sheet pin VIN:
+    /// VIN` on a sheet; empty over nothing.
     #[must_use]
     pub fn hover_text(&self) -> String {
+        if let Some(sheet) = &self.sheet_highlight {
+            return sheet.tooltip();
+        }
         self.board
             .as_ref()
             .map(|board| self.highlight.tooltip(board))
@@ -1044,18 +1095,34 @@ impl Viewer {
     /// A click at (`x`, `y`): the net of the item there is pinned, and a
     /// click on empty space clears the pin. Whether a frame is due.
     pub fn click(&mut self, x: f64, y: f64) -> bool {
+        if self.sheet_highlight.is_some() {
+            let hit = self.sheet_hit_at(x, y);
+            return self
+                .sheet_highlight
+                .as_mut()
+                .is_some_and(|sheet| sheet.pin(hit));
+        }
         let hit = self.hit_at(x, y);
         self.highlight.pin(hit)
     }
 
     /// Escape: nothing pinned, nothing hovered. Whether a frame is due.
     pub fn clear_net(&mut self) -> bool {
-        self.highlight.clear()
+        match &mut self.sheet_highlight {
+            Some(sheet) => sheet.clear(),
+            None => self.highlight.clear(),
+        }
     }
 
     /// The name of the pinned net; empty when none is.
     #[must_use]
     pub fn pinned_net(&self) -> String {
+        if let Some(sheet) = &self.sheet_highlight {
+            return sheet
+                .pinned()
+                .map(|net| sheet.net_name(net).to_owned())
+                .unwrap_or_default();
+        }
         let (Some(board), Some(net)) = (&self.board, self.highlight.pinned()) else {
             return String::new();
         };
@@ -1065,11 +1132,19 @@ impl Viewer {
             .unwrap_or_default()
     }
 
-    /// The pads of the pinned net, one `reference<tab>number` per pad in
-    /// natural order (`R2` before `R10`); the position in this list is
-    /// what [`Viewer::go_to_pad`] takes. Empty without a pin.
+    /// The pads of the pinned net (its pins, on a sheet), one
+    /// `reference<tab>number` per pad in natural order (`R2` before
+    /// `R10`); the position in this list is what [`Viewer::go_to_pad`]
+    /// takes. Empty without a pin.
     #[must_use]
     pub fn net_pads(&self) -> Vec<String> {
+        if let Some(sheet) = &self.sheet_highlight {
+            return sheet
+                .pinned_pins()
+                .into_iter()
+                .map(|pin| format!("{}\t{}", pin.reference, pin.number))
+                .collect();
+        }
         let (Some(board), Some(net)) = (&self.board, self.highlight.pinned()) else {
             return Vec::new();
         };
@@ -1082,6 +1157,9 @@ impl Viewer {
     /// Pan to pad `index` of [`Viewer::net_pads`], zooming in only when
     /// it would be too small to see. Whether a frame is due.
     pub fn go_to_pad(&mut self, index: usize) -> bool {
+        if let Some(sheet) = &self.sheet_highlight {
+            return sheet.go_to_pin(&mut self.camera, index);
+        }
         let (Some(board), Some(net)) = (&self.board, self.highlight.pinned()) else {
             return false;
         };
@@ -1092,11 +1170,14 @@ impl Viewer {
         true
     }
 
-    /// Frame the footprint whose reference designator is `reference`,
-    /// letter case aside; one with neither pads nor graphics is framed
-    /// as a millimetre around its origin. False, with the camera
-    /// untouched, when the board has no such footprint.
+    /// Frame the footprint (the symbol, on a sheet) whose reference
+    /// designator is `reference`, letter case aside; one with neither
+    /// pads nor graphics is framed as a millimetre around its origin.
+    /// False, with the camera untouched, when there is no such one.
     pub fn search_reference(&mut self, reference: &str) -> bool {
+        if let Some(sheet) = &self.sheet_highlight {
+            return sheet.search_reference(&mut self.camera, reference);
+        }
         let Some(board) = &self.board else {
             return false;
         };
@@ -1134,5 +1215,14 @@ impl Viewer {
         self.highlight
             .index()
             .hit(world, SLOP_PX / self.camera.scale(), &layers)
+    }
+
+    /// The item under the screen point (`x`, `y`) on the sheet, within
+    /// [`SLOP_PX`] pixels.
+    fn sheet_hit_at(&self, x: f64, y: f64) -> Option<SheetHit> {
+        let world = self.camera.screen_to_world(Point { x, y });
+        self.sheet_highlight
+            .as_ref()?
+            .hit_at(world, SLOP_PX / self.camera.scale())
     }
 }
