@@ -27,6 +27,21 @@ pub use crate::slug::Slug;
 #[sqlx(transparent)]
 pub struct DesignId(i64);
 
+impl DesignId {
+    /// An id as a row would carry it, for a test with no row behind it.
+    #[cfg(test)]
+    pub(crate) fn for_test(id: i64) -> Self {
+        Self(id)
+    }
+}
+
+/// The number alone, as a cache key spells it (`crate::cache::Key`).
+impl fmt::Display for DesignId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// The branch every design starts with (GLOSSARY, Default branch).
 pub const DEFAULT_BRANCH: &str = "main";
 

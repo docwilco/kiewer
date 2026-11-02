@@ -4,6 +4,7 @@ pub mod account;
 pub mod auth;
 pub mod blob;
 pub mod build;
+pub mod cache;
 pub mod config;
 pub mod db;
 pub mod description;

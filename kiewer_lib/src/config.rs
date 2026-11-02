@@ -51,6 +51,16 @@ impl fmt::Display for BlobStoreConfig {
     }
 }
 
+/// The Fastly service the server purges on and the token it purges
+/// with: `FASTLY_SERVICE_ID` and `FASTLY_API_TOKEN`, the names the
+/// Terraform in `infra/` gives the Cloud Run services (its README lists
+/// them). Absent on a dev box, where nothing is in front of the server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FastlyConfig {
+    pub service_id: String,
+    pub api_token: String,
+}
+
 /// The server's configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -75,6 +85,32 @@ pub struct Config {
     /// absent here and from the sign-in links, never an error; one of a
     /// pair alone is.
     pub oauth: BTreeMap<Provider, Credentials>,
+    /// `FASTLY_SERVICE_ID` and `FASTLY_API_TOKEN`: the edge to purge on
+    /// after a write (`crate::cache`). The service id alone, which a
+    /// deployment has before its token is given, means no purges, never
+    /// an error; a token without the service id is an error naming it.
+    pub fastly: Option<FastlyConfig>,
+}
+
+/// The Fastly pair: both, the service id alone (no purges), or neither.
+///
+/// # Errors
+///
+/// [`Error::Env`] naming `FASTLY_SERVICE_ID` when the token is set
+/// without it.
+fn fastly(var: &impl Fn(&str) -> Option<String>) -> Result<Option<FastlyConfig>> {
+    let read = |name: &str| var(name).filter(|value| !value.is_empty());
+    match (read("FASTLY_SERVICE_ID"), read("FASTLY_API_TOKEN")) {
+        (Some(service_id), Some(api_token)) => Ok(Some(FastlyConfig {
+            service_id,
+            api_token,
+        })),
+        (Some(_) | None, None) => Ok(None),
+        (None, Some(_)) => Err(Error::Env {
+            name: "FASTLY_SERVICE_ID",
+            reason: "is not set while FASTLY_API_TOKEN is; see infra/README.md".to_owned(),
+        }),
+    }
 }
 
 /// The pair of variables for one provider's app: both, or neither.
@@ -165,6 +201,7 @@ impl Config {
             blobs,
             public_url,
             oauth,
+            fastly: fastly(&var)?,
         })
     }
 }
@@ -264,6 +301,45 @@ mod tests {
         assert_eq!(config.database_url, "postgres://x");
         assert_eq!(config.public_url, "http://localhost:8090");
         assert!(config.oauth.is_empty(), "sign-in is off without an app");
+        assert_eq!(config.fastly, None, "no edge to purge without the pair");
+    }
+
+    #[test]
+    fn the_fastly_pair_is_both_or_the_service_alone() {
+        let config = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("FASTLY_SERVICE_ID", "SU1Z0isxPaozGVKXdv0eY"),
+            ("FASTLY_API_TOKEN", "token"),
+        ]))
+        .expect("valid");
+        assert_eq!(
+            config.fastly,
+            Some(FastlyConfig {
+                service_id: "SU1Z0isxPaozGVKXdv0eY".to_owned(),
+                api_token: "token".to_owned(),
+            })
+        );
+        let config = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("FASTLY_SERVICE_ID", "SU1Z0isxPaozGVKXdv0eY"),
+        ]))
+        .expect("the service before its token is given: no purges");
+        assert_eq!(config.fastly, None);
+        let err = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("FASTLY_API_TOKEN", "token"),
+        ]))
+        .expect_err("a token with nothing to purge on");
+        assert!(
+            matches!(
+                err,
+                Error::Env {
+                    name: "FASTLY_SERVICE_ID",
+                    ..
+                }
+            ),
+            "{err}"
+        );
     }
 
     #[test]
