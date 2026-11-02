@@ -85,6 +85,8 @@ pub struct DesignView {
     /// The parsed metadata as label and value pairs.
     pub details: Vec<(&'static str, String)>,
     pub files: Vec<FileView>,
+    /// The revision's schematic page, when it holds a sheet.
+    pub schematic_url: Option<String>,
 }
 
 /// The viewer page: the hand-off board at `/viewer`, a design's revision

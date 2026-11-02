@@ -14,7 +14,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 
 use super::auth::{Settled, personal};
 use super::viewer::{DesignView, FileView, Page};
-use super::{AppState, blob};
+use super::{AppState, blob, schematic};
 use crate::account::Handle;
 use crate::design::{self, Design, Slug};
 use crate::error::{Error, Refusal, Result};
@@ -42,6 +42,9 @@ pub(super) async fn page(
         return Ok(not_found());
     };
     let board_url = shown.board().map(|entry| blob::url(&entry.blob));
+    let schematic_url = shown
+        .schematic()
+        .map(|_| schematic::url(&shown.owner, &shown.design.slug));
     let view = DesignView {
         handle: shown.owner.to_string(),
         slug: shown.design.slug.to_string(),
@@ -67,6 +70,7 @@ pub(super) async fn page(
                 size: entry.size,
             })
             .collect(),
+        schematic_url,
     };
     let page = Page::new(shown.design.name, board_url, Some(view));
     Ok(Html(page.render()?).into_response())

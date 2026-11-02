@@ -24,6 +24,7 @@ use crate::error::{Error, Result};
 use crate::render::atlas_pipeline::Coverage;
 use crate::render::{Backend, MSAA_SAMPLES, Renderer, Target, device_descriptor};
 use crate::scene::{Scene, clear_color};
+use crate::schematic::{self, Sheet};
 use crate::view::{Layer, Side, View, ViewState, palette};
 
 /// The viewer over one canvas.
@@ -36,6 +37,9 @@ pub struct Viewer {
     renderer: Renderer,
     camera: Camera,
     scene: Option<Scene>,
+    /// The sheet shown instead of a board, when a schematic was loaded
+    /// last: its own draws and paper colour, no views.
+    sheet: Option<Sheet>,
     /// The view in force and the toggles on it; the page's layer panel
     /// and the URL fragment mirror it.
     state: ViewState,
@@ -287,6 +291,7 @@ impl Viewer {
             renderer,
             camera,
             scene: None,
+            sheet: None,
             state: ViewState::new(1),
             backend: gpu.backend,
             fallback: gpu.fallback,
@@ -359,8 +364,29 @@ impl Viewer {
         self.camera.fit(scene.bounds);
         self.fit_scale = self.camera.scale();
         self.scene = Some(scene);
+        self.sheet = None;
         self.board = Some(board);
         self.mirror_for_view();
+        Ok(())
+    }
+
+    /// Parse a `.kicad_sch` text, tessellate the one sheet, upload it
+    /// and fit the camera to its paper. The sheet replaces any board: no
+    /// views, no font round trip, the paper colour behind it. A parse
+    /// error is the error's message with its line.
+    pub fn load_schematic(&mut self, text: &str) -> core::result::Result<(), JsError> {
+        let parsed = kicad_core::parse_schematic(text).map_err(Error::Schematic)?;
+        let sheet = schematic::build(&parsed, self.config.format).ok_or(Error::EmptySheet)?;
+        self.renderer
+            .upload(&self.device, &sheet.vertices, &sheet.indices);
+        self.renderer.clear_text();
+        self.system_faces.clear();
+        self.scene = None;
+        self.board = None;
+        self.camera.set_mirrored(false);
+        self.camera.fit(sheet.bounds);
+        self.fit_scale = self.camera.scale();
+        self.sheet = Some(sheet);
         Ok(())
     }
 
@@ -601,12 +627,15 @@ impl Viewer {
         );
     }
 
-    /// Fit the board in the view again.
+    /// Fit the board, or the sheet, in the view again.
     pub fn fit(&mut self) {
-        if let Some(scene) = &self.scene {
-            self.camera.fit(scene.bounds);
-            self.fit_scale = self.camera.scale();
-        }
+        let bounds = match (&self.sheet, &self.scene) {
+            (Some(sheet), _) => sheet.bounds,
+            (None, Some(scene)) => scene.bounds,
+            (None, None) => return,
+        };
+        self.camera.fit(bounds);
+        self.fit_scale = self.camera.scale();
     }
 
     /// Draw a frame. A lost or outdated surface is reconfigured and the
@@ -632,20 +661,32 @@ impl Viewer {
         let target = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let origin = self
-            .scene
-            .as_ref()
-            .map_or(Point::default(), |scene| scene.origin);
-        let draws = self.scene.as_ref().map_or_else(Vec::new, |scene| {
-            scene.draw_list(&self.state, self.config.format)
-        });
+        // A sheet, when one is loaded, has its own origin, draws and
+        // paper; otherwise the board's view in force says what is drawn.
+        let (origin, draws, clear) = match (&self.sheet, &self.scene) {
+            (Some(sheet), _) => (
+                sheet.origin,
+                sheet.draws.clone(),
+                schematic::clear_color(self.config.format),
+            ),
+            (None, Some(scene)) => (
+                scene.origin,
+                scene.draw_list(&self.state, self.config.format),
+                clear_color(self.config.format),
+            ),
+            (None, None) => (
+                Point::default(),
+                Vec::new(),
+                clear_color(self.config.format),
+            ),
+        };
         self.renderer.render(
             &self.device,
             &self.queue,
             &Target {
                 view: &target,
                 size: (self.config.width, self.config.height),
-                clear: clear_color(self.config.format),
+                clear,
             },
             self.camera.view(origin),
             &draws,

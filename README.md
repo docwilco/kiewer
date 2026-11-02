@@ -21,7 +21,8 @@ or `kicad_core`: it writes the browser viewer to `kiewer_viewer/dist`, which
 `cargo run` embeds; without it the server runs and the viewer page says the
 viewer is not built in), then `cargo run`. The first line on stdout is the
 build line; the page is at http://localhost:8090/, the viewer with the
-hand-off board at http://localhost:8090/viewer, the upload form at
+hand-off board at http://localhost:8090/viewer, its schematic at
+http://localhost:8090/schematic, the upload form at
 http://localhost:8090/upload once signed in, and `/healthz` says `ok` once
 the database answers.
 `kiewer_lib::config` is the list of variables the server reads and their

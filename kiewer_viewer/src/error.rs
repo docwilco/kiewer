@@ -42,6 +42,13 @@ pub enum Error {
     /// The board parsed but has no outline and no front copper.
     #[display("the board has no outline and no front copper to draw")]
     NothingToDraw,
+    /// The schematic text did not parse.
+    #[display("the schematic: {_0}")]
+    #[from(ignore)]
+    Schematic(kicad_core::Error),
+    /// The sheet parsed but draws nothing.
+    #[display("the sheet has nothing to draw")]
+    EmptySheet,
     /// The surface refused to give a frame for a reason that is not a
     /// resize: a validation failure in the configuration.
     #[display("{backend}: the surface refused a frame")]

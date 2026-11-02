@@ -3,13 +3,15 @@
 //! settings pages in `web/settings.rs`; the viewer page and its assets
 //! in `web/viewer.rs`; the renderer beacon in `web/beacon.rs`; the about
 //! page in `web/about.rs`; the design page and the upload in
-//! `web/design.rs`; the blob route in `web/blob.rs`.
+//! `web/design.rs`; the blob route in `web/blob.rs`; the schematic page
+//! in `web/schematic.rs`.
 
 mod about;
 mod auth;
 pub mod beacon;
 pub mod blob;
 mod design;
+pub mod schematic;
 mod settings;
 pub mod viewer;
 
@@ -57,6 +59,7 @@ pub fn router(state: AppState) -> Router {
         )
         .merge(viewer::routes())
         .merge(beacon::routes())
+        .merge(schematic::routes())
         // The upload's body may hold a revision's worth of files; every
         // other route keeps axum's default limit. Static routes above win
         // over the design page's two segments (axum 0.8 matches the most

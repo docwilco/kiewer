@@ -104,3 +104,56 @@ A text item drawn inverted: a filled box around the text with the glyphs cut out
 
 **Upright**:
 A footprint text's rule that its drawn angle is folded into (-90, 90], so it reads from the left or from below whatever way the footprint turns. KiCad's default; `(unlocked yes)` in the file turns it off.
+
+### Schematic
+
+**Sheet**:
+One page of a schematic: one `.kicad_sch` file, with its paper size, its placed symbols, wires and labels.
+_Avoid_: page, schematic (the whole set of sheets)
+
+**Root sheet**:
+The sheet a schematic opens on, named after the project; every other sheet hangs below it through a sheet symbol.
+_Avoid_: top sheet, main sheet
+
+**Sheet symbol**:
+A box on a sheet standing for another sheet, with sheet pins on its edges where that sheet's hierarchical labels come out.
+_Avoid_: hierarchical sheet, subsheet
+
+**Library symbol**:
+The drawing of a part (its body, pins and texts) as a sheet's own embedded library holds it; every placed symbol refers to one by name.
+_Avoid_: lib symbol, part, component
+
+**Symbol**:
+A library symbol placed on a sheet: a position, a rotation, a mirror, the unit shown, and its fields.
+_Avoid_: component, instance
+
+**Power symbol**:
+A symbol whose value is a net name, so placing it joins its pin to that net everywhere: `GND`, `+3V3`.
+_Avoid_: power port, power flag (a different symbol)
+
+**Field**:
+A named text a symbol or a sheet symbol carries and may show: the reference, the value, the sheet name.
+_Avoid_: property, attribute
+
+**Wire**:
+A line on a sheet joining pins and labels into one net.
+_Avoid_: trace, track (board terms)
+
+**Bus**:
+A thick line on a sheet carrying several nets at once; a wire joins it through a bus entry.
+
+**Junction**:
+The dot where three or more wires meet, or two cross and connect.
+_Avoid_: node
+
+**No-connect**:
+The cross on a pin that says it is left unconnected on purpose.
+_Avoid_: NC mark
+
+**Label**:
+A net name written on a wire. A local label names the net on its own sheet; a global label names it on every sheet; a hierarchical label names it to the parent sheet, where it appears as a sheet pin.
+_Avoid_: net label, net name (the net itself)
+
+**Flag**:
+The outline around a global label, a hierarchical label or a sheet pin, shaped by its direction: pointed at the wire for an input, away for an output, both ways for a bidirectional or tri-state, a plain box for a passive.
+_Avoid_: shape, arrow

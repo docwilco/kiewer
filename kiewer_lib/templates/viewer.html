@@ -67,7 +67,7 @@
 </div>
 {% if let Some(design) = design %}
 <details id="design">
-  <summary><a href="/{{ design.handle }}">{{ design.handle }}</a> / {{ design.slug }}: branch {{ design.branch }}, revision <code title="{{ design.revision }}">{{ design.short }}</code> by {{ design.author }} at <time datetime="{{ design.created_at }}">{{ design.created_at }}</time>{% if let Some(message) = design.message %}, "{{ message }}"{% endif %}</summary>
+  <summary><a href="/{{ design.handle }}">{{ design.handle }}</a> / {{ design.slug }}: branch {{ design.branch }}, revision <code title="{{ design.revision }}">{{ design.short }}</code> by {{ design.author }} at <time datetime="{{ design.created_at }}">{{ design.created_at }}</time>{% if let Some(message) = design.message %}, "{{ message }}"{% endif %}{% if let Some(url) = design.schematic_url %} <a href="{{ url }}">schematic</a>{% endif %}</summary>
   <dl>
   {% for (label, value) in design.details %}
     <dt>{{ label }}</dt><dd>{{ value }}</dd>

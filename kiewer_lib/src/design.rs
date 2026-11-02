@@ -554,6 +554,40 @@ impl DesignHead {
             .filter(|entry| entry.path.extension().as_deref() == Some("kicad_pcb"))
             .min_by_key(|entry| (entry.path.depth(), &entry.path))
     }
+
+    /// The root sheet the schematic page loads: the `.kicad_sch` named
+    /// like the project file (KiCad names the root sheet after the
+    /// project), else like the board, else the shallowest, first by name
+    /// among equals; `None` for a revision without one.
+    #[must_use]
+    pub fn schematic(&self) -> Option<&TreeEntry> {
+        let stem = |entry: &TreeEntry| {
+            entry
+                .path
+                .file_name()
+                .rsplit_once('.')
+                .map(|(stem, _)| stem.to_owned())
+        };
+        let sheets = || {
+            self.files
+                .iter()
+                .filter(|entry| entry.path.extension().as_deref() == Some("kicad_sch"))
+        };
+        let named_like = |extension: &str| {
+            let anchor = self
+                .files
+                .iter()
+                .filter(|entry| entry.path.extension().as_deref() == Some(extension))
+                .min_by_key(|entry| (entry.path.depth(), &entry.path))?;
+            let wanted = stem(anchor)?;
+            sheets()
+                .filter(|entry| entry.path.depth() == anchor.path.depth())
+                .find(|entry| stem(entry).as_deref() == Some(wanted.as_str()))
+        };
+        named_like("kicad_pro")
+            .or_else(|| named_like("kicad_pcb"))
+            .or_else(|| sheets().min_by_key(|entry| (entry.path.depth(), &entry.path)))
+    }
 }
 
 /// The design at `/{handle}/{slug}` with the head of its default branch,

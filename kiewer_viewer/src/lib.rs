@@ -3,7 +3,8 @@
 //! Built for `wasm32-unknown-unknown` by `scripts/build-viewer.sh` and
 //! loaded by the viewer page; the same crate links natively for tests
 //! and the thumbnail renderer (ADR 0004). [`camera`] is the view in f64,
-//! [`scene`] the board as triangles, [`render`] the wgpu pipeline at the
+//! [`scene`] the board as triangles, [`schematic`] a sheet as triangles,
+//! [`render`] the wgpu pipeline at the
 //! WebGL2 floor, [`error`] the one error type; the canvas and the
 //! browser's events are `web`, compiled for wasm32 alone.
 
@@ -14,6 +15,7 @@ pub mod camera;
 pub mod error;
 pub mod render;
 pub mod scene;
+pub mod schematic;
 pub mod view;
 #[cfg(target_arch = "wasm32")]
 pub mod web;

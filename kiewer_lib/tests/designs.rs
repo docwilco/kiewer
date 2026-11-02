@@ -183,6 +183,11 @@ async fn a_design_gets_a_first_revision_and_the_page_reads_the_head() {
         shown.board().map(|entry| entry.path.as_str()),
         Some("demo.kicad_pcb")
     );
+    assert_eq!(
+        shown.schematic().map(|entry| entry.path.as_str()),
+        Some("demo.kicad_sch"),
+        "the sheet named like the board is the root sheet"
+    );
     let at = &shown.revision.created_at;
     assert!(
         at.len() == 20 && at.as_bytes()[10] == b'T' && at.ends_with('Z'),

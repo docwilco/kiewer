@@ -10,9 +10,9 @@
 //!
 //! What is kept: `.kicad_pcb`, `.kicad_sch` and `.kicad_pro`; anything
 //! else is dropped with a line in the log. A board is parsed with
-//! `kicad_core` for its metadata. There is no schematic parser yet (#12),
-//! so a schematic is checked to be an S-expression headed `kicad_sch` and
-//! a project file to be JSON, and both are stored as they are.
+//! `kicad_core` for its metadata; a schematic is parsed with it too, so a
+//! sheet KiCad 9 cannot read is refused naming its version; a project
+//! file is checked to be JSON. All three are stored as they are.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -87,7 +87,7 @@ pub const BODY_LIMIT: usize = (Limits::DEFAULT.revision_bytes + MB) as usize;
 pub enum FileKind {
     /// `.kicad_pcb`: parsed for the viewer and the metadata.
     Board,
-    /// `.kicad_sch`: stored; parsing is #12.
+    /// `.kicad_sch`: parsed for its shape and version, then stored.
     Schematic,
     /// `.kicad_pro`: stored, the project's settings.
     Project,
@@ -360,16 +360,8 @@ fn parse(kind: FileKind, path: &TreePath, bytes: &[u8]) -> Result<Option<Metadat
             Ok(Some(Metadata::of(&board)))
         }
         FileKind::Schematic => {
-            let root =
-                kicad_core::sexpr::read(text).map_err(|error| malformed(error.to_string()))?;
-            let head = root.head().map_err(|error| malformed(error.to_string()))?;
-            if head == "kicad_sch" {
-                Ok(None)
-            } else {
-                Err(malformed(format!(
-                    "expected (kicad_sch ...), found ({head} ...)"
-                )))
-            }
+            kicad_core::parse_schematic(text).map_err(|error| malformed(error.to_string()))?;
+            Ok(None)
         }
         FileKind::Project => {
             serde_json::from_str::<serde_json::Value>(text)
