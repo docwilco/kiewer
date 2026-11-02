@@ -47,7 +47,7 @@ impl Listed {
             return None;
         }
         let hash: RevisionHash = self.head.parse().ok()?;
-        Some(thumbnail::url(hash, Size::Small))
+        Some(thumbnail::url(&self.handle, &self.slug, hash, Size::Small))
     }
 }
 

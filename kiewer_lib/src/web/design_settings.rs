@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use super::AppState;
 use super::auth::{Settled, personal};
-use super::design::design_page;
+use super::design::{design_page, design_url};
 use super::open_graph::{self, OpenGraph};
 use crate::account::Handle;
 use crate::description::{self, Description};
@@ -76,7 +76,7 @@ pub struct SettingsForm {
 
 /// The design page a refused save shows again, but for its settings
 /// block.
-struct Shown<'a> {
+struct RefusedPage<'a> {
     head: &'a DesignHead,
     description: &'a Description,
     forked_from: Option<&'a ForkSource>,
@@ -88,7 +88,7 @@ struct Shown<'a> {
 fn refused(
     settled: Settled,
     status: StatusCode,
-    shown: Shown<'_>,
+    page: RefusedPage<'_>,
     attempt: SettingsView,
     reason: String,
 ) -> Result<Response> {
@@ -97,11 +97,11 @@ fn refused(
         ..attempt
     };
     let page = design_page(
-        shown.head,
-        shown.description,
+        page.head,
+        page.description,
         settings,
-        shown.forked_from,
-        shown.og,
+        page.forked_from,
+        page.og,
     )?;
     Ok(personal(settled.jar, (status, Html(page))))
 }
@@ -148,45 +148,37 @@ pub(super) async fn save(
         }
         Err(error) => Err(error),
     };
-    // The page shown again on a refusal is the design's own, so its
-    // tags name that page.
+    let (status, reason) = match outcome {
+        Ok(slug) => {
+            return Ok(personal(
+                settled.jar,
+                Redirect::to(&format!("/{handle}/{slug}")),
+            ));
+        }
+        Err(error @ Error::Forbidden { .. }) => {
+            tracing::info!(%error, design = %slug, "design settings refused");
+            return Ok(personal(
+                settled.jar,
+                (StatusCode::FORBIDDEN, format!("{error}\n")),
+            ));
+        }
+        Err(Error::Malformed(reason)) => (StatusCode::UNPROCESSABLE_ENTITY, reason),
+        Err(Error::Refused(refusal)) => {
+            tracing::info!(%refusal, "design settings refused");
+            (StatusCode::CONFLICT, refusal.to_string())
+        }
+        Err(error) => return Err(error),
+    };
+    // After the outcome, so a read that fails here cannot turn a save
+    // that committed into a 500: the page shown again is the design's
+    // own, so its tags name that page.
     let og =
-        open_graph::for_design(&state, &shown, &description, &format!("/{handle}/{slug}")).await?;
-    let page = Shown {
+        open_graph::for_design(&state, &shown, &description, &design_url(&handle, &slug)).await?;
+    let page = RefusedPage {
         head: &shown,
         description: &description,
         forked_from: forked_from.as_ref(),
         og,
     };
-    match outcome {
-        Ok(slug) => Ok(personal(
-            settled.jar,
-            Redirect::to(&format!("/{handle}/{slug}")),
-        )),
-        Err(error @ Error::Forbidden { .. }) => {
-            tracing::info!(%error, design = %slug, "design settings refused");
-            Ok(personal(
-                settled.jar,
-                (StatusCode::FORBIDDEN, format!("{error}\n")),
-            ))
-        }
-        Err(Error::Malformed(reason)) => refused(
-            settled,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            page,
-            attempt,
-            reason,
-        ),
-        Err(Error::Refused(refusal)) => {
-            tracing::info!(%refusal, "design settings refused");
-            refused(
-                settled,
-                StatusCode::CONFLICT,
-                page,
-                attempt,
-                refusal.to_string(),
-            )
-        }
-        Err(error) => Err(error),
-    }
+    refused(settled, status, page, attempt, reason)
 }

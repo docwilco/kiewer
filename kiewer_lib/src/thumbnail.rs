@@ -16,37 +16,40 @@
 //! it does.
 //!
 //! Rendering runs inside the upload request within the render budget
-//! ([`BUDGET`], [`Thumbnails::after_push`]). Past the budget the revision
-//! is saved anyway, the render's result is discarded (Cloud Run throttles
-//! the CPU once the response is out, so nothing finishes in the
-//! background) and a task on the Cloud Tasks queue ([`TaskQueue`]) POSTs
-//! the retry path ([`retry_path`], `web/thumbnail.rs`), which renders
-//! with no budget ([`Thumbnails::render`]). The task carries an OIDC
-//! token minted as the queue's service account ([`TaskAuth`]). In
-//! development and tests the queue is [`NoTasks`] and the retry path is
-//! open.
+//! ([`BUDGET`], [`Thumbnails::after_push`]). Past the budget, or when the
+//! render fails, the revision is saved anyway and a task on the Cloud
+//! Tasks queue ([`TaskQueue`]) POSTs the retry path ([`retry_path`],
+//! `web/thumbnail.rs`), which renders with no budget
+//! ([`Thumbnails::render`]). Giving up on the budget stops only the
+//! wait: the draw already on its blocking thread runs to its end with the
+//! renderer's lock held, on whatever CPU Cloud Run still gives it, and
+//! its PNGs are dropped unstored. The task is what makes the thumbnail
+//! land. It carries an OIDC token minted as the queue's service account
+//! ([`TaskAuth`]). In development and tests the queue is [`NoTasks`] and
+//! the retry path is open.
 
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::http::Extensions;
 use google_cloud_auth::credentials::{CacheableResource, Credentials};
+use kicad_core::geometry::Bounds;
 use kiewer_viewer::error::Error as RenderError;
 use kiewer_viewer::headless::{Frame, Headless, Mesh};
 use kiewer_viewer::render::offscreen::Offscreen;
 use kiewer_viewer::scene::Scene;
 use kiewer_viewer::schematic;
-use kiewer_viewer::view::ViewState;
+use kiewer_viewer::view::{Side, View, ViewState};
 use serde::Deserialize;
 use sqlx::PgPool;
 
 use crate::blob::{BlobHash, BlobStore, blocking};
 use crate::design;
 use crate::error::{Error, Result};
-use crate::revision::{RevisionHash, TreeEntry, TreePath};
+use crate::revision::{RevisionHash, TreeEntry};
 
 /// The render budget: how long the upload request waits for the
 /// thumbnail before saving the revision without one and queueing a
@@ -54,12 +57,6 @@ use crate::revision::{RevisionHash, TreeEntry, TreePath};
 /// on lavapipe; a few seconds covers a board many times its size without
 /// holding the uploader's browser.
 pub const BUDGET: Duration = Duration::from_secs(5);
-
-/// The title of the view a board's thumbnail draws: the hand-off's view
-/// 5, which `kiewer_viewer::view::Stack::views` builds for every board
-/// with a front copper layer. The views are numbered from 1, so the one
-/// with this title is looked up, not assumed to be fifth.
-pub const FRONT_VIEW: &str = "F.Cu + F.Paste + F.Mask + F.SilkS";
 
 /// The two sizes every thumbnail is rendered at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -107,14 +104,22 @@ impl fmt::Display for Size {
     }
 }
 
-/// The route a revision's thumbnail of `size` is served at: content
-/// under a revision hash never changes, so the response is immutable.
+/// The route `revision`'s thumbnail of `size` is served at, under a
+/// design that reaches it: a bare hash would be a capability (ADR 0002).
+/// The pixels under a revision hash never change, so the response is
+/// immutable.
 #[must_use]
-pub fn url(revision: RevisionHash, size: Size) -> String {
-    format!("/thumbnail/{revision}/{}", size.file_name())
+pub fn url(handle: &str, slug: &str, revision: RevisionHash, size: Size) -> String {
+    format!(
+        "/{handle}/{slug}/r/{revision}/thumbnail/{}",
+        size.file_name()
+    )
 }
 
-/// The path the retry task POSTs to render a revision's thumbnail.
+/// The path the retry task POSTs to render a revision's thumbnail. A
+/// bare hash, unlike [`url`]: it reads nothing back, and a production
+/// server takes it only with the queue's token ([`TaskAuth`]), so it
+/// grants nobody a view of the revision.
 #[must_use]
 pub fn retry_path(revision: RevisionHash) -> String {
     format!("/api/thumbnails/{revision}")
@@ -287,12 +292,6 @@ impl CloudTasks {
         })
     }
 
-    /// The queue the tasks go on.
-    #[must_use]
-    pub fn queue(&self) -> &str {
-        &self.queue
-    }
-
     /// The task for `revision` as the API takes it: an HTTP POST of the
     /// retry path with an OIDC token for the public URL.
     #[must_use]
@@ -350,19 +349,24 @@ impl TaskQueue for CloudTasks {
 
 /// Google's endpoint that validates an ID token and answers its claims.
 /// One HTTPS call per retry, which is rare; a local check against
-/// Google's published keys is the later step.
+/// Google's published keys is the later step. It answers 400 for a token
+/// it refuses.
 const TOKENINFO: &str = "https://oauth2.googleapis.com/tokeninfo";
 
 /// What the retry path asks of its caller: the token Cloud Tasks mints
 /// in production, nothing in development and tests.
 #[derive(Debug, Clone)]
 pub enum TaskAuth {
-    /// Anyone may POST the retry path. Development and tests: the worst
-    /// a stranger can do is render a thumbnail that exists.
+    /// Anyone may POST the retry path. Development and tests, over
+    /// `http`: nothing else can reach a dev box's server.
     Open,
+    /// Nobody may: a deployment without a queue has no token to check,
+    /// and a render is too much work to give strangers.
+    Closed,
     /// A bearer token that Google's token endpoint says is an ID token
     /// for `audience` issued to `account`.
     Oidc {
+        tokeninfo: String,
         account: String,
         audience: String,
         http: reqwest::Client,
@@ -393,10 +397,29 @@ impl TokenInfo {
 }
 
 impl TaskAuth {
+    /// The retry path of a server with no queue at `public_url`:
+    /// [`TaskAuth::Closed`] over `https`, which is every deployment,
+    /// else [`TaskAuth::Open`], a dev box.
+    #[must_use]
+    pub fn without_queue(public_url: &str) -> Self {
+        if public_url.starts_with("https://") {
+            TaskAuth::Closed
+        } else {
+            TaskAuth::Open
+        }
+    }
+
     /// The production check: a token for `audience` minted as `account`.
     #[must_use]
     pub fn oidc(account: &str, audience: &str) -> Self {
+        Self::oidc_at(TOKENINFO, account, audience)
+    }
+
+    /// The same against the token endpoint at `tokeninfo`: a test's fake.
+    #[must_use]
+    pub fn oidc_at(tokeninfo: &str, account: &str, audience: &str) -> Self {
         TaskAuth::Oidc {
+            tokeninfo: tokeninfo.to_owned(),
             account: account.to_owned(),
             audience: audience.trim_end_matches('/').to_owned(),
             http: reqwest::Client::new(),
@@ -408,12 +431,16 @@ impl TaskAuth {
     ///
     /// # Errors
     ///
-    /// [`Error::Http`] when the token endpoint cannot be reached; a token
-    /// it refuses is `false`, not an error.
+    /// [`Error::Http`] when the token endpoint cannot be reached and
+    /// [`Error::Failed`] when it answers anything but a verdict: the
+    /// check did not happen, which is no refusal of the token. A token
+    /// it refuses is `false`.
     pub async fn allows(&self, bearer: Option<&str>) -> Result<bool> {
         match self {
             TaskAuth::Open => Ok(true),
+            TaskAuth::Closed => Ok(false),
             TaskAuth::Oidc {
+                tokeninfo,
                 account,
                 audience,
                 http,
@@ -421,16 +448,26 @@ impl TaskAuth {
                 let Some(token) = bearer else {
                     return Ok(false);
                 };
+                // The token is in the URL, and a reqwest error's text
+                // holds its URL, so neither error keeps it for the log.
                 let response = http
-                    .get(TOKENINFO)
+                    .get(tokeninfo)
                     .query(&[("id_token", token)])
                     .send()
-                    .await?;
-                if !response.status().is_success() {
-                    tracing::warn!(status = %response.status(), "thumbnail: the retry's token was refused");
+                    .await
+                    .map_err(reqwest::Error::without_url)?;
+                let status = response.status();
+                if status == reqwest::StatusCode::BAD_REQUEST {
+                    tracing::warn!("thumbnail: the retry's token was refused");
                     return Ok(false);
                 }
-                let claims: TokenInfo = response.json().await?;
+                if !status.is_success() {
+                    return Err(Error::Failed {
+                        reason: format!("the token endpoint answered {status}"),
+                    });
+                }
+                let claims: TokenInfo =
+                    response.json().await.map_err(reqwest::Error::without_url)?;
                 Ok(claims.aud == *audience
                     && claims.email.as_deref() == Some(account)
                     && claims.verified())
@@ -484,13 +521,13 @@ struct Renderer {
     headless: Mutex<Option<Headless>>,
 }
 
-/// The view number of [`FRONT_VIEW`] in `scene`, or the first view for a
-/// board without one (no front copper).
-fn front_view(scene: &Scene) -> usize {
-    scene
-        .views
+/// The number, from 1, of the composed front view among `views`. Its
+/// place moves with the copper layers before it: view 5 on a four-layer
+/// board like the hand-off's, view 3 on a two-layer one.
+fn front_view(views: &[View]) -> usize {
+    views
         .iter()
-        .position(|view| view.title == FRONT_VIEW)
+        .position(|view| view.as_built && view.top == Side::Front)
         .map_or(1, |index| index + 1)
 }
 
@@ -501,41 +538,42 @@ impl Renderer {
         }
     }
 
-    /// Draw `source` at both sizes.
-    fn render(&self, source: &Source) -> Result<Pngs> {
-        // A panic in an earlier render poisons the lock; the renderer is
-        // made again rather than refused for good.
-        let mut guard = self.headless.lock().unwrap_or_else(PoisonError::into_inner);
+    /// Draw `source` at both sizes, after `delay` with the renderer held
+    /// ([`Thumbnails::with_render_delay`]).
+    fn render(&self, source: &Source, delay: Duration) -> Result<Pngs> {
+        // A panic in an earlier render poisons the lock and leaves the
+        // device in an unknown state: it is made again.
+        let mut guard = match self.headless.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = None;
+                guard
+            }
+        };
         if guard.is_none() {
             *guard = Some(Headless::new()?);
         }
         let headless = guard.as_mut().expect("filled just above");
+        std::thread::sleep(delay);
         match source {
             Source::Board(text) => {
                 let board = kicad_core::parse_board(text).map_err(RenderError::Board)?;
                 let scene = Scene::build(&board).ok_or(RenderError::NothingToDraw)?;
-                let state = ViewState::new(front_view(&scene));
-                both(|size| {
-                    let (width, height) = size.pixels();
-                    let frame = Frame::fit(width, height, scene.bounds);
-                    Ok(headless.render(&scene, &state, &frame)?.to_png()?)
+                let state = ViewState::new(front_view(&scene.views));
+                both(scene.bounds, |frame| {
+                    Ok(headless.render(&scene, &state, frame)?.to_png()?)
                 })
             }
             Source::Sheet(text) => {
                 let sheet = kicad_core::parse_schematic(text).map_err(RenderError::Schematic)?;
                 let scene =
                     schematic::build(&sheet, Offscreen::FORMAT).ok_or(RenderError::EmptySheet)?;
-                let mesh = Mesh {
-                    origin: scene.origin,
-                    vertices: &scene.vertices,
-                    indices: &scene.indices,
-                };
+                let mesh = Mesh::from(&scene);
                 let clear = schematic::clear_color(Offscreen::FORMAT);
-                both(|size| {
-                    let (width, height) = size.pixels();
-                    let frame = Frame::fit(width, height, scene.bounds);
+                both(scene.bounds, |frame| {
                     Ok(headless
-                        .render_mesh(mesh, clear, &scene.draws, &frame)?
+                        .render_mesh(mesh, clear, &scene.draws, frame)?
                         .to_png()?)
                 })
             }
@@ -543,11 +581,15 @@ impl Renderer {
     }
 }
 
-/// Each size through `draw`, the large one first.
-fn both(mut draw: impl FnMut(Size) -> Result<Vec<u8>>) -> Result<Pngs> {
+/// `bounds` fit to each size and drawn by `draw`, the large one first.
+fn both(bounds: Bounds, mut draw: impl FnMut(&Frame) -> Result<Vec<u8>>) -> Result<Pngs> {
+    let mut at = |size: Size| {
+        let (width, height) = size.pixels();
+        draw(&Frame::fit(width, height, bounds))
+    };
     Ok(Pngs {
-        large: draw(Size::Large)?,
-        small: draw(Size::Small)?,
+        large: at(Size::Large)?,
+        small: at(Size::Small)?,
     })
 }
 
@@ -555,6 +597,7 @@ fn both(mut draw: impl FnMut(Size) -> Result<Vec<u8>>) -> Result<Pngs> {
 /// goes to and what the retry path asks of its caller.
 pub struct Thumbnails {
     budget: Duration,
+    render_delay: Duration,
     tasks: Arc<dyn TaskQueue>,
     auth: TaskAuth,
     renderer: Arc<Renderer>,
@@ -576,17 +619,25 @@ impl Thumbnails {
     pub fn new(tasks: Arc<dyn TaskQueue>) -> Self {
         Self {
             budget: BUDGET,
+            render_delay: Duration::ZERO,
             tasks,
             auth: TaskAuth::Open,
             renderer: Arc::new(Renderer::new()),
         }
     }
 
-    /// The same with another budget: a test gives it none, so every
-    /// render runs past it.
+    /// The same with another budget.
     #[must_use]
     pub fn with_budget(mut self, budget: Duration) -> Self {
         self.budget = budget;
+        self
+    }
+
+    /// The same with every render held for `delay` on its blocking
+    /// thread with the renderer locked: how a test makes a render slow.
+    #[must_use]
+    pub fn with_render_delay(mut self, delay: Duration) -> Self {
+        self.render_delay = delay;
         self
     }
 
@@ -595,12 +646,6 @@ impl Thumbnails {
     pub fn with_auth(mut self, auth: TaskAuth) -> Self {
         self.auth = auth;
         self
-    }
-
-    /// The render budget.
-    #[must_use]
-    pub fn budget(&self) -> Duration {
-        self.budget
     }
 
     /// Whether a caller of the retry path presenting `bearer` may run it
@@ -614,20 +659,19 @@ impl Thumbnails {
     }
 
     /// The hook at the end of a successful push: render within the
-    /// budget, else queue a retry. Never fails the upload: whatever goes
-    /// wrong is in the log and the revision is saved without a thumbnail.
+    /// budget, else queue a retry, as for a render that fails, which may
+    /// be a store or a device having a bad moment. Never fails the
+    /// upload: whatever goes wrong is in the log and the revision is
+    /// saved without a thumbnail.
     pub async fn after_push(&self, db: &PgPool, blobs: &dyn BlobStore, revision: RevisionHash) {
         let started = Instant::now();
         match tokio::time::timeout(self.budget, self.render(db, blobs, revision)).await {
             Ok(Ok(outcome)) => {
                 tracing::info!(%revision, %outcome, elapsed = ?started.elapsed(), "thumbnail");
+                return;
             }
             Ok(Err(error)) => {
-                tracing::error!(
-                    %revision,
-                    %error,
-                    "thumbnail: the render failed; the revision is saved without one"
-                );
+                tracing::error!(%revision, %error, "thumbnail: the render failed; a retry is queued");
             }
             Err(_) => {
                 tracing::warn!(
@@ -635,18 +679,19 @@ impl Thumbnails {
                     budget = ?self.budget,
                     "thumbnail: past the render budget; a retry is queued"
                 );
-                if let Err(error) = self.tasks.enqueue(revision).await {
-                    tracing::error!(%revision, %error, "thumbnail: the retry could not be queued");
-                }
             }
+        }
+        if let Err(error) = self.tasks.enqueue(revision).await {
+            tracing::error!(%revision, %error, "thumbnail: the retry could not be queued");
         }
     }
 
     /// Render `revision`'s thumbnail with no budget and store it: what
     /// the retry path does, and what [`Thumbnails::after_push`] does
     /// within the budget. Draws the revision's board (the one the design
-    /// page shows), else its root sheet; a revision with neither, whose
-    /// file is blocked, or whose file has nothing on it gets none.
+    /// page shows), else its root sheet; a revision with neither, with
+    /// a blocked file ([`SHOWABLE`] would hide the result), or whose file
+    /// has nothing on it gets none.
     ///
     /// # Errors
     ///
@@ -662,19 +707,21 @@ impl Thumbnails {
         if of(db, revision).await?.is_some() {
             return Ok(Outcome::AlreadyRendered);
         }
-        let Some(files) = files_of(db, revision).await? else {
+        let Some(files) = design::files_of(db, revision).await? else {
             return Ok(Outcome::NoSuchRevision);
         };
+        for file in &files {
+            if design::is_blocked(db, &file.blob).await? {
+                tracing::warn!(%revision, path = %file.path, "thumbnail: a file is blocked; none drawn");
+                return Ok(Outcome::NothingToRender);
+            }
+        }
         let (entry, as_source): (&TreeEntry, fn(String) -> Source) =
-            match (design::board_in(&files), design::schematic_in(&files)) {
+            match (design::board_in(&files), design::root_sheet_in(&files)) {
                 (Some(board), _) => (board, Source::Board),
                 (None, Some(sheet)) => (sheet, Source::Sheet),
                 (None, None) => return Ok(Outcome::NothingToRender),
             };
-        if design::is_blocked(db, &entry.blob).await? {
-            tracing::warn!(%revision, path = %entry.path, "thumbnail: the file is blocked; none drawn");
-            return Ok(Outcome::NothingToRender);
-        }
         let Some(bytes) = blobs.get(&entry.blob).await? else {
             return Err(Error::Failed {
                 reason: format!(
@@ -688,7 +735,8 @@ impl Thumbnails {
         })?;
         let source = as_source(text);
         let renderer = Arc::clone(&self.renderer);
-        let pngs = match blocking(move || renderer.render(&source)).await {
+        let delay = self.render_delay;
+        let pngs = match blocking(move || renderer.render(&source, delay)).await {
             Ok(pngs) => pngs,
             // A board or a sheet with nothing on it: an answer, not a
             // failure, so the placeholder stays and the queue stops.
@@ -700,37 +748,6 @@ impl Thumbnails {
         store(db, blobs, revision, &pngs).await?;
         Ok(Outcome::Rendered)
     }
-}
-
-/// The files of `revision` in path order, or `None` for a hash no
-/// revision has (a revision holds at least one file).
-async fn files_of(db: &PgPool, revision: RevisionHash) -> Result<Option<Vec<TreeEntry>>> {
-    // One read on the pool: the render's lookup, part of no write; the
-    // revision by primary key, its entries by the tree's key.
-    let rows: Vec<(String, Vec<u8>, i64)> = sqlx::query_as(
-        "SELECT te.path, te.blob_hash, b.size
-         FROM revision r
-         JOIN tree_entry te ON te.tree_hash = r.tree_hash
-         JOIN blob b ON b.hash = te.blob_hash
-         WHERE r.hash = $1
-         ORDER BY te.path",
-    )
-    .bind(revision.as_bytes())
-    .fetch_all(db)
-    .await?;
-    if rows.is_empty() {
-        return Ok(None);
-    }
-    rows.into_iter()
-        .map(|(path, blob, size)| {
-            Ok(TreeEntry {
-                path: path.parse::<TreePath>()?,
-                blob: BlobHash::from_bytes(&blob)?,
-                size: u64::try_from(size).unwrap_or(0),
-            })
-        })
-        .collect::<Result<Vec<_>>>()
-        .map(Some)
 }
 
 /// The two PNGs into the store, then their rows and the thumbnail row.
@@ -765,6 +782,7 @@ async fn store(
 
 #[cfg(test)]
 mod tests {
+    use kiewer_viewer::view::Stack;
     use test_case::test_case;
 
     use super::*;
@@ -775,6 +793,28 @@ mod tests {
     #[test_case("640x480.png", None; "a size nobody renders")]
     fn a_size_is_named_by_its_file(name: &str, size: Option<Size>) {
         assert_eq!(Size::from_file_name(name), size);
+    }
+
+    #[test_case(&["F.Cu", "B.Cu"], 3; "two copper layers")]
+    #[test_case(&["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"], 5; "four, the hand-off's view 5")]
+    fn the_composed_front_view_follows_the_copper_layers(copper: &[&str], view: usize) {
+        let stack = Stack {
+            copper: copper.iter().map(ToString::to_string).collect(),
+        };
+        let views = stack.views();
+        assert_eq!(front_view(&views), view);
+        assert_eq!(
+            views[view - 1].title,
+            "F.Cu + F.Paste + F.Mask + F.SilkS",
+            "the hand-off's title for it"
+        );
+    }
+
+    #[test_case("https://kiewer.example", true; "a deployment")]
+    #[test_case("http://localhost:8090", false; "a dev box")]
+    fn a_server_without_a_queue_closes_the_retry_path_over_https(public_url: &str, closed: bool) {
+        let auth = TaskAuth::without_queue(public_url);
+        assert_eq!(matches!(auth, TaskAuth::Closed), closed);
     }
 
     #[test]
@@ -789,8 +829,8 @@ mod tests {
     fn the_routes_are_under_the_revision_hash() {
         let hash: RevisionHash = "ab".repeat(32).parse().unwrap();
         assert_eq!(
-            url(hash, Size::Small),
-            format!("/thumbnail/{hash}/400x400.png")
+            url("alice", "demo", hash, Size::Small),
+            format!("/alice/demo/r/{hash}/thumbnail/400x400.png")
         );
         assert_eq!(retry_path(hash), format!("/api/thumbnails/{hash}"));
     }

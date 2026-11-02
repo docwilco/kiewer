@@ -104,9 +104,10 @@ pub struct Config {
     /// an error; a token without the service id is an error naming it.
     pub fastly: Option<FastlyConfig>,
     /// `THUMBNAIL_QUEUE` and `THUMBNAIL_TASK_ACCOUNT`: where a thumbnail
-    /// render past its budget is retried from, both or neither. Neither
-    /// means no retries (a dev box), which the log says once; one alone
-    /// is an error.
+    /// render past its budget is retried from. The queue alone, which a
+    /// deployment has until the account's variable is applied, means no
+    /// retries, never an error, as does neither (a dev box); the log says
+    /// so once. An account without the queue is an error naming it.
     pub thumbnail_tasks: Option<TaskConfig>,
 }
 
@@ -127,6 +128,24 @@ fn fastly(var: &impl Fn(&str) -> Option<String>) -> Result<Option<FastlyConfig>>
         (None, Some(_)) => Err(Error::Env {
             name: "FASTLY_SERVICE_ID",
             reason: "is not set while FASTLY_API_TOKEN is; see infra/README.md".to_owned(),
+        }),
+    }
+}
+
+/// The task queue pair: both, the queue alone (no retries), or neither.
+///
+/// # Errors
+///
+/// [`Error::Env`] naming `THUMBNAIL_QUEUE` when the account is set
+/// without it.
+fn thumbnail_tasks(var: &impl Fn(&str) -> Option<String>) -> Result<Option<TaskConfig>> {
+    let read = |name: &str| var(name).filter(|value| !value.is_empty());
+    match (read("THUMBNAIL_QUEUE"), read("THUMBNAIL_TASK_ACCOUNT")) {
+        (Some(queue), Some(account)) => Ok(Some(TaskConfig { queue, account })),
+        (Some(_) | None, None) => Ok(None),
+        (None, Some(_)) => Err(Error::Env {
+            name: "THUMBNAIL_QUEUE",
+            reason: "is not set while THUMBNAIL_TASK_ACCOUNT is; see infra/README.md".to_owned(),
         }),
     }
 }
@@ -213,23 +232,6 @@ impl Config {
                 oauth.insert(provider, credentials);
             }
         }
-        let thumbnail_tasks = match (set("THUMBNAIL_QUEUE"), set("THUMBNAIL_TASK_ACCOUNT")) {
-            (None, None) => None,
-            (Some(queue), Some(account)) => Some(TaskConfig { queue, account }),
-            (Some(_), None) => {
-                return Err(Error::Env {
-                    name: "THUMBNAIL_TASK_ACCOUNT",
-                    reason: "is not set while THUMBNAIL_QUEUE is; see infra/README.md".to_owned(),
-                });
-            }
-            (None, Some(_)) => {
-                return Err(Error::Env {
-                    name: "THUMBNAIL_QUEUE",
-                    reason: "is not set while THUMBNAIL_TASK_ACCOUNT is; see infra/README.md"
-                        .to_owned(),
-                });
-            }
-        };
         Ok(Self {
             port,
             database_url,
@@ -237,7 +239,7 @@ impl Config {
             public_url,
             oauth,
             fastly: fastly(&var)?,
-            thumbnail_tasks,
+            thumbnail_tasks: thumbnail_tasks(&var)?,
         })
     }
 }
@@ -379,45 +381,44 @@ mod tests {
         );
     }
 
+    const QUEUE: &str = "projects/p/locations/l/queues/q";
+    const ACCOUNT: &str = "kiewer-run@p.iam.gserviceaccount.com";
+
     #[test]
-    fn the_task_queue_is_both_variables_or_neither() {
+    fn the_task_queue_with_its_account_turns_retries_on() {
         let config = Config::from_vars(vars(&[
             ("DATABASE_URL", "postgres://x"),
-            ("THUMBNAIL_QUEUE", "projects/p/locations/l/queues/q"),
-            (
-                "THUMBNAIL_TASK_ACCOUNT",
-                "kiewer-run@p.iam.gserviceaccount.com",
-            ),
+            ("THUMBNAIL_QUEUE", QUEUE),
+            ("THUMBNAIL_TASK_ACCOUNT", ACCOUNT),
         ]))
         .expect("valid");
         assert_eq!(
             config.thumbnail_tasks,
             Some(TaskConfig {
-                queue: "projects/p/locations/l/queues/q".to_owned(),
-                account: "kiewer-run@p.iam.gserviceaccount.com".to_owned(),
+                queue: QUEUE.to_owned(),
+                account: ACCOUNT.to_owned(),
             })
         );
-        let err = Config::from_vars(vars(&[
+    }
+
+    /// The Terraform has given Cloud Run the queue since #27: a server
+    /// that refused to start without the account would crash-loop every
+    /// deployment between a deploy and the apply that adds the account.
+    #[test]
+    fn the_task_queue_alone_starts_the_server_without_retries() {
+        let config = Config::from_vars(vars(&[
             ("DATABASE_URL", "postgres://x"),
-            ("THUMBNAIL_QUEUE", "projects/p/locations/l/queues/q"),
+            ("THUMBNAIL_QUEUE", QUEUE),
         ]))
-        .expect_err("half a pair");
-        assert!(
-            matches!(
-                err,
-                Error::Env {
-                    name: "THUMBNAIL_TASK_ACCOUNT",
-                    ..
-                }
-            ),
-            "{err}"
-        );
+        .expect("a deployment before the account's apply starts");
+        assert_eq!(config.thumbnail_tasks, None);
+    }
+
+    #[test]
+    fn an_account_without_a_task_queue_names_the_queue() {
         let err = Config::from_vars(vars(&[
             ("DATABASE_URL", "postgres://x"),
-            (
-                "THUMBNAIL_TASK_ACCOUNT",
-                "kiewer-run@p.iam.gserviceaccount.com",
-            ),
+            ("THUMBNAIL_TASK_ACCOUNT", ACCOUNT),
         ]))
         .expect_err("half a pair");
         assert!(

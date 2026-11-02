@@ -63,7 +63,6 @@ pub const RESERVED: &[&str] = &[
     "signout",
     "static",
     "status",
-    "thumbnail",
     "upload",
     "viewer",
     "welcome",

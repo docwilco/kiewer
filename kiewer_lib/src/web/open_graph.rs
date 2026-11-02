@@ -10,12 +10,12 @@ use super::AppState;
 use crate::description::Description;
 use crate::design::DesignHead;
 use crate::error::Result;
-use crate::revision::{Metadata, RevisionHash};
+use crate::revision::Metadata;
 use crate::thumbnail::{self, Size};
 
 /// The `og:image`: its absolute URL and its size in pixels.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OgImage {
+pub struct Image {
     pub url: String,
     pub width: u32,
     pub height: u32,
@@ -28,7 +28,7 @@ pub struct OpenGraph {
     pub description: String,
     /// The page's absolute URL.
     pub url: String,
-    pub image: Option<OgImage>,
+    pub image: Option<Image>,
 }
 
 impl OpenGraph {
@@ -44,12 +44,12 @@ impl OpenGraph {
         }
     }
 
-    /// The same with `revision`'s large thumbnail as the image.
+    /// The same with the large thumbnail at `path` as the image.
     #[must_use]
-    pub fn with_thumbnail(mut self, public_url: &str, revision: RevisionHash) -> Self {
+    pub fn with_thumbnail(mut self, public_url: &str, path: &str) -> Self {
         let (width, height) = Size::Large.pixels();
-        self.image = Some(OgImage {
-            url: format!("{public_url}{}", thumbnail::url(revision, Size::Large)),
+        self.image = Some(Image {
+            url: format!("{public_url}{path}"),
             width,
             height,
         });
@@ -111,7 +111,15 @@ pub async fn for_design(
         design_description(shown, description),
     );
     Ok(match thumbnail::of(&state.db, shown.revision.hash).await? {
-        Some(_) => og.with_thumbnail(public_url, shown.revision.hash),
+        Some(_) => og.with_thumbnail(
+            public_url,
+            &thumbnail::url(
+                shown.owner.as_str(),
+                shown.design.slug.as_str(),
+                shown.revision.hash,
+                Size::Large,
+            ),
+        ),
         None => og,
     })
 }
@@ -122,7 +130,6 @@ mod tests {
 
     #[test]
     fn the_url_is_absolute_and_the_image_is_the_large_thumbnail() {
-        let hash: RevisionHash = "cd".repeat(32).parse().unwrap();
         let og = OpenGraph::new(
             "https://kiewer.example",
             "/alice/demo",
@@ -131,11 +138,11 @@ mod tests {
         );
         assert_eq!(og.url, "https://kiewer.example/alice/demo");
         assert_eq!(og.image, None);
-        let with = og.with_thumbnail("https://kiewer.example", hash);
+        let with = og.with_thumbnail("https://kiewer.example", "/alice/demo/large.png");
         assert_eq!(
             with.image,
-            Some(OgImage {
-                url: format!("https://kiewer.example/thumbnail/{hash}/1200x630.png"),
+            Some(Image {
+                url: "https://kiewer.example/alice/demo/large.png".to_owned(),
                 width: 1200,
                 height: 630,
             })

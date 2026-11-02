@@ -690,11 +690,11 @@ impl DesignHead {
         board_in(&self.files)
     }
 
-    /// The root sheet the schematic page loads ([`schematic_in`] over
+    /// The root sheet the schematic page loads ([`root_sheet_in`] over
     /// the files).
     #[must_use]
     pub fn schematic(&self) -> Option<&TreeEntry> {
-        schematic_in(&self.files)
+        root_sheet_in(&self.files)
     }
 
     /// Whether the revision opens on its schematic: it has no board for
@@ -738,7 +738,7 @@ pub fn board_in(files: &[TreeEntry]) -> Option<&TreeEntry> {
 /// else the shallowest, first by name among equals; `None` for a
 /// revision without one.
 #[must_use]
-pub fn schematic_in(files: &[TreeEntry]) -> Option<&TreeEntry> {
+pub fn root_sheet_in(files: &[TreeEntry]) -> Option<&TreeEntry> {
     let stem = |entry: &TreeEntry| {
         entry
             .path
@@ -1004,6 +1004,21 @@ async fn revision(db: &PgPool, hash: RevisionHash) -> Result<Option<Revision>> {
     .fetch_optional(db)
     .await?;
     row.map(Revision::try_from).transpose()
+}
+
+/// The files of `revision` in path order, or `None` for a hash no
+/// revision has: a thumbnail's source. The row is global, and the render
+/// reads no further than this.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
+/// holds a hash that is not 32 bytes, which the schema forbids.
+pub async fn files_of(db: &PgPool, hash: RevisionHash) -> Result<Option<Vec<TreeEntry>>> {
+    match revision(db, hash).await? {
+        Some(revision) => entries(db, revision.tree).await.map(Some),
+        None => Ok(None),
+    }
 }
 
 /// The entries of `tree`, in path order.

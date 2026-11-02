@@ -194,7 +194,8 @@ async fn history(
         format!("{} revisions of {} on {branch}", entries.len(), design.name),
     );
     if let Some(head) = hashes.first().filter(|hash| rendered.contains(hash)) {
-        og = og.with_thumbnail(public_url, *head);
+        let path = thumbnail::url(owner.as_str(), design.slug.as_str(), *head, Size::Large);
+        og = og.with_thumbnail(public_url, &path);
     }
     let page = HistoryPage {
         build: crate::build::line(),
@@ -212,9 +213,14 @@ async fn history(
         rows: entries
             .into_iter()
             .map(|entry| Row {
-                thumbnail: rendered
-                    .contains(&entry.revision.hash)
-                    .then(|| thumbnail::url(entry.revision.hash, Size::Small)),
+                thumbnail: rendered.contains(&entry.revision.hash).then(|| {
+                    thumbnail::url(
+                        owner.as_str(),
+                        design.slug.as_str(),
+                        entry.revision.hash,
+                        Size::Small,
+                    )
+                }),
                 ordinal: entry.ordinal,
                 short: entry.revision.hash.short(),
                 url: revision_url(&owner, &design, entry.revision.hash, &branch),

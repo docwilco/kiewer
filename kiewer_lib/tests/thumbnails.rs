@@ -10,21 +10,27 @@
 //! golden test does; on CI (`CI` set) that skip is a failure, since the
 //! runner has lavapipe.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use kiewer_lib::Result;
+use axum::Router;
+use axum::extract::Query;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json};
+use axum::routing::get;
 use kiewer_lib::account::{self, AccountId, Handle};
 use kiewer_lib::auth::{Auth, Provider, ProviderUser};
-use kiewer_lib::blob::BlobHash;
 use kiewer_lib::blob::fs::FsBlobStore;
+use kiewer_lib::blob::{BlobHash, BlobStore, PutReceipt};
 use kiewer_lib::revision::RevisionHash;
 use kiewer_lib::session;
-use kiewer_lib::thumbnail::{Size, TaskQueue, Thumbnails};
+use kiewer_lib::thumbnail::{Size, TaskAuth, TaskQueue, Thumbnails};
 use kiewer_lib::web::AppState;
 use kiewer_lib::web::blob::IMMUTABLE;
+use kiewer_lib::{Error, Result};
 use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
@@ -32,6 +38,7 @@ use kiewer_viewer::headless::Headless;
 use kiewer_viewer::render::offscreen::Image;
 use kiewer_viewer::view::palette;
 use sqlx::PgPool;
+use test_case::test_case;
 
 const BOARD: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pcb");
 const SCHEMATIC: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_sch");
@@ -40,6 +47,9 @@ const PROJECT: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_p
 /// The public URL the test's sign-in flow is built with, which the Open
 /// Graph tags' absolute URLs start with.
 const PUBLIC_URL: &str = "http://127.0.0.1:1";
+
+/// The service account a retry's token is minted as.
+const TASK_ACCOUNT: &str = "kiewer-run@p.iam.gserviceaccount.com";
 
 /// A queue that records what was queued, in order.
 #[derive(Debug, Default)]
@@ -80,15 +90,52 @@ fn can_render() -> bool {
 /// within `budget` with retries recorded.
 async fn server(db: PgPool, budget: Duration) -> (SocketAddr, TempDir, Arc<Recording>) {
     let dir = scratch_dir!();
+    let blobs = Arc::new(FsBlobStore::new(dir.path()));
+    let (addr, tasks) = serve(db, blobs, |thumbnails| thumbnails.with_budget(budget)).await;
+    (addr, dir, tasks)
+}
+
+/// The same with `blobs` as the store and the thumbnails as `configure`
+/// leaves them.
+async fn serve(
+    db: PgPool,
+    blobs: Arc<dyn BlobStore>,
+    configure: impl FnOnce(Thumbnails) -> Thumbnails,
+) -> (SocketAddr, Arc<Recording>) {
     let tasks = Arc::new(Recording::default());
-    let thumbnails = Thumbnails::new(Arc::clone(&tasks) as Arc<dyn TaskQueue>).with_budget(budget);
+    let thumbnails = configure(Thumbnails::new(Arc::clone(&tasks) as Arc<dyn TaskQueue>));
     let state = AppState::new(
         db,
-        Arc::new(FsBlobStore::new(dir.path())),
+        blobs,
         Arc::new(Auth::new(Vec::new(), PUBLIC_URL).expect("an auth")),
         Arc::new(thumbnails),
     );
-    (http::serve_on_free_port(state).await, dir, tasks)
+    (http::serve_on_free_port(state).await, tasks)
+}
+
+/// A store that keeps what it is given and cannot read it back: a render
+/// that fails, as a store having a bad moment makes one fail.
+struct Unreadable(FsBlobStore);
+
+#[async_trait]
+impl BlobStore for Unreadable {
+    async fn put(&self, bytes: &[u8]) -> Result<PutReceipt> {
+        self.0.put(bytes).await
+    }
+
+    async fn get(&self, _hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        Err(Error::Failed {
+            reason: "this store reads nothing".to_owned(),
+        })
+    }
+
+    async fn exists(&self, hash: &BlobHash) -> Result<bool> {
+        self.0.exists(hash).await
+    }
+
+    async fn get_gzip(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        self.0.get_gzip(hash).await
+    }
 }
 
 /// A person with a handle and a live session: the browser carries the
@@ -155,6 +202,14 @@ fn page_colour() -> [u8; 4] {
     [r, g, b, 255]
 }
 
+/// A sheet with nothing on it, under a uuid of its own.
+fn empty_sheet() -> String {
+    format!(
+        "(kicad_sch (version 20250114) (uuid \"{}\"))",
+        fresh("empty")
+    )
+}
+
 /// The hand-off sheet under a uuid of its own: bytes no other test
 /// uploads, since a block outlives the test in the database and refuses
 /// those bytes for every test after it.
@@ -175,6 +230,29 @@ async fn head_on_history(addr: SocketAddr, design_path: &str) -> RevisionHash {
     history.body[start..start + 64].parse().expect("a hash")
 }
 
+/// The retry path is 404 for a revision nobody has and for text that is
+/// not a hash.
+async fn assert_retry_refuses(addr: SocketAddr) {
+    let nobody = http::request(
+        addr,
+        "POST",
+        &format!("/api/thumbnails/{}", "0".repeat(64)),
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(nobody.status, 404);
+    let nonsense = http::request(addr, "POST", "/api/thumbnails/x", &[], "").await;
+    assert_eq!(nonsense.status, 404);
+}
+
+/// `route` answers 404, and no cache may hold that.
+async fn assert_gone(addr: SocketAddr, route: &str) {
+    let gone = http::request(addr, "GET", route, &[], "").await;
+    assert_eq!(gone.status, 404, "{route}");
+    assert_eq!(gone.header("cache-control"), Some("no-store"), "{route}");
+}
+
 /// The history page of `design_path`'s default branch.
 async fn history_page(addr: SocketAddr, design_path: &str) -> http::Response {
     let path = format!("{design_path}/b/main/history");
@@ -191,7 +269,7 @@ async fn assert_open_graph(
     revision: RevisionHash,
     body: &str,
 ) {
-    let large_url = format!("{PUBLIC_URL}/thumbnail/{revision}/1200x630.png");
+    let large_url = format!("{PUBLIC_URL}{design_path}/r/{revision}/thumbnail/1200x630.png");
     for expected in [
         r#"<meta property="og:title" content="midi8knob">"#.to_owned(),
         format!(r#"<meta property="og:url" content="{PUBLIC_URL}{design_path}">"#),
@@ -237,14 +315,14 @@ async fn assert_small_thumbnail_shown(
     revision: RevisionHash,
 ) {
     let small_tag = format!(
-        r#"<img class="thumb" src="/thumbnail/{revision}/400x400.png" width="64" height="64""#
+        r#"<img class="thumb" src="{design_path}/r/{revision}/thumbnail/400x400.png" width="64" height="64""#
     );
     let history = history_page(addr, design_path).await;
     assert!(history.body.contains(&small_tag), "{}", history.body);
     assert!(
-        history
-            .body
-            .contains(&format!("{PUBLIC_URL}/thumbnail/{revision}/1200x630.png")),
+        history.body.contains(&format!(
+            "{PUBLIC_URL}{design_path}/r/{revision}/thumbnail/1200x630.png"
+        )),
         "the history's tags carry the head's: {}",
         history.body
     );
@@ -263,13 +341,28 @@ async fn assert_small_thumbnail_shown(
 
 /// A size nobody renders, text that is not a hash and a revision that is
 /// not there are 404.
-async fn assert_route_refuses(addr: SocketAddr, revision: RevisionHash) {
-    let (status, _) = http::get(addr, &format!("/thumbnail/{revision}/640x480.png")).await;
+async fn assert_route_refuses(addr: SocketAddr, design_path: &str, revision: RevisionHash) {
+    let (status, _) = http::get(
+        addr,
+        &format!("{design_path}/r/{revision}/thumbnail/640x480.png"),
+    )
+    .await;
     assert_eq!(status, 404);
-    let (status, _) = http::get(addr, "/thumbnail/not-a-hash/400x400.png").await;
+    let (status, _) = http::get(
+        addr,
+        &format!("{design_path}/r/not-a-hash/thumbnail/400x400.png"),
+    )
+    .await;
     assert_eq!(status, 404);
-    let (status, _) = http::get(addr, &format!("/thumbnail/{}/400x400.png", "0".repeat(64))).await;
+    let zeros = "0".repeat(64);
+    let (status, _) = http::get(
+        addr,
+        &format!("{design_path}/r/{zeros}/thumbnail/400x400.png"),
+    )
+    .await;
     assert_eq!(status, 404);
+    let (status, _) = http::get(addr, &format!("/thumbnail/{revision}/400x400.png")).await;
+    assert_eq!(status, 404, "a bare hash is no route (ADR 0002)");
 }
 
 #[tokio::test]
@@ -301,7 +394,11 @@ async fn uploading_the_hand_off_board_renders_both_sizes_and_the_pages_point_at_
 
     // Both sizes, fit to the board: the middle is board, a corner is
     // page.
-    let large = png(addr, &format!("/thumbnail/{revision}/1200x630.png")).await;
+    let large = png(
+        addr,
+        &format!("{design_path}/r/{revision}/thumbnail/1200x630.png"),
+    )
+    .await;
     assert_eq!((large.width, large.height), (1200, 630));
     assert_ne!(
         large.pixel(600, 315),
@@ -309,14 +406,25 @@ async fn uploading_the_hand_off_board_renders_both_sizes_and_the_pages_point_at_
         "the board is drawn"
     );
     assert_eq!(large.pixel(2, 2), Some(page_colour()), "the corner is page");
-    let small = png(addr, &format!("/thumbnail/{revision}/400x400.png")).await;
+    let small = png(
+        addr,
+        &format!("{design_path}/r/{revision}/thumbnail/400x400.png"),
+    )
+    .await;
     assert_eq!((small.width, small.height), (400, 400));
     assert_ne!(small.pixel(200, 200), Some(page_colour()));
     assert_eq!(small.pixel(2, 2), Some(page_colour()));
 
     assert_open_graph(addr, &design_path, revision, &page.body).await;
     assert_small_thumbnail_shown(addr, &handle, &design_path, revision).await;
-    assert_route_refuses(addr, revision).await;
+    assert_route_refuses(addr, &design_path, revision).await;
+
+    // Another design does not reach the revision, so it has no such
+    // thumbnail, though the hash is a real one.
+    let sheet = empty_sheet();
+    let other = push(&mut browser, "", &[("other.kicad_sch", sheet.as_bytes())]).await;
+    let (status, _) = http::get(addr, &format!("{other}/r/{revision}/thumbnail/400x400.png")).await;
+    assert_eq!(status, 404, "a hash is no capability (ADR 0002)");
 }
 
 #[tokio::test]
@@ -332,14 +440,22 @@ async fn a_revision_with_only_a_schematic_draws_its_sheet() {
     let design_path = push(&mut browser, "", &[("midi8knob.kicad_sch", SCHEMATIC)]).await;
     assert!(tasks.queued().is_empty(), "within the budget, no retry");
     let revision = head_on_history(addr, &design_path).await;
-    let sheet = png(addr, &format!("/thumbnail/{revision}/1200x630.png")).await;
+    let sheet = png(
+        addr,
+        &format!("{design_path}/r/{revision}/thumbnail/1200x630.png"),
+    )
+    .await;
     assert_eq!((sheet.width, sheet.height), (1200, 630));
     assert_ne!(
         sheet.pixel(600, 315),
         Some(page_colour()),
         "paper, not the board's page colour"
     );
-    let small = png(addr, &format!("/thumbnail/{revision}/400x400.png")).await;
+    let small = png(
+        addr,
+        &format!("{design_path}/r/{revision}/thumbnail/400x400.png"),
+    )
+    .await;
     assert_eq!((small.width, small.height), (400, 400));
 
     // The design's URL opens on the schematic page, which is the page
@@ -354,7 +470,7 @@ async fn a_revision_with_only_a_schematic_draws_its_sheet() {
         r#"<meta property="og:title" content="midi8knob">"#.to_owned(),
         format!(r#"<meta property="og:url" content="{PUBLIC_URL}{sheet_path}">"#),
         format!(
-            r#"<meta property="og:image" content="{PUBLIC_URL}/thumbnail/{revision}/1200x630.png">"#
+            r#"<meta property="og:image" content="{PUBLIC_URL}{design_path}/r/{revision}/thumbnail/1200x630.png">"#
         ),
         format!(r#"<meta property="og:description" content="A KiCad design by {handle}">"#),
     ] {
@@ -372,10 +488,7 @@ async fn a_sheet_with_nothing_on_it_has_no_thumbnail_and_no_retry() {
     }
     let (addr, _dir, tasks) = server(db.clone(), Duration::from_secs(60)).await;
     let (mut browser, _, _) = signed_in(&db, addr).await;
-    let sheet = format!(
-        "(kicad_sch (version 20250114) (uuid \"{}\"))",
-        fresh("empty")
-    );
+    let sheet = empty_sheet();
     let design_path = push(&mut browser, "", &[("empty.kicad_sch", sheet.as_bytes())]).await;
     assert!(tasks.queued().is_empty(), "nothing to retry");
     let revision = head_on_history(addr, &design_path).await;
@@ -413,7 +526,7 @@ async fn a_blocked_file_takes_its_thumbnail_off_the_route_and_every_page() {
     let sheet = unique_sheet();
     let design_path = push(&mut browser, "", &[("blocked.kicad_sch", &sheet)]).await;
     let revision = head_on_history(addr, &design_path).await;
-    let small_route = format!("/thumbnail/{revision}/400x400.png");
+    let small_route = format!("{design_path}/r/{revision}/thumbnail/400x400.png");
     png(addr, &small_route).await;
     let small_src = format!(r#"src="{small_route}""#);
     assert!(
@@ -430,14 +543,12 @@ async fn a_blocked_file_takes_its_thumbnail_off_the_route_and_every_page() {
         .await
         .unwrap();
 
-    for route in [
-        small_route.clone(),
-        format!("/thumbnail/{revision}/1200x630.png"),
-    ] {
-        let gone = http::request(addr, "GET", &route, &[], "").await;
-        assert_eq!(gone.status, 404, "{route}");
-        assert_eq!(gone.header("cache-control"), Some("no-store"), "{route}");
-    }
+    assert_gone(addr, &small_route).await;
+    assert_gone(
+        addr,
+        &format!("{design_path}/r/{revision}/thumbnail/1200x630.png"),
+    )
+    .await;
     let history = history_page(addr, &design_path).await;
     assert!(!history.body.contains(&small_src), "{}", history.body);
     assert!(
@@ -462,7 +573,19 @@ async fn a_render_past_the_budget_saves_the_revision_queues_a_retry_and_the_plac
     if !can_render() {
         return;
     }
-    let (addr, _dir, tasks) = server(db.clone(), Duration::ZERO).await;
+    // The draw takes ten times the budget, on its thread with the
+    // renderer locked: the retry below waits for that lock.
+    let dir = scratch_dir!();
+    let (addr, tasks) = serve(
+        db.clone(),
+        Arc::new(FsBlobStore::new(dir.path())),
+        |thumbnails| {
+            thumbnails
+                .with_budget(Duration::from_millis(100))
+                .with_render_delay(Duration::from_secs(1))
+        },
+    )
+    .await;
     let (mut browser, _, _) = signed_in(&db, addr).await;
     let design_path = push(&mut browser, "", &[("midi8knob.kicad_pcb", BOARD)]).await;
     let page = http::request(addr, "GET", &design_path, &[], "").await;
@@ -495,7 +618,7 @@ async fn a_render_past_the_budget_saves_the_revision_queues_a_retry_and_the_plac
     let missing = http::request(
         addr,
         "GET",
-        &format!("/thumbnail/{revision}/400x400.png"),
+        &format!("{design_path}/r/{revision}/thumbnail/400x400.png"),
         &[],
         "",
     )
@@ -512,14 +635,18 @@ async fn a_render_past_the_budget_saves_the_revision_queues_a_retry_and_the_plac
     assert_eq!(again.body, "already rendered\n");
     let (status, body) = http::get(
         addr,
-        &format!("/thumbnail/{revision}/{}", Size::Small.file_name()),
+        &format!(
+            "{design_path}/r/{revision}/thumbnail/{}",
+            Size::Small.file_name()
+        ),
     )
     .await;
     assert_eq!(status, 200, "{body}");
     let page = http::request(addr, "GET", &design_path, &[], "").await;
     assert!(
-        page.body
-            .contains(&format!("/thumbnail/{revision}/1200x630.png")),
+        page.body.contains(&format!(
+            "{design_path}/r/{revision}/thumbnail/1200x630.png"
+        )),
         "{}",
         page.body
     );
@@ -532,33 +659,79 @@ async fn a_render_past_the_budget_saves_the_revision_queues_a_retry_and_the_plac
     )
     .await;
     assert!(
-        history
-            .body
-            .contains(&format!(r#"src="/thumbnail/{revision}/400x400.png""#)),
+        history.body.contains(&format!(
+            r#"src="{design_path}/r/{revision}/thumbnail/400x400.png""#
+        )),
         "{}",
         history.body
     );
 
-    // A revision nobody has, and text that is not a hash.
-    let nobody = http::request(
-        addr,
-        "POST",
-        &format!("/api/thumbnails/{}", "0".repeat(64)),
-        &[],
-        "",
-    )
-    .await;
-    assert_eq!(nobody.status, 404);
-    let nonsense = http::request(addr, "POST", "/api/thumbnails/x", &[], "").await;
-    assert_eq!(nonsense.status, 404);
+    assert_retry_refuses(addr).await;
+}
+
+#[tokio::test]
+async fn a_render_that_fails_saves_the_revision_and_queues_a_retry() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let dir = scratch_dir!();
+    let blobs = Arc::new(Unreadable(FsBlobStore::new(dir.path())));
+    let (addr, tasks) = serve(db.clone(), blobs, |thumbnails| thumbnails).await;
+    let (mut browser, _, _) = signed_in(&db, addr).await;
+    let design_path = push(&mut browser, "", &[("midi8knob.kicad_pcb", BOARD)]).await;
+    let revision = head_on_history(addr, &design_path).await;
+    assert_eq!(tasks.queued(), [revision], "one retry queued");
+}
+
+/// The fake of Google's token endpoint: a token's claims by its name,
+/// 400 for one it refuses, 503 for one it never got to look at.
+async fn tokeninfo(Query(query): Query<HashMap<String, String>>) -> axum::response::Response {
+    let claims = |aud: &str, email: &str, verified: &str| {
+        Json(serde_json::json!({"aud": aud, "email": email, "email_verified": verified}))
+            .into_response()
+    };
+    match query.get("id_token").map(String::as_str) {
+        Some("good") => claims(PUBLIC_URL, TASK_ACCOUNT, "true"),
+        Some("another-account") => claims(PUBLIC_URL, "stranger@example.com", "true"),
+        Some("another-audience") => claims("https://elsewhere.example", TASK_ACCOUNT, "true"),
+        Some("unverified") => claims(PUBLIC_URL, TASK_ACCOUNT, "false"),
+        Some("refused") => StatusCode::BAD_REQUEST.into_response(),
+        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+/// A token an attacker mints for themselves passes Google's own check,
+/// so every claim has to hold; and an endpoint that gave no verdict has
+/// refused nobody.
+#[test_case("good", Some(true); "the queue's token")]
+#[test_case("another-account", Some(false); "another account's token")]
+#[test_case("another-audience", Some(false); "a token for another service")]
+#[test_case("unverified", Some(false); "an email not verified")]
+#[test_case("refused", Some(false); "a token the endpoint refuses")]
+#[test_case("down", None; "no verdict from the endpoint")]
+#[tokio::test]
+async fn the_retry_token_is_held_to_its_claims(token: &str, verdict: Option<bool>) {
+    let (listener, addr) = http::bind_free_port().await;
+    let endpoint = Router::new().route("/tokeninfo", get(tokeninfo));
+    tokio::spawn(async move { axum::serve(listener, endpoint).await });
+    let auth = TaskAuth::oidc_at(
+        &format!("http://{addr}/tokeninfo"),
+        TASK_ACCOUNT,
+        PUBLIC_URL,
+    );
+    if let Some(verdict) = verdict {
+        assert_eq!(auth.allows(Some(token)).await.expect("a verdict"), verdict);
+    } else {
+        let error = auth.allows(Some(token)).await.expect_err("no verdict");
+        assert!(matches!(error, Error::Failed { .. }), "{error}");
+    }
 }
 
 #[tokio::test]
 async fn the_retry_path_behind_oidc_refuses_a_caller_without_a_token() {
     let dir = scratch_dir!();
-    let thumbnails = Thumbnails::new(Arc::new(Recording::default())).with_auth(
-        kiewer_lib::thumbnail::TaskAuth::oidc("kiewer-run@p.iam.gserviceaccount.com", PUBLIC_URL),
-    );
+    let thumbnails = Thumbnails::new(Arc::new(Recording::default()))
+        .with_auth(TaskAuth::oidc(TASK_ACCOUNT, PUBLIC_URL));
     let state = AppState::new(
         kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
         Arc::new(FsBlobStore::new(dir.path())),

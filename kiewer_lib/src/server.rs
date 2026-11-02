@@ -37,8 +37,8 @@ fn auth(config: &Config) -> Result<Auth> {
 
 /// The thumbnail service from the configuration (ADR 0004): retries on
 /// the Cloud Tasks queue with the retry path behind the queue's token
-/// when the pair is set; else no queue and an open path, which the log
-/// says once.
+/// when the pair is set; else no queue, which the log says once, and the
+/// retry path closed on a deployment ([`TaskAuth::without_queue`]).
 ///
 /// # Errors
 ///
@@ -53,7 +53,7 @@ fn thumbnails(config: &Config) -> Result<Thumbnails> {
         tracing::warn!(
             "thumbnail retries are off: no task queue is configured (THUMBNAIL_QUEUE and THUMBNAIL_TASK_ACCOUNT)"
         );
-        Thumbnails::new(Arc::new(NoTasks))
+        Thumbnails::new(Arc::new(NoTasks)).with_auth(TaskAuth::without_queue(&config.public_url))
     })
 }
 

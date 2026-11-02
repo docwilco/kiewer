@@ -22,6 +22,7 @@ use crate::error::{Error, Result};
 use crate::render::offscreen::{Image, Offscreen};
 use crate::render::{Backend, Draw, MSAA_SAMPLES, Renderer, Vertex, device_descriptor};
 use crate::scene::{Scene, clear_color};
+use crate::schematic::SheetScene;
 use crate::view::ViewState;
 
 /// Where a frame looks: its size in pixels, the world point at its
@@ -64,6 +65,26 @@ pub struct Mesh<'a> {
     pub origin: Point,
     pub vertices: &'a [Vertex],
     pub indices: &'a [u32],
+}
+
+impl<'a> From<&'a Scene> for Mesh<'a> {
+    fn from(scene: &'a Scene) -> Self {
+        Self {
+            origin: scene.origin,
+            vertices: &scene.vertices,
+            indices: &scene.indices,
+        }
+    }
+}
+
+impl<'a> From<&'a SheetScene> for Mesh<'a> {
+    fn from(sheet: &'a SheetScene) -> Self {
+        Self {
+            origin: sheet.origin,
+            vertices: &sheet.vertices,
+            indices: &sheet.indices,
+        }
+    }
 }
 
 /// A device without a surface, and the renderer on it.
@@ -164,12 +185,7 @@ impl Headless {
     /// [`Error::FrameTooLarge`] for a frame wider or taller than the
     /// adapter's textures go; the readback's ([`Offscreen::read`]).
     pub fn render_draws(&mut self, scene: &Scene, draws: &[Draw], frame: &Frame) -> Result<Image> {
-        let mesh = Mesh {
-            origin: scene.origin,
-            vertices: &scene.vertices,
-            indices: &scene.indices,
-        };
-        self.render_mesh(mesh, clear_color(Offscreen::FORMAT), draws, frame)
+        self.render_mesh(scene.into(), clear_color(Offscreen::FORMAT), draws, frame)
     }
 
     /// Draw `mesh` as `draws` say over `clear` into `frame` and read it

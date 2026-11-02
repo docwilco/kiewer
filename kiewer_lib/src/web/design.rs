@@ -36,7 +36,7 @@ use crate::slug;
 use crate::upload::{self, Author, BranchTarget, Incoming, Limits, Target};
 
 /// The URL of a design's page.
-fn design_url(handle: &Handle, slug: &Slug) -> String {
+pub(super) fn design_url(handle: &Handle, slug: &Slug) -> String {
     format!("/{handle}/{slug}")
 }
 
