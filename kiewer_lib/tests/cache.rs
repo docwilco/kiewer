@@ -33,7 +33,7 @@ const PROJECT: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_p
 struct Seen {
     service_id: String,
     token: Option<String>,
-    body: serde_json::Value,
+    keys: Option<String>,
 }
 
 type Calls = Arc<Mutex<Vec<Seen>>>;
@@ -42,7 +42,6 @@ async fn fake_purge(
     State(calls): State<Calls>,
     Path(service_id): Path<String>,
     headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let token = headers
         .get("fastly-key")
@@ -54,18 +53,16 @@ async fn fake_purge(
             Json(serde_json::json!({"msg": "Provided credentials are missing or invalid"})),
         );
     }
+    let keys = headers
+        .get("surrogate-key")
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
     calls.lock().unwrap().push(Seen {
         service_id,
         token,
-        body: body.clone(),
+        keys,
     });
-    let ids: serde_json::Map<String, serde_json::Value> = body["surrogate_keys"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|key| (key.as_str().unwrap().to_owned(), "purge-id".into()))
-        .collect();
-    (StatusCode::OK, Json(serde_json::Value::Object(ids)))
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
 /// A fake of Fastly's API on loopback: its origin and what it saw.
@@ -93,7 +90,7 @@ async fn the_fastly_client_purges_by_key_with_the_token_and_reports_a_refusal() 
         [Seen {
             service_id: "SU1Z0isxPaozGVKXdv0eY".to_owned(),
             token: Some("the-token".to_owned()),
-            body: serde_json::json!({"surrogate_keys": ["home", "handle-ada"]}),
+            keys: Some("home handle-ada".to_owned()),
         }]
     );
     fastly
@@ -203,6 +200,24 @@ async fn every_cacheable_page_renders_the_same_bytes_with_a_session_as_without()
     // The revision dropdown's option values are the revision URLs.
     let revision = linked_hash(&page.body, &format!("{design_path}/r/"));
     let board = linked_hash(&page.body, "href=\"/blob/");
+    // A design with a schematic alone opens on it: the bare URL answers
+    // 303 and `?design` keeps the design page.
+    let sheet_only = owner
+        .post_multipart(
+            "/upload",
+            &[
+                Part::text("name", "sheet only"),
+                Part::file("sheet.kicad_sch", SCHEMATIC),
+            ],
+        )
+        .await;
+    assert_eq!(sheet_only.status, 303, "{}", sheet_only.body);
+    let sheet_only = sheet_only
+        .header("location")
+        .expect("the design")
+        .to_owned();
+    let bare = http::request(addr, "GET", &sheet_only, &[], "").await;
+    assert_eq!(bare.status, 303, "a schematic alone opens on the schematic");
 
     let pages = [
         "/".to_owned(),
@@ -220,6 +235,9 @@ async fn every_cacheable_page_renders_the_same_bytes_with_a_session_as_without()
         format!("/blob/{board}"),
         format!("/{handle}/no-such-design"),
         format!("/{}", fresh("nobody")),
+        format!("{design_path}?design"),
+        sheet_only.clone(),
+        format!("{sheet_only}?design"),
     ];
     for path in &pages {
         let anonymous = http::request(addr, "GET", path, &[], "").await;

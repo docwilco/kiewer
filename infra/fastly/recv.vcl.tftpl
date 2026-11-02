@@ -35,6 +35,17 @@ if (req.http.host == "${staging_hostname}") {
 # PUBLIC_URL and never needs it, but a log line does.
 set req.http.X-Forwarded-Host = req.http.host;
 
+# The hashed viewer assets are prebuilt as brotli and gzip
+# (kiewer_lib/build.rs, kiewer_lib/src/web/viewer.rs). Fastly reduces
+# Accept-Encoding before the origin sees it and keeps the browser's value
+# in Fastly-Orig-Accept-Encoding, so a browser that takes brotli is named
+# here; the server's Vary: Accept-Encoding keeps the variants apart in the
+# cache. A `br;q=0` does not match, and those two paths alone change, so a
+# page keeps Fastly's own handling.
+if (req.url.path ~ "^/viewer/kiewer_viewer[^/]*\.[0-9a-f]{16}\.(js|wasm)$" && req.http.Fastly-Orig-Accept-Encoding ~ "(^|[ ,])br *(,|$)") {
+  set req.http.Accept-Encoding = "br";
+}
+
 # A blob read: /blob/<64 hex> for GET or HEAD. The URL becomes the
 # path-style GCS URL of the object, /<bucket>/<first two hex>/<hash>.gz,
 # the layout the blob stores write (kiewer_lib/src/blob). Anything else

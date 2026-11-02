@@ -66,7 +66,20 @@ time = { version = "0.3", default-features = false }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "signal", "time"] }
 tracing = "0.1"
 
+[build-dependencies]
+# The static assets (docs/v1-scope.md, Caching; build.rs): the viewer's
+# script and wasm are named by their SHA-256 and pre-compressed as brotli
+# and gzip at build time. brotli is Dropbox's encoder in Rust, so no C
+# library joins the build; std alone, for the Write adapter, none of its
+# ffi, simd or validation features. flate2 and sha2 are the versions the
+# library already builds with.
+brotli = { version = "9", default-features = false, features = ["std"] }
+flate2 = "1"
+sha2 = "0.11"
+
 [dev-dependencies]
+# The brotli decoder, so the asset test reads the .br variant back.
+brotli = { version = "9", default-features = false, features = ["std"] }
 kiewer_test_support = { path = "../kiewer_test_support" }
 test-case = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

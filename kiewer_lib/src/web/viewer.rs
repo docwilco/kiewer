@@ -4,16 +4,24 @@
 //! a design exists; a design page (`web/design.rs`, `web/history.rs`)
 //! renders the same [`Page`] with the revision's board blob and a
 //! [`DesignView`].
-//! Content-hashed names and pre-compression for the assets are #26.
+//!
+//! The script and the wasm are static assets under the caching policy
+//! (`crate::cache`): each is served at `/viewer/<name>.<hash>.<ext>`,
+//! the name `build.rs` gave it from its bytes, as immutable for a year,
+//! in the brotli or gzip variant built then when the browser takes it.
+//! A page names the script by [`script_url`]; the script fetches the
+//! wasm by its hashed name.
 
 use askama::Template;
 use axum::Router;
-use axum::http::StatusCode;
-use axum::http::header::CONTENT_TYPE;
+use axum::extract::Path;
+use axum::http::header::{CONTENT_ENCODING, CONTENT_TYPE, VARY};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 
 use super::AppState;
+use crate::cache::{Encoding, Policy};
 use crate::error::Result;
 use crate::roles::Visibility;
 
@@ -21,8 +29,7 @@ use crate::roles::Visibility;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/viewer", get(page))
-        .route("/viewer/kiewer_viewer.js", get(script))
-        .route("/viewer/kiewer_viewer_bg.wasm", get(wasm))
+        .route("/viewer/{name}", get(asset))
         .route(BOARD_PATH, get(board))
 }
 
@@ -32,22 +39,89 @@ pub const BOARD_PATH: &str = "/viewer/midi8knob.kicad_pcb";
 /// The hand-off board, in the binary: the one design the tracer shows.
 const BOARD: &str = include_str!("../../../viewer-drop/board/midi8knob.kicad_pcb");
 
-/// The wasm-bindgen output, when the build found it.
+/// One embedded file in its three codings.
+#[derive(Debug, Clone, Copy)]
+pub struct Asset {
+    /// The hashed file name the route serves it under.
+    pub name: &'static str,
+    pub content_type: &'static str,
+    identity: &'static [u8],
+    brotli: &'static [u8],
+    gzip: &'static [u8],
+}
+
+impl Asset {
+    /// The bytes in `encoding`.
+    #[must_use]
+    pub fn bytes(&self, encoding: Encoding) -> &'static [u8] {
+        match encoding {
+            Encoding::Brotli => self.brotli,
+            Encoding::Gzip => self.gzip,
+            Encoding::Identity => self.identity,
+        }
+    }
+
+    /// The route the asset is at.
+    #[must_use]
+    pub fn url(&self) -> String {
+        format!("/viewer/{}", self.name)
+    }
+}
+
+/// What the script's route answers with: wasm-bindgen's ES module.
+const SCRIPT_TYPE: &str = "text/javascript; charset=utf-8";
+/// What the wasm's route answers with: what
+/// `WebAssembly.instantiateStreaming` insists on.
+const WASM_TYPE: &str = "application/wasm";
+
+/// The embedded assets, when the build found the viewer.
 #[cfg(kiewer_viewer_embedded)]
-const SCRIPT: Option<&[u8]> = Some(include_bytes!(env!("KIEWER_VIEWER_JS")));
-#[cfg(kiewer_viewer_embedded)]
-const WASM: Option<&[u8]> = Some(include_bytes!(env!("KIEWER_VIEWER_WASM")));
+pub const ASSETS: &[Asset] = &[
+    Asset {
+        name: env!("KIEWER_VIEWER_JS_NAME"),
+        content_type: SCRIPT_TYPE,
+        identity: include_bytes!(env!("KIEWER_VIEWER_JS")),
+        brotli: include_bytes!(env!("KIEWER_VIEWER_JS_BR")),
+        gzip: include_bytes!(env!("KIEWER_VIEWER_JS_GZ")),
+    },
+    Asset {
+        name: env!("KIEWER_VIEWER_WASM_NAME"),
+        content_type: WASM_TYPE,
+        identity: include_bytes!(env!("KIEWER_VIEWER_WASM")),
+        brotli: include_bytes!(env!("KIEWER_VIEWER_WASM_BR")),
+        gzip: include_bytes!(env!("KIEWER_VIEWER_WASM_GZ")),
+    },
+];
 #[cfg(not(kiewer_viewer_embedded))]
-const SCRIPT: Option<&[u8]> = None;
-#[cfg(not(kiewer_viewer_embedded))]
-const WASM: Option<&[u8]> = None;
+pub const ASSETS: &[Asset] = &[];
 
 /// Whether this build carries the viewer. `false` on a tree where
 /// `scripts/build-viewer.sh` has not run: the page then says so and the
 /// asset routes answer 503.
 #[must_use]
 pub fn embedded() -> bool {
-    SCRIPT.is_some() && WASM.is_some()
+    !ASSETS.is_empty()
+}
+
+/// The embedded asset of `content_type`, when the build carries one.
+fn asset_of(content_type: &str) -> Option<&'static Asset> {
+    ASSETS
+        .iter()
+        .find(|asset| asset.content_type == content_type)
+}
+
+/// The URL a page imports the viewer's script from: the hashed name
+/// when the build carries it, else the plain one, whose route says the
+/// viewer is not built in.
+#[must_use]
+pub fn script_url() -> String {
+    asset_of(SCRIPT_TYPE).map_or_else(|| "/viewer/kiewer_viewer.js".to_owned(), Asset::url)
+}
+
+/// The URL the script fetches the wasm from.
+#[must_use]
+pub fn wasm_url() -> String {
+    asset_of(WASM_TYPE).map_or_else(|| "/viewer/kiewer_viewer_bg.wasm".to_owned(), Asset::url)
 }
 
 /// What the asset routes say when the viewer is not in the binary.
@@ -150,6 +224,8 @@ pub struct Page {
     pub build: String,
     pub embedded: bool,
     pub not_built: &'static str,
+    /// Where the page imports the viewer's script from ([`script_url`]).
+    pub script_url: String,
     /// What the tab and the header name.
     pub title: String,
     /// Where the page fetches the board from, or `None` for a revision
@@ -167,6 +243,7 @@ impl Page {
             build: crate::build::line(),
             embedded: embedded(),
             not_built: NOT_BUILT.trim_end(),
+            script_url: script_url(),
             title,
             board_url,
             design,
@@ -183,18 +260,82 @@ async fn board() -> impl IntoResponse {
     ([(CONTENT_TYPE, "text/plain; charset=utf-8")], BOARD)
 }
 
-async fn script() -> Response {
-    asset(SCRIPT, "text/javascript; charset=utf-8")
+/// `GET /viewer/{name}`: the embedded asset of that hashed name, in the
+/// best coding the request takes, immutable; 404 for a name no asset
+/// has, and 503 naming the build script for the two plain names when
+/// the viewer is not built in.
+async fn asset(Path(name): Path<String>, headers: HeaderMap) -> Response {
+    match ASSETS.iter().find(|asset| asset.name == name) {
+        Some(asset) => serve(asset, &headers),
+        None if !embedded() && (name == "kiewer_viewer.js" || name == "kiewer_viewer_bg.wasm") => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [Policy::Personal.header()],
+            NOT_BUILT,
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            [Policy::NotFound.header()],
+            "no such asset\n",
+        )
+            .into_response(),
+    }
 }
 
-async fn wasm() -> Response {
-    // application/wasm is what WebAssembly.instantiateStreaming insists on.
-    asset(WASM, "application/wasm")
+/// `asset` in the coding `headers` take, with the headers an immutable,
+/// negotiated response carries.
+fn serve(asset: &Asset, headers: &HeaderMap) -> Response {
+    let encoding = Encoding::negotiate(headers);
+    let common = [
+        (CONTENT_TYPE, asset.content_type),
+        (VARY, "Accept-Encoding"),
+        Policy::Immutable.header(),
+    ];
+    match encoding.content_encoding() {
+        Some(coding) => {
+            (common, [(CONTENT_ENCODING, coding)], asset.bytes(encoding)).into_response()
+        }
+        None => (common, asset.bytes(encoding)).into_response(),
+    }
 }
 
-fn asset(bytes: Option<&'static [u8]>, content_type: &'static str) -> Response {
-    match bytes {
-        Some(bytes) => ([(CONTENT_TYPE, content_type)], bytes).into_response(),
-        None => (StatusCode::SERVICE_UNAVAILABLE, NOT_BUILT).into_response(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whether `url` is `prefix`, 16 lowercase hex characters and
+    /// `suffix`: the shape `infra/fastly/recv.vcl.tftpl` matches to send
+    /// brotli through, so a change to the hash's length shows here.
+    fn hashed(url: &str, prefix: &str, suffix: &str) -> bool {
+        url.strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .is_some_and(|hash| {
+                hash.len() == 16
+                    && hash
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+    }
+
+    #[test]
+    fn the_script_and_wasm_urls_are_hashed_when_embedded_and_plain_when_not() {
+        let script = script_url();
+        let wasm = wasm_url();
+        if embedded() {
+            assert!(hashed(&script, "/viewer/kiewer_viewer.", ".js"), "{script}");
+            assert!(
+                hashed(&wasm, "/viewer/kiewer_viewer_bg.", ".wasm"),
+                "{wasm}"
+            );
+            let asset = asset_of(SCRIPT_TYPE).expect("the script");
+            let text = std::str::from_utf8(asset.bytes(Encoding::Identity)).expect("UTF-8");
+            assert!(
+                text.contains(asset_of(WASM_TYPE).expect("the wasm").name),
+                "the script fetches the wasm by its hashed name"
+            );
+        } else {
+            assert_eq!(script, "/viewer/kiewer_viewer.js");
+            assert_eq!(wasm, "/viewer/kiewer_viewer_bg.wasm");
+        }
     }
 }

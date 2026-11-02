@@ -186,7 +186,7 @@
 // The page owns the listeners and hands each gesture to the wasm in
 // device pixels; the camera (f64) and the drawing are Rust. The bindings
 // are KiCad's (docs/v1-scope.md, Rendering, Zoom).
-import init, { Viewer } from "/viewer/kiewer_viewer.js";
+import init, { Viewer } from "{{ script_url }}";
 
 const canvas = document.getElementById("board");
 const status = document.getElementById("status");

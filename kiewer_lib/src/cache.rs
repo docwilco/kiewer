@@ -17,7 +17,6 @@ use async_trait::async_trait;
 use axum::http::header::{CACHE_CONTROL, HeaderName};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
-use serde::Serialize;
 
 use crate::account::Handle;
 use crate::design::DesignId;
@@ -77,8 +76,7 @@ impl Policy {
 /// - the settings form (name, slug, description): the design, the
 ///   owner's handle and the home page;
 /// - a role change: nothing, since no cacheable page shows roles.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
-#[serde(into = "String")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Key {
     /// The home page's recent list.
     Home,
@@ -96,12 +94,6 @@ impl fmt::Display for Key {
             Key::Design(id) => write!(f, "design-{id}"),
             Key::Handle(handle) => write!(f, "handle-{handle}"),
         }
-    }
-}
-
-impl From<Key> for String {
-    fn from(key: Key) -> String {
-        key.to_string()
     }
 }
 
@@ -219,7 +211,9 @@ const PURGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The purge-by-key call of Fastly's API: `POST
 /// /service/{service id}/purge` with the token in `Fastly-Key` and the
-/// keys as JSON, which drops the keys across every POP at once.
+/// keys in a `Surrogate-Key` request header, which drops them across
+/// every POP at once. At most 256 keys go in one call; a write has four
+/// at most.
 #[derive(Clone)]
 pub struct Fastly {
     service_id: String,
@@ -235,12 +229,6 @@ impl fmt::Debug for Fastly {
             .field("api", &self.api)
             .finish_non_exhaustive()
     }
-}
-
-/// The body of a purge call.
-#[derive(Serialize)]
-struct PurgeBody<'a> {
-    surrogate_keys: &'a [Key],
 }
 
 impl Fastly {
@@ -294,9 +282,7 @@ impl Purge for Fastly {
             .post(&url)
             .header("Fastly-Key", &self.token)
             .header(reqwest::header::ACCEPT, "application/json")
-            .json(&PurgeBody {
-                surrogate_keys: keys,
-            })
+            .header(SURROGATE_KEY, surrogate_key(keys))
             .send()
             .await?;
         let status = response.status();
@@ -348,10 +334,13 @@ impl Encoding {
             for coding in value.split(',') {
                 let coding = coding.trim();
                 let name = coding.split(';').next().unwrap_or(coding).trim();
-                let refused = coding
-                    .split(';')
-                    .skip(1)
-                    .any(|param| param.trim().replace(' ', "") == "q=0");
+                let refused = coding.split(';').skip(1).any(|param| {
+                    param
+                        .trim()
+                        .strip_prefix("q=")
+                        .and_then(|q| q.trim().parse::<f32>().ok())
+                        .is_some_and(|q| q <= 0.0)
+                });
                 if refused {
                     continue;
                 }
@@ -398,11 +387,6 @@ mod tests {
                 Key::Home
             ]),
             "design-7 handle-ada home"
-        );
-        assert_eq!(
-            serde_json::to_string(&[Key::Home, Key::Design(DesignId::for_test(3))]).unwrap(),
-            r#"["home","design-3"]"#,
-            "the purge body carries the same spelling"
         );
     }
 
@@ -472,6 +456,7 @@ mod tests {
     #[test_case(Some("gzip, deflate, br, zstd"), Encoding::Brotli; "a newer browser")]
     #[test_case(Some("gzip;q=1.0, identity; q=0.5"), Encoding::Gzip; "gzip weighted")]
     #[test_case(Some("br;q=0, gzip"), Encoding::Gzip; "brotli refused")]
+    #[test_case(Some("br;q=0.0, gzip"), Encoding::Gzip; "brotli refused at length")]
     #[test_case(Some("br;q=0, gzip;q=0"), Encoding::Identity; "both refused")]
     #[test_case(Some("*"), Encoding::Brotli; "anything")]
     #[test_case(Some("identity"), Encoding::Identity; "identity only")]

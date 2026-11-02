@@ -1,17 +1,21 @@
 //! The viewer page and its assets through a real listener. The wasm and
 //! its script are in the binary only after `scripts/build-viewer.sh` has
 //! run (`kiewer_lib/build.rs`), so their routes are specified both ways:
-//! the bytes with their types when embedded, a 503 naming the script when
-//! not. `embedded()` says which this build is.
+//! the bytes with their types when embedded, under their hashed names in
+//! the coding the request takes (#26), a 503 naming the script when not.
+//! `embedded()` says which this build is.
 
+use std::io::Read as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use kiewer_lib::auth::Auth;
 use kiewer_lib::blob::fs::FsBlobStore;
+use kiewer_lib::cache::Policy;
 use kiewer_lib::web::AppState;
-use kiewer_lib::web::viewer::{BOARD_PATH, NOT_BUILT, embedded};
+use kiewer_lib::web::viewer::{BOARD_PATH, NOT_BUILT, embedded, script_url, wasm_url};
 use kiewer_test_support::{TempDir, http, scratch_dir};
+use test_case::test_case;
 
 const BOARD_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -46,7 +50,10 @@ async fn the_viewer_page_has_the_canvas_and_loads_the_viewer_and_the_board() {
         body.contains("touch-action: none"),
         "two-finger pinch needs it: {body}"
     );
-    assert!(body.contains("/viewer/kiewer_viewer.js"), "{body}");
+    assert!(
+        body.contains(&format!("from \"{}\"", script_url())),
+        "the script is imported by its hashed URL: {body}"
+    );
     assert!(body.contains(BOARD_PATH), "{body}");
     assert!(
         body.contains("passive: false"),
@@ -78,28 +85,99 @@ async fn the_board_is_served_as_text_from_the_repo_file() {
     assert_eq!(response.body.len(), file.len());
 }
 
+/// `body` decoded from `encoding`, as the browser would.
+fn decoded(encoding: Option<&str>, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    match encoding {
+        Some("br") => brotli::Decompressor::new(body, 4096)
+            .read_to_end(&mut out)
+            .expect("brotli the browser decodes"),
+        Some("gzip") => flate2::read::GzDecoder::new(body)
+            .read_to_end(&mut out)
+            .expect("gzip the browser decodes"),
+        None => return body.to_vec(),
+        Some(other) => panic!("a coding the server never sends: {other}"),
+    };
+    out
+}
+
+#[test_case("gzip, deflate, br", Some("br"); "a browser takes brotli")]
+#[test_case("gzip, deflate", Some("gzip"); "an older browser takes gzip")]
+#[test_case("identity", None; "a client that takes neither gets the bytes")]
 #[tokio::test]
-async fn the_script_and_the_wasm_are_served_when_built_in_and_refused_with_the_reason_when_not() {
+async fn the_script_and_the_wasm_are_served_hashed_immutable_and_in_the_coding_the_request_takes(
+    accept: &str,
+    encoding: Option<&str>,
+) {
     let (addr, _dir) = start().await;
-    let script = http::request(addr, "GET", "/viewer/kiewer_viewer.js", &[], "").await;
-    let wasm = http::request(addr, "GET", "/viewer/kiewer_viewer_bg.wasm", &[], "").await;
-    if embedded() {
-        assert_eq!(script.status, 200);
-        assert_eq!(
-            script.header("content-type"),
-            Some("text/javascript; charset=utf-8")
-        );
-        assert!(
-            script.body.contains("export class Viewer"),
-            "wasm-bindgen's module"
-        );
-        assert_eq!(wasm.status, 200);
-        assert_eq!(wasm.header("content-type"), Some("application/wasm"));
-        assert!(wasm.body.starts_with("\0asm"), "the wasm magic");
-    } else {
-        for response in [&script, &wasm] {
+    if !embedded() {
+        for path in [script_url(), wasm_url()] {
+            let response = http::request(addr, "GET", &path, &[], "").await;
             assert_eq!(response.status, 503);
             assert_eq!(response.body, NOT_BUILT);
+            assert_eq!(
+                response.header("cache-control"),
+                Some(Policy::Personal.value()),
+                "a 503 is never cached"
+            );
+        }
+        return;
+    }
+    let plain = http::request(addr, "GET", "/viewer/kiewer_viewer.js", &[], "").await;
+    assert_eq!(plain.status, 404, "the plain name is gone with the hash");
+    for (path, content_type, marker) in [
+        (
+            script_url(),
+            "text/javascript; charset=utf-8",
+            &b"export class Viewer"[..],
+        ),
+        (wasm_url(), "application/wasm", &b"\0asm"[..]),
+    ] {
+        let identity = http::send_raw(
+            addr,
+            "GET",
+            &path,
+            &[("Accept-Encoding", "identity")],
+            None,
+            b"",
+        )
+        .await;
+        assert_eq!(identity.status, 200);
+        assert!(
+            identity
+                .body
+                .windows(marker.len())
+                .any(|window| window == marker),
+            "{path}"
+        );
+        let response = http::send_raw(
+            addr,
+            "GET",
+            &path,
+            &[("Accept-Encoding", accept)],
+            None,
+            b"",
+        )
+        .await;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.header("content-type"), Some(content_type));
+        assert_eq!(response.header("content-encoding"), encoding, "{path}");
+        assert_eq!(response.header("vary"), Some("Accept-Encoding"));
+        assert_eq!(
+            response.header("cache-control"),
+            Some(Policy::Immutable.value()),
+            "a hashed name is immutable for a year"
+        );
+        assert_eq!(
+            decoded(encoding, &response.body),
+            identity.body,
+            "{path} decodes to the plain bytes"
+        );
+        if encoding.is_some() {
+            assert!(
+                response.body.len() < identity.body.len() / 2,
+                "{path}: the prebuilt variant is worth sending"
+            );
         }
     }
 }

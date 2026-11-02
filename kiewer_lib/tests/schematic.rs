@@ -17,7 +17,7 @@ use kiewer_lib::design;
 use kiewer_lib::session;
 use kiewer_lib::web::AppState;
 use kiewer_lib::web::schematic::SCHEMATIC_PATH;
-use kiewer_lib::web::viewer::{NOT_BUILT, embedded};
+use kiewer_lib::web::viewer::{NOT_BUILT, embedded, script_url};
 use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
@@ -65,7 +65,10 @@ async fn the_schematic_page_has_the_canvas_and_loads_the_viewer_and_the_sheet() 
     let body = &response.body;
     assert!(body.contains("<canvas"), "{body}");
     assert!(body.contains("touch-action: none"), "{body}");
-    assert!(body.contains("/viewer/kiewer_viewer.js"), "{body}");
+    assert!(
+        body.contains(&format!("from \"{}\"", script_url())),
+        "{body}"
+    );
     assert!(body.contains("load_schematic"), "{body}");
     assert!(body.contains("#f5f4ef"), "KiCad's paper colour: {body}");
     assert!(body.contains("passive: false"), "{body}");

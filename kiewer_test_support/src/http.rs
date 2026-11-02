@@ -92,6 +92,27 @@ pub async fn request(
     send(addr, method, path, headers, content_type, body.as_bytes()).await
 }
 
+/// What came back, with the body as bytes: for a response that is not
+/// text (a compressed asset, a wasm).
+#[derive(Debug, Clone)]
+pub struct RawResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl RawResponse {
+    /// The first header named `name` (any case), or `None`.
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
 /// One HTTP/1.0 request at `addr` with any body: `method path`, the
 /// extra `headers`, `Content-Type: content_type` when given, and `body`
 /// with its length.
@@ -107,6 +128,27 @@ pub async fn send(
     content_type: Option<&str>,
     body: &[u8],
 ) -> Response {
+    let raw = send_raw(addr, method, path, headers, content_type, body).await;
+    Response {
+        status: raw.status,
+        headers: raw.headers,
+        body: String::from_utf8_lossy(&raw.body).into_owned(),
+    }
+}
+
+/// As [`send`], with the response body as the bytes that came back.
+///
+/// # Panics
+///
+/// As [`request`].
+pub async fn send_raw(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    content_type: Option<&str>,
+    body: &[u8],
+) -> RawResponse {
     use std::fmt::Write as _;
     let mut text = format!("{method} {path} HTTP/1.0\r\nHost: {addr}\r\n");
     // Writing to a String cannot fail.
@@ -131,10 +173,12 @@ pub async fn send(
         .read_to_end(&mut raw)
         .await
         .expect("read the response");
-    let text = String::from_utf8_lossy(&raw).into_owned();
-    let (head, body) = text
-        .split_once("\r\n\r\n")
+    let blank = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
         .expect("a header block ended by a blank line");
+    let head = String::from_utf8_lossy(&raw[..blank]).into_owned();
+    let body = raw[blank + 4..].to_vec();
     let mut lines = head.split("\r\n");
     let status = lines
         .next()
@@ -145,10 +189,10 @@ pub async fn send(
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
         .collect();
-    Response {
+    RawResponse {
         status,
         headers,
-        body: body.to_owned(),
+        body,
     }
 }
 
