@@ -7,11 +7,15 @@
 //! adapter are the platform's (`web.rs` in the browser); this module takes
 //! a device, a format and a texture view to draw into.
 
+pub mod atlas_pipeline;
+
 use bytemuck::{Pod, Zeroable};
 use derive_more::Display;
 use wgpu::util::DeviceExt as _;
 
+use crate::atlas::TextVertex;
 use crate::camera::View;
+use crate::render::atlas_pipeline::{Atlas, TextPass};
 
 /// The shader source, compiled at pipeline creation.
 pub const SHADER: &str = include_str!("shader.wgsl");
@@ -121,6 +125,9 @@ pub struct Renderer {
     format: wgpu::TextureFormat,
     sample_count: u32,
     msaa: Option<MsaaTarget>,
+    /// Named-face text through the glyph atlas (`atlas_pipeline`), drawn
+    /// after the flat geometry.
+    text: TextPass,
 }
 
 struct Geometry {
@@ -213,6 +220,7 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let text = TextPass::new(device, format, sample_count, &bind_group_layout);
         Self {
             pipeline,
             uniform,
@@ -221,7 +229,34 @@ impl Renderer {
             format,
             sample_count,
             msaa: None,
+            text,
         }
+    }
+
+    /// Replace the glyph atlas and the quads of one face of text
+    /// (`crate::atlas`); no indices drops the face.
+    pub fn upload_text(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        face: &str,
+        atlas: &Atlas<'_>,
+        vertices: &[TextVertex],
+        indices: &[u32],
+    ) {
+        self.text
+            .upload(device, queue, face, atlas, vertices, indices);
+    }
+
+    /// Drop every face of text: a new board, or a face sent back to the
+    /// stroke font.
+    pub fn clear_text(&mut self) {
+        self.text.clear();
+    }
+
+    /// Drop one face of text.
+    pub fn remove_text(&mut self, face: &str) {
+        self.text.remove(face);
     }
 
     /// Samples per pixel the frames are drawn with.
@@ -301,6 +336,10 @@ impl Renderer {
                 pass.set_index_buffer(geometry.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..geometry.index_count, 0, 0..1);
             }
+            // Named-face text over everything: the view at group 0 is
+            // still bound.
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            self.text.draw(&mut pass);
         }
         queue.submit(std::iter::once(encoder.finish()));
     }

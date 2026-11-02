@@ -37,6 +37,8 @@ web-sys = { version = "0.3", features = ["HtmlCanvasElement", "console"] }
 wgpu = { version = "30", default-features = false, features = ["webgpu", "webgl"] }
 
 [dev-dependencies]
+# One case per input for the packing and sizing rules (rust-conventions).
+test-case = "3"
 # The shader is validated natively, where no GPU is: naga's WGSL front
 # end is what wgpu runs at pipeline creation. Same major as wgpu.
 naga = { version = "30", default-features = false, features = ["wgsl-in"] }

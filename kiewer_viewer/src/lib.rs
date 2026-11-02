@@ -9,6 +9,7 @@
 
 use wasm_bindgen::prelude::wasm_bindgen;
 
+pub mod atlas;
 pub mod camera;
 pub mod error;
 pub mod render;

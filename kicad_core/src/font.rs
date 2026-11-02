@@ -18,6 +18,7 @@
 //! super- or subscripts is drawn as written.
 
 mod newstroke_table;
+pub mod outline;
 
 use crate::geometry::{Bounds, Transform};
 use crate::model::{Font, Horizontal, Justify, Point, Size, Text, Vertical};
@@ -35,9 +36,9 @@ const ITALIC_TILT: f64 = 1.0 / 8.0;
 const INTERLINE: f64 = 1.68 * 0.9583;
 /// The height the first line counts for in the block, in text heights:
 /// KiCad's "fudge to match 6.0 positioning".
-const FIRST_LINE_HEIGHT: f64 = 1.17;
+pub(crate) const FIRST_LINE_HEIGHT: f64 = 1.17;
 /// Tab stops every this many space widths.
-const TAB_WIDTH: usize = 4;
+pub(crate) const TAB_WIDTH: usize = 4;
 /// The glyph drawn for a character the table lacks.
 const SUBSTITUTE: char = '?';
 

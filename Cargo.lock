@@ -1962,6 +1962,7 @@ dependencies = [
  "derive_more",
  "kicad_core",
  "naga",
+ "test-case",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
