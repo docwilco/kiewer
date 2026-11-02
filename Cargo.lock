@@ -1862,6 +1862,7 @@ dependencies = [
  "google-cloud-auth",
  "google-cloud-gax",
  "google-cloud-storage",
+ "kicad_core",
  "kiewer_test_support",
  "oauth2",
  "rand 0.8.8",

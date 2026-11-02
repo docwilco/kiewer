@@ -3,7 +3,7 @@
 //! empty store: the filesystem store in `kiewer_lib/tests/`, the GCS
 //! store in its own test.
 
-use kiewer_lib::blob::{BlobHash, BlobStore, Put};
+use kiewer_lib::blob::{BlobHash, BlobStore, Put, gunzip};
 
 /// What goes in comes back out, by the hash `put` handed back.
 ///
@@ -41,6 +41,33 @@ pub async fn deduplicates_by_hash(store: &dyn BlobStore) {
         .expect("other put");
     assert_eq!(other.outcome, Put::Stored);
     assert_ne!(other.hash, first.hash);
+}
+
+/// The stored form is one gzip member of the bytes, so a route can send
+/// it as it is with `Content-Encoding: gzip`; a hash nothing was put under
+/// has none.
+///
+/// # Panics
+///
+/// When the store misbehaves: that is the assertion.
+pub async fn hands_out_the_stored_gzip_form(store: &dyn BlobStore) {
+    let bytes = b"(kicad_pro)".repeat(50);
+    let hash = store.put(&bytes).await.expect("put").hash;
+    let stored = store
+        .get_gzip(&hash)
+        .await
+        .expect("get_gzip")
+        .expect("the blob just put is there");
+    assert!(stored.starts_with(&[0x1f, 0x8b]), "the gzip magic");
+    assert!(stored.len() < bytes.len(), "compressed");
+    assert_eq!(gunzip(&stored).expect("a gzip member"), bytes);
+    assert!(
+        store
+            .get_gzip(&BlobHash::of(b"never put"))
+            .await
+            .expect("get_gzip")
+            .is_none()
+    );
 }
 
 /// A hash nothing was put under is absent, not an error.

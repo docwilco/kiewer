@@ -92,6 +92,53 @@ pub enum Error {
     #[display("{reason}")]
     #[from(ignore)]
     Failed { reason: String },
+    /// An upload the server would not take, for a reason the uploader can
+    /// act on: the upload page shows it, with a status of the web layer's
+    /// choosing.
+    #[display("upload refused: {_0}")]
+    #[from(ignore)]
+    Refused(#[error(not(source))] Refusal),
+}
+
+/// Why an upload was refused (docs/v1-scope.md, Uploads). The message is
+/// shown to the uploader as it is, so it names the file and the limit.
+#[derive(Debug, Clone, PartialEq, Eq, Display)]
+pub enum Refusal {
+    /// One file is over the per-file cap.
+    #[display("{path} is larger than {limit_mb} MB, the limit for one file")]
+    FileTooLarge { path: String, limit_mb: u64 },
+    /// The files together are over the per-revision cap.
+    #[display("the files together are larger than {limit_mb} MB, the limit for one revision")]
+    RevisionTooLarge { limit_mb: u64 },
+    /// The account's designs would hold more than the per-account cap.
+    #[display("this upload would take the account over {limit_gb} GB of stored files")]
+    AccountFull { limit_gb: u64 },
+    /// Nothing in the upload is a KiCad file.
+    #[display("no KiCad file: upload a .kicad_pcb, .kicad_sch or .kicad_pro")]
+    NoKicadFile,
+    /// A KiCad-named file does not parse; `error` is the parser's message.
+    #[display("{path}: {error}")]
+    Malformed { path: String, error: String },
+    /// Parsing the files took longer than the server allows.
+    #[display("parsing took longer than {seconds} seconds")]
+    ParseTimeout { seconds: u64 },
+    /// A blob the operator has blocked site-wide.
+    #[display("{path} is a file this site does not accept")]
+    Blocked { path: String },
+    /// A new design's slug is one the owner already has.
+    #[display("you already have a design at {slug}; give this one another name")]
+    SlugTaken { slug: String },
+    /// The upload names a design the person does not have.
+    #[display("you have no design {slug}")]
+    NoSuchDesign { slug: String },
+    /// The branch's head moved while the upload was in flight. Pending
+    /// revisions (docs/v1-scope.md, Push) are not built yet, so the upload
+    /// is retried.
+    #[display("the branch {branch} moved while this upload was in flight; upload again")]
+    HeadMoved { branch: String },
+    /// The multipart body itself could not be read.
+    #[display("the upload could not be read: {reason}")]
+    BadRequest { reason: String },
 }
 
 /// The library's result type.
@@ -185,7 +232,7 @@ impl Error {
             Error::Env { .. } | Error::GcsClient { .. } => Exit::Config,
             Error::Db(_) | Error::Migrate(_) => Exit::Db,
             Error::Template(_) => Exit::Template,
-            Error::Failed { .. } | Error::HandleTaken(_) => Exit::Failed,
+            Error::Failed { .. } | Error::HandleTaken(_) | Error::Refused(_) => Exit::Failed,
             Error::OAuth { .. } | Error::Http(_) => Exit::Upstream,
         }
     }

@@ -33,6 +33,27 @@ impl BlobHash {
     pub fn of(bytes: &[u8]) -> Self {
         Self(Sha256::digest(bytes).into())
     }
+
+    /// The hash's 32 bytes, for a `bytea` column.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// The hash a `bytea` column holds.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Malformed`] when the column is not 32 bytes, which the
+    /// schema forbids.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bytes.try_into().map(Self).map_err(|_| {
+            Error::Malformed(format!(
+                "a blob hash is not 32 bytes: {} found",
+                bytes.len()
+            ))
+        })
+    }
 }
 
 impl fmt::Display for BlobHash {
@@ -110,6 +131,17 @@ pub trait BlobStore: Send + Sync {
     ///
     /// When the store cannot answer.
     async fn exists(&self, hash: &BlobHash) -> Result<bool>;
+
+    /// The stored form of the blob under this hash, one gzip member of
+    /// the bytes, or `None` when the store has no such blob: what the
+    /// blob route sends with `Content-Encoding: gzip`, so a serve costs
+    /// no compression. Not checked against `hash` here, since that takes
+    /// the bytes out again; [`verified`] over [`gunzip`] is the caller's.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot read.
+    async fn get_gzip(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>>;
 }
 
 /// The stored form of a blob: one gzip member of the bytes.

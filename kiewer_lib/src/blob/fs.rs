@@ -69,19 +69,28 @@ impl FsBlobStore {
         })
     }
 
-    fn get_sync(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+    fn get_gzip_sync(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
         let path = self.path_of(hash);
-        let read_blob = |source| Error::ReadBlob {
+        match std::fs::read(&path) {
+            Ok(compressed) => Ok(Some(compressed)),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(Error::ReadBlob {
+                hash: *hash,
+                path,
+                source,
+            }),
+        }
+    }
+
+    fn get_sync(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        let Some(compressed) = self.get_gzip_sync(hash)? else {
+            return Ok(None);
+        };
+        let bytes = gunzip(&compressed).map_err(|source| Error::ReadBlob {
             hash: *hash,
-            path: path.clone(),
+            path: self.path_of(hash),
             source,
-        };
-        let compressed = match std::fs::read(&path) {
-            Ok(compressed) => compressed,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => return Err(read_blob(source)),
-        };
-        let bytes = gunzip(&compressed).map_err(read_blob)?;
+        })?;
         verified(hash, bytes).map(Some)
     }
 
@@ -118,5 +127,11 @@ impl BlobStore for FsBlobStore {
         let store = self.clone();
         let hash = *hash;
         blocking(move || store.exists_sync(&hash)).await
+    }
+
+    async fn get_gzip(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        let store = self.clone();
+        let hash = *hash;
+        blocking(move || store.get_gzip_sync(&hash)).await
     }
 }

@@ -34,6 +34,9 @@ flate2 = "1"
 google-cloud-auth = { version = "1.18", default-features = false }
 google-cloud-gax = { version = "1.15", default-features = false }
 google-cloud-storage = "1.21"
+# The board parser and model: the server parses every uploaded board for
+# its metadata (docs/v1-scope.md, Uploads, S8).
+kicad_core = { path = "../kicad_core" }
 # The authorization-code exchange with PKCE, over reqwest with rustls; the
 # reqwest line below is the same major so one client serves the token call
 # and the provider's user call.

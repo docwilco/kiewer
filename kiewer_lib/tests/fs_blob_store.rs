@@ -36,6 +36,12 @@ async fn names_a_blob_by_the_sha256_of_its_bytes() {
     suite::names_a_blob_by_the_sha256_of_its_bytes(&store).await;
 }
 
+#[tokio::test]
+async fn hands_out_the_stored_gzip_form() {
+    let (store, _dir) = store();
+    suite::hands_out_the_stored_gzip_form(&store).await;
+}
+
 /// The store's own invariant beyond the trait: the bytes on disk are
 /// gzip under the hash (ADR 0002), one file per blob, so a second put
 /// writes nothing.

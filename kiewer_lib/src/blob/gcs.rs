@@ -174,14 +174,13 @@ impl BlobStore for GcsBlobStore {
         }
     }
 
-    async fn get(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
-        let object = object_name(hash);
+    async fn get_gzip(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
         // The client asks for gzip and gets the stored bytes, never a
         // transcoded copy: it says so in its docs, and the checksums it
         // verifies are of the stored bytes.
         let mut response = match self
             .client
-            .read_object(&self.resource, &object)
+            .read_object(&self.resource, object_name(hash))
             .send()
             .await
         {
@@ -194,7 +193,14 @@ impl BlobStore for GcsBlobStore {
             let chunk = chunk.map_err(|source| self.failed(BlobOp::Get, *hash, source))?;
             compressed.extend_from_slice(&chunk);
         }
-        let (hash, url) = (*hash, self.url_of(&object));
+        Ok(Some(compressed))
+    }
+
+    async fn get(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        let Some(compressed) = self.get_gzip(hash).await? else {
+            return Ok(None);
+        };
+        let (hash, url) = (*hash, self.url_of(&object_name(hash)));
         let bytes = blocking(move || {
             gunzip(&compressed).map_err(|source| Error::ReadBlob {
                 hash,
