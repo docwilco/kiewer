@@ -12,12 +12,12 @@
 
 use crate::model::{Font, Horizontal, Justify, Point, Property, Size, Vertical};
 
-/// Index of a library symbol in [`Schematic::library`].
+/// Index of a library symbol in [`Sheet::library`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LibrarySymbolId(pub(crate) u32);
 
 impl LibrarySymbolId {
-    /// The position in [`Schematic::library`].
+    /// The position in [`Sheet::library`].
     ///
     /// Infallible on every target where a `u32` fits a `usize`, which
     /// includes wasm32.
@@ -27,11 +27,116 @@ impl LibrarySymbolId {
     }
 }
 
+/// The paper sizes KiCad names, as `(paper "A4")` writes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PaperSize {
+    /// `A5`.
+    A5,
+    /// `A4`, KiCad's default.
+    A4,
+    /// `A3`.
+    A3,
+    /// `A2`.
+    A2,
+    /// `A1`.
+    A1,
+    /// `A0`.
+    A0,
+    /// `A`, the ANSI size, the same as US Letter.
+    A,
+    /// `B`, the ANSI size, the same as US Ledger.
+    B,
+    /// `C`.
+    C,
+    /// `D`.
+    D,
+    /// `E`.
+    E,
+    /// `USLetter`.
+    UsLetter,
+    /// `USLegal`.
+    UsLegal,
+    /// `USLedger`.
+    UsLedger,
+    /// `User`: the size is written after the name.
+    User,
+}
+
+impl PaperSize {
+    /// The size the file writes as `name`, or `None` for a name KiCad does
+    /// not define.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        Some(match name {
+            "A5" => PaperSize::A5,
+            "A4" => PaperSize::A4,
+            "A3" => PaperSize::A3,
+            "A2" => PaperSize::A2,
+            "A1" => PaperSize::A1,
+            "A0" => PaperSize::A0,
+            "A" => PaperSize::A,
+            "B" => PaperSize::B,
+            "C" => PaperSize::C,
+            "D" => PaperSize::D,
+            "E" => PaperSize::E,
+            "USLetter" => PaperSize::UsLetter,
+            "USLegal" => PaperSize::UsLegal,
+            "USLedger" => PaperSize::UsLedger,
+            "User" => PaperSize::User,
+            _ => return None,
+        })
+    }
+
+    /// The name as the file writes it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PaperSize::A5 => "A5",
+            PaperSize::A4 => "A4",
+            PaperSize::A3 => "A3",
+            PaperSize::A2 => "A2",
+            PaperSize::A1 => "A1",
+            PaperSize::A0 => "A0",
+            PaperSize::A => "A",
+            PaperSize::B => "B",
+            PaperSize::C => "C",
+            PaperSize::D => "D",
+            PaperSize::E => "E",
+            PaperSize::UsLetter => "USLetter",
+            PaperSize::UsLegal => "USLegal",
+            PaperSize::UsLedger => "USLedger",
+            PaperSize::User => "User",
+        }
+    }
+
+    /// The landscape extent, or `None` for [`PaperSize::User`], whose
+    /// extent is in the file.
+    #[must_use]
+    pub fn landscape(self) -> Option<Size> {
+        let (width, height) = match self {
+            PaperSize::A5 => (210.0, 148.0),
+            PaperSize::A4 => (297.0, 210.0),
+            PaperSize::A3 => (420.0, 297.0),
+            PaperSize::A2 => (594.0, 420.0),
+            PaperSize::A1 => (841.0, 594.0),
+            PaperSize::A0 => (1189.0, 841.0),
+            PaperSize::A | PaperSize::UsLetter => (279.4, 215.9),
+            PaperSize::B | PaperSize::UsLedger => (431.8, 279.4),
+            PaperSize::C => (558.8, 431.8),
+            PaperSize::D => (863.6, 558.8),
+            PaperSize::E => (1117.6, 863.6),
+            PaperSize::UsLegal => (355.6, 215.9),
+            PaperSize::User => return None,
+        };
+        Some(Size { width, height })
+    }
+}
+
 /// The sheet's paper: the `(paper ...)` entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Paper {
-    /// The size name as written: `A4`, `USLetter`, `User`.
-    pub name: String,
+    /// The named size.
+    pub kind: PaperSize,
     /// The sheet's extent, orientation applied.
     pub size: Size,
 }
@@ -41,34 +146,12 @@ impl Paper {
     #[must_use]
     pub fn a4() -> Self {
         Self {
-            name: "A4".to_owned(),
+            kind: PaperSize::A4,
             size: Size {
                 width: 297.0,
                 height: 210.0,
             },
         }
-    }
-
-    /// The landscape size of a named paper, or `None` for a name KiCad
-    /// does not define (`User` among them: its size is in the file).
-    #[must_use]
-    pub fn named(name: &str) -> Option<Size> {
-        let (width, height) = match name {
-            "A5" => (210.0, 148.0),
-            "A4" => (297.0, 210.0),
-            "A3" => (420.0, 297.0),
-            "A2" => (594.0, 420.0),
-            "A1" => (841.0, 594.0),
-            "A0" => (1189.0, 841.0),
-            "A" | "USLetter" => (279.4, 215.9),
-            "B" | "USLedger" => (431.8, 279.4),
-            "C" => (558.8, 431.8),
-            "D" => (863.6, 558.8),
-            "E" => (1117.6, 863.6),
-            "USLegal" => (355.6, 215.9),
-            _ => return None,
-        };
-        Some(Size { width, height })
     }
 }
 
@@ -607,16 +690,10 @@ impl Spin {
 pub struct Label {
     /// What kind of label, with its flag shape where it has one.
     pub kind: LabelKind,
-    /// The net name.
-    pub text: String,
-    /// The anchor on the wire.
-    pub at: Point,
-    /// Rotation in degrees as written: 0, 90, 180 or 270.
-    pub rotation: f64,
-    /// The font.
-    pub font: Font,
-    /// The anchoring as written; the horizontal part picks the side.
-    pub justify: Justify,
+    /// The net name as a text item: its anchor is the point on the wire,
+    /// its rotation one of 0, 90, 180 and 270 as written, and the
+    /// horizontal part of its anchoring picks the side of the anchor.
+    pub text: TextItem,
     /// The label's fields (a global label's intersheet references).
     pub fields: Vec<Field>,
 }
@@ -625,31 +702,24 @@ impl Label {
     /// Which side of the anchor the text is on.
     #[must_use]
     pub fn spin(&self) -> Spin {
-        Spin::of(self.rotation, self.justify.horizontal)
+        Spin::of(self.text.rotation, self.text.justify.horizontal)
     }
 }
 
 /// One pin on a sheet symbol's edge.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SheetPin {
-    /// The net name.
-    pub name: String,
     /// The flag shape.
     pub shape: FlagShape,
-    /// Where on the sheet's edge.
-    pub at: Point,
-    /// Which edge, as KiCad writes it: 0 right, 90 top, 180 left, 270
-    /// bottom.
-    pub rotation: f64,
-    /// The font.
-    pub font: Font,
-    /// The anchoring as written.
-    pub justify: Justify,
+    /// The net name as a text item: its anchor is the point on the sheet
+    /// symbol's edge, its rotation the edge as KiCad writes it (0 right,
+    /// 90 top, 180 left, 270 bottom).
+    pub text: TextItem,
 }
 
 /// A hierarchical sheet symbol: a box standing for another sheet.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Sheet {
+pub struct SheetSymbol {
     /// The top-left corner.
     pub at: Point,
     /// Width and height.
@@ -662,7 +732,7 @@ pub struct Sheet {
     pub pins: Vec<SheetPin>,
 }
 
-impl Sheet {
+impl SheetSymbol {
     /// The value of the field named `name`, when present.
     #[must_use]
     pub fn field(&self, name: &str) -> Option<&str> {
@@ -687,7 +757,7 @@ impl Sheet {
 
 /// One parsed sheet of a schematic.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Schematic {
+pub struct Sheet {
     /// The file format version, `20250114` and later.
     pub version: u32,
     /// The program that wrote the file.
@@ -713,14 +783,14 @@ pub struct Schematic {
     /// Labels of every kind.
     pub labels: Vec<Label>,
     /// Hierarchical sheet symbols.
-    pub sheets: Vec<Sheet>,
+    pub sheet_symbols: Vec<SheetSymbol>,
     /// Free text.
     pub texts: Vec<TextItem>,
     /// Free graphics: lines, boxes, circles, arcs.
     pub graphics: Vec<Graphic>,
 }
 
-impl Schematic {
+impl Sheet {
     /// The library symbol a placed symbol draws.
     #[must_use]
     pub fn library_symbol(&self, symbol: &Symbol) -> Option<&LibrarySymbol> {
@@ -732,7 +802,11 @@ impl Schematic {
         self.symbols
             .iter()
             .flat_map(|symbol| symbol.fields.iter())
-            .chain(self.sheets.iter().flat_map(|sheet| sheet.fields.iter()))
+            .chain(
+                self.sheet_symbols
+                    .iter()
+                    .flat_map(|sheet| sheet.fields.iter()),
+            )
     }
 }
 
@@ -749,6 +823,8 @@ pub fn label_vertical(kind: LabelKind) -> Vertical {
 
 #[cfg(test)]
 mod tests {
+    use test_case::test_case;
+
     use super::*;
 
     fn close(a: Point, b: Point) -> bool {
@@ -814,21 +890,14 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn unapply_inverts_apply() {
-        for (rotation, mirror) in [
-            (0.0, Mirror::None),
-            (90.0, Mirror::Y),
-            (180.0, Mirror::X),
-            (270.0, Mirror::None),
-        ] {
-            let frame = Frame::new(Point { x: 3.0, y: -4.0 }, rotation, mirror);
-            let p = Point { x: 1.5, y: 2.5 };
-            assert!(
-                close(frame.unapply(frame.apply(p)), p),
-                "{rotation} {mirror:?}"
-            );
-        }
+    #[test_case(0.0, Mirror::None; "unturned")]
+    #[test_case(90.0, Mirror::Y; "a quarter and mirrored in y")]
+    #[test_case(180.0, Mirror::X; "a half and mirrored in x")]
+    #[test_case(270.0, Mirror::None; "three quarters")]
+    fn unapply_inverts_apply(rotation: f64, mirror: Mirror) {
+        let frame = Frame::new(Point { x: 3.0, y: -4.0 }, rotation, mirror);
+        let p = Point { x: 1.5, y: 2.5 };
+        assert!(close(frame.unapply(frame.apply(p)), p));
     }
 
     #[test]
@@ -874,10 +943,15 @@ mod tests {
     }
 
     #[test]
-    fn named_papers_are_landscape_and_user_is_not_named() {
-        let a4 = Paper::named("A4").expect("A4");
-        assert!((a4.width - 297.0).abs() < 1e-12 && (a4.height - 210.0).abs() < 1e-12);
-        assert_eq!(Paper::named("User"), None);
-        assert_eq!(Paper::a4().size, a4);
+    fn named_papers_are_landscape_and_user_has_no_size_of_its_own() {
+        let a4 = PaperSize::named("A4").expect("A4");
+        assert_eq!(a4, PaperSize::A4);
+        assert_eq!(a4.as_str(), "A4");
+        let size = a4.landscape().expect("a named size");
+        assert!((size.width - 297.0).abs() < 1e-12 && (size.height - 210.0).abs() < 1e-12);
+        assert_eq!(PaperSize::named("User"), Some(PaperSize::User));
+        assert_eq!(PaperSize::User.landscape(), None);
+        assert_eq!(PaperSize::named("B9"), None);
+        assert_eq!(Paper::a4().size, size);
     }
 }

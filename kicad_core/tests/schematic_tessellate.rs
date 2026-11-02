@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use kicad_core::geometry::Bounds;
 use kicad_core::model::Point;
 use kicad_core::parse_schematic;
-use kicad_core::schematic::model::Schematic;
+use kicad_core::schematic::model::Sheet;
 use kicad_core::tessellate::schematic::SchematicLayer;
 use kicad_core::tessellate::{Mesh, Tessellator};
 use test_case::test_case;
@@ -17,8 +17,8 @@ const SCHEMATIC_PATH: &str = concat!(
     "/../viewer-drop/board/midi8knob.kicad_sch"
 );
 
-fn hand_off() -> &'static Schematic {
-    static SCHEMATIC: OnceLock<Schematic> = OnceLock::new();
+fn hand_off() -> &'static Sheet {
+    static SCHEMATIC: OnceLock<Sheet> = OnceLock::new();
     SCHEMATIC.get_or_init(|| {
         let source =
             std::fs::read_to_string(SCHEMATIC_PATH).expect("the hand-off schematic is in the repo");
@@ -33,7 +33,7 @@ fn at(x: f64, y: f64) -> Point {
 /// A sheet holding `items`, with a small resistor symbol in its library:
 /// a 1.524 by 3.556 box with pin 1 above (at y 2.54 in the library, so
 /// up) and pin 2 below, names hidden and numbers shown outside.
-fn sheet(items: &str) -> Schematic {
+fn sheet(items: &str) -> Sheet {
     let source = format!(
         r#"(kicad_sch (version 20250114) (generator "eeschema") (paper "A4")
   (lib_symbols
@@ -64,11 +64,11 @@ fn sheet(items: &str) -> Schematic {
     parse_schematic(&source).expect("the test sheet parses")
 }
 
-fn layers(sch: &Schematic) -> Vec<(SchematicLayer, Mesh)> {
+fn layers(sch: &Sheet) -> Vec<(SchematicLayer, Mesh)> {
     Tessellator::new(0.01).sheet(sch)
 }
 
-fn layer(sch: &Schematic, wanted: SchematicLayer) -> Mesh {
+fn layer(sch: &Sheet, wanted: SchematicLayer) -> Mesh {
     layers(sch)
         .into_iter()
         .find(|(layer, _)| *layer == wanted)
@@ -208,6 +208,21 @@ fn a_field_of_a_turned_symbol_reads_horizontally_when_it_was_vertical() {
         "{reference:?}"
     );
     assert!((reference.center().y - 100.0).abs() < 0.2, "{reference:?}");
+}
+
+#[test]
+fn a_right_justified_vertical_field_on_a_turned_symbol_ends_at_its_anchor() {
+    // D6 in the hand-off: the diode is turned 270 and its reference,
+    // written right-justified at 90, sits left of the body with its
+    // anchor 1.524 left of the symbol; KiCad draws the text ending at
+    // the anchor, so it stays left of the diode.
+    let sch = sheet(
+        r#"(symbol (lib_id "Device:R_Small") (at 100 100 270) (unit 1) (uuid "r")
+             (property "Reference" "MMM" (at 98.476 100 90) (effects (font (size 1.27 1.27)) (justify right))))"#,
+    );
+    let reference = bounds(&layer(&sch, SchematicLayer::Reference));
+    assert!((reference.max.x - 98.476).abs() < 0.3, "{reference:?}");
+    assert!(reference.min.x < 96.0, "{reference:?}");
 }
 
 #[test]
@@ -372,7 +387,7 @@ fn a_hierarchical_label_and_a_sheet_pin_draw_their_flags_and_text() {
         hb.max.x > 51.27 + 0.19 + 0.5,
         "the text follows the flag: {hb:?}"
     );
-    let sheet_mesh = layer(&sch, SchematicLayer::Sheet);
+    let sheet_mesh = layer(&sch, SchematicLayer::SheetSymbol);
     assert!(sheet_mesh.covers(at(70.0, 60.0)) && sheet_mesh.covers(at(80.0, 65.0)));
     assert!(
         !sheet_mesh.covers(at(70.0, 65.0)),
@@ -388,46 +403,37 @@ fn a_hierarchical_label_and_a_sheet_pin_draw_their_flags_and_text() {
     assert!(bounds(&pin).max.x > 61.27, "the text is inside the sheet");
 }
 
+#[test_case(SchematicLayer::Background, true; "body fills")]
+#[test_case(SchematicLayer::Device, true; "bodies")]
+#[test_case(SchematicLayer::Notes, true; "the note")]
+#[test_case(SchematicLayer::Wire, true; "wires")]
+#[test_case(SchematicLayer::GlobalLabel, true; "global labels")]
+#[test_case(SchematicLayer::NoConnect, true; "no-connects")]
+#[test_case(SchematicLayer::Junction, true; "junctions")]
+#[test_case(SchematicLayer::Pin, true; "pins")]
+#[test_case(SchematicLayer::PinName, true; "pin names")]
+#[test_case(SchematicLayer::PinNumber, true; "pin numbers")]
+#[test_case(SchematicLayer::Value, true; "values")]
+#[test_case(SchematicLayer::Reference, true; "references")]
+#[test_case(SchematicLayer::Dnp, true; "DNP crosses")]
+#[test_case(SchematicLayer::Bus, false; "no buses")]
+#[test_case(SchematicLayer::LocalLabel, false; "no local labels")]
+#[test_case(SchematicLayer::HierLabel, false; "no hierarchical labels")]
+#[test_case(SchematicLayer::SheetSymbol, false; "no sheet symbols")]
+fn the_hand_off_sheet_draws_the_layers_it_has(layer: SchematicLayer, drawn: bool) {
+    let used: Vec<SchematicLayer> = layers(hand_off())
+        .into_iter()
+        .map(|(layer, _)| layer)
+        .collect();
+    assert_eq!(used.contains(&layer), drawn, "{used:?}");
+}
+
 #[test]
-fn the_hand_off_sheet_uses_every_layer_it_draws_and_stays_on_its_paper() {
+fn the_hand_off_sheet_comes_in_draw_order_and_stays_on_its_paper() {
     let layers = layers(hand_off());
     let used: Vec<SchematicLayer> = layers.iter().map(|(layer, _)| *layer).collect();
-    for wanted in [
-        SchematicLayer::Background,
-        SchematicLayer::Device,
-        SchematicLayer::Notes,
-        SchematicLayer::Wire,
-        SchematicLayer::GlobalLabel,
-        SchematicLayer::NoConnect,
-        SchematicLayer::Junction,
-        SchematicLayer::Pin,
-        SchematicLayer::PinName,
-        SchematicLayer::PinNumber,
-        SchematicLayer::Value,
-        SchematicLayer::Reference,
-        SchematicLayer::Dnp,
-    ] {
-        assert!(used.contains(&wanted), "{wanted:?} is drawn");
-    }
-    for unused in [
-        SchematicLayer::Bus,
-        SchematicLayer::LocalLabel,
-        SchematicLayer::HierLabel,
-        SchematicLayer::Sheet,
-    ] {
-        assert!(!used.contains(&unused), "{unused:?} is not drawn");
-    }
-    let order: Vec<usize> = used
-        .iter()
-        .map(|layer| {
-            SchematicLayer::DRAW_ORDER
-                .iter()
-                .position(|l| l == layer)
-                .expect("every layer is in the draw order")
-        })
-        .collect();
     assert!(
-        order.windows(2).all(|pair| pair[0] < pair[1]),
+        used.windows(2).all(|pair| pair[0] < pair[1]),
         "in draw order: {used:?}"
     );
     let total: usize = layers.iter().map(|(_, mesh)| mesh.indices.len()).sum();

@@ -1,4 +1,4 @@
-//! The schematic parser: a `.kicad_sch` text into a [`Schematic`].
+//! The schematic parser: a `.kicad_sch` text into a [`Sheet`].
 //!
 //! The walk is over the [`sexpr`] tree, as the board parser's is, and the
 //! rules are the same: known elements are read with every field they need
@@ -19,8 +19,8 @@ use crate::model::{Font, Horizontal, Justify, Point, Property, Size, Vertical};
 use crate::sexpr::{self, Node};
 use model::{
     BusEntry, Field, Fill, FlagShape, Graphic, Junction, Label, LabelKind, LibrarySymbol,
-    LibrarySymbolId, Mirror, Paper, Pin, PinElectrical, PinShape, Schematic, Sheet, SheetPin,
-    Symbol, SymbolShape, TextItem, Unit, Wire,
+    LibrarySymbolId, Mirror, Paper, PaperSize, Pin, PinElectrical, PinShape, Sheet, SheetPin,
+    SheetSymbol, Symbol, SymbolShape, TextItem, Unit, Wire,
 };
 
 /// KiCad's default text size in a schematic.
@@ -38,7 +38,7 @@ const DEFAULT_PIN_NAME_OFFSET: f64 = 0.508;
 /// ([`Error::UnsupportedSchematicVersion`]), has a known element with a
 /// missing or malformed field, or places a symbol the file's
 /// `lib_symbols` does not hold.
-pub fn parse_schematic(source: &str) -> Result<Schematic> {
+pub fn parse_schematic(source: &str) -> Result<Sheet> {
     let root = sexpr::read(source)?;
     let head = root.head()?;
     if head != "kicad_sch" {
@@ -70,7 +70,7 @@ pub fn parse_schematic(source: &str) -> Result<Schematic> {
         by_name.entry(symbol.name.as_str()).or_insert(id);
     }
 
-    let mut schematic = Schematic {
+    let mut schematic = Sheet {
         version,
         generator: None,
         generator_version: None,
@@ -83,7 +83,7 @@ pub fn parse_schematic(source: &str) -> Result<Schematic> {
         junctions: Vec::new(),
         no_connects: Vec::new(),
         labels: Vec::new(),
-        sheets: Vec::new(),
+        sheet_symbols: Vec::new(),
         texts: Vec::new(),
         graphics: Vec::new(),
     };
@@ -114,7 +114,7 @@ pub fn parse_schematic(source: &str) -> Result<Schematic> {
                 let kind = LabelKind::Hierarchical(flag_shape(node)?);
                 schematic.labels.push(label(node, kind)?);
             }
-            "sheet" => schematic.sheets.push(sheet(node)?),
+            "sheet" => schematic.sheet_symbols.push(sheet(node)?),
             "text" => schematic.texts.push(text_item(node, node.atom(0)?)?),
             "polyline" | "rectangle" | "circle" | "arc" | "bezier" => {
                 schematic.graphics.push(graphic(node)?);
@@ -129,31 +129,24 @@ pub fn parse_schematic(source: &str) -> Result<Schematic> {
 /// A `(paper "A4" [portrait])` or `(paper "User" w h)`.
 fn paper(node: &Node) -> Result<Paper> {
     let name = node.atom(0)?;
-    let size = if name == "User" {
-        Size {
+    let kind = PaperSize::named(name).ok_or_else(|| {
+        node.error(format!(
+            "expected a paper size (A0 to A5, A to E, USLetter, USLegal, USLedger, User), \
+             found {name:?}"
+        ))
+    })?;
+    let size = match kind.landscape() {
+        None => Size {
             width: node.number(1)?,
             height: node.number(2)?,
-        }
-    } else {
-        let size = Paper::named(name).ok_or_else(|| {
-            node.error(format!(
-                "expected a paper size (A0 to A5, A to E, USLetter, USLegal, USLedger, User), \
-                 found {name:?}"
-            ))
-        })?;
-        if node.has_flag("portrait") {
-            Size {
-                width: size.height,
-                height: size.width,
-            }
-        } else {
-            size
-        }
+        },
+        Some(size) if node.has_flag("portrait") => Size {
+            width: size.height,
+            height: size.width,
+        },
+        Some(size) => size,
     };
-    Ok(Paper {
-        name: name.to_owned(),
-        size,
-    })
+    Ok(Paper { kind, size })
 }
 
 /// A `(symbol "name" ...)` of `lib_symbols`.
@@ -228,26 +221,17 @@ fn resolve_extends(library: &mut [LibrarySymbol]) {
 /// last two numbers of the name.
 fn unit(node: &Node) -> Result<Unit> {
     let name = node.atom(0)?;
-    let parse = |part: Option<&str>| -> Result<u32> {
-        part.and_then(|text| text.parse().ok()).ok_or_else(|| {
-            node.error(format!(
-                "expected a sub-symbol named NAME_UNIT_STYLE, found {name:?}"
-            ))
-        })
+    let malformed = || {
+        node.error(format!(
+            "expected a sub-symbol named NAME_UNIT_STYLE, found {name:?}"
+        ))
     };
-    let (rest, style) = name.rsplit_once('_').ok_or_else(|| {
-        node.error(format!(
-            "expected a sub-symbol named NAME_UNIT_STYLE, found {name:?}"
-        ))
-    })?;
-    let (_, unit) = rest.rsplit_once('_').ok_or_else(|| {
-        node.error(format!(
-            "expected a sub-symbol named NAME_UNIT_STYLE, found {name:?}"
-        ))
-    })?;
+    let number = |part: &str| -> Result<u32> { part.parse().map_err(|_| malformed()) };
+    let (rest, style) = name.rsplit_once('_').ok_or_else(malformed)?;
+    let (_, unit) = rest.rsplit_once('_').ok_or_else(malformed)?;
     let mut out = Unit {
-        unit: parse(Some(unit))?,
-        body_style: parse(Some(style))?,
+        unit: number(unit)?,
+        body_style: number(style)?,
         graphics: Vec::new(),
         texts: Vec::new(),
         pins: Vec::new(),
@@ -344,16 +328,22 @@ fn default_size() -> Size {
     }
 }
 
-/// The `(font ...)` of an `(effects ...)`: size, thickness, bold, italic
-/// and face, KiCad's defaults where the file is silent.
-fn font(effects: &Node) -> Result<Font> {
-    let mut font = Font {
+/// KiCad's font when the file says nothing: the stroke font at the
+/// default size.
+fn default_font() -> Font {
+    Font {
         face: None,
         size: default_size(),
         thickness: None,
         bold: false,
         italic: false,
-    };
+    }
+}
+
+/// The `(font ...)` of an `(effects ...)`: size, thickness, bold, italic
+/// and face, KiCad's defaults where the file is silent.
+fn font(effects: &Node) -> Result<Font> {
+    let mut font = default_font();
     if let Some(node) = effects.child("font") {
         font.face = optional_text(node, "face")?;
         if let Some(size_node) = node.child("size") {
@@ -401,16 +391,7 @@ fn text_item(node: &Node, text: &str) -> Result<TextItem> {
     let (at, rotation) = at(node.require("at")?)?;
     let (font, justify) = match node.child("effects") {
         Some(effects) => (self::font(effects)?, self::justify(effects)),
-        None => (
-            Font {
-                face: None,
-                size: default_size(),
-                thickness: None,
-                bold: false,
-                italic: false,
-            },
-            Justify::default(),
-        ),
+        None => (default_font(), Justify::default()),
     };
     Ok(TextItem {
         text: text.to_owned(),
@@ -531,11 +512,7 @@ fn symbol(node: &Node, by_name: &BTreeMap<&str, LibrarySymbolId>) -> Result<Symb
         }
     };
     let unit = positive("unit", 1)?;
-    // KiCad 8 wrote the body style as `convert`.
-    let body_style = match node.child("body_style") {
-        Some(_) => positive("body_style", 1)?,
-        None => positive("convert", 1)?,
-    };
+    let body_style = positive("body_style", 1)?;
     let mut fields = Vec::new();
     for child in node.children("property") {
         fields.push(field(child)?);
@@ -593,20 +570,12 @@ fn label(node: &Node, kind: LabelKind) -> Result<Label> {
     for child in node.children("property") {
         fields.push(field(child)?);
     }
-    Ok(Label {
-        kind,
-        text: text.text,
-        at: text.at,
-        rotation: text.rotation,
-        font: text.font,
-        justify: text.justify,
-        fields,
-    })
+    Ok(Label { kind, text, fields })
 }
 
 /// A `(sheet (at ...) (size ...) ... (property ...) (pin ...))`.
-fn sheet(node: &Node) -> Result<Sheet> {
-    let mut sheet = Sheet {
+fn sheet(node: &Node) -> Result<SheetSymbol> {
+    let mut sheet = SheetSymbol {
         at: point(node.require("at")?)?,
         size: size(node.require("size")?)?,
         width: stroke_width(node)?,
@@ -616,17 +585,10 @@ fn sheet(node: &Node) -> Result<Sheet> {
     for child in node.lists() {
         match child.head()? {
             "property" => sheet.fields.push(field(child)?),
-            "pin" => {
-                let text = text_item(child, child.atom(0)?)?;
-                sheet.pins.push(SheetPin {
-                    name: text.text,
-                    shape: shape_named(child, child.atom_opt(1))?,
-                    at: text.at,
-                    rotation: text.rotation,
-                    font: text.font,
-                    justify: text.justify,
-                });
-            }
+            "pin" => sheet.pins.push(SheetPin {
+                shape: shape_named(child, child.atom_opt(1))?,
+                text: text_item(child, child.atom(0)?)?,
+            }),
             _ => {}
         }
     }

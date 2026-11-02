@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use kicad_core::model::{Horizontal, Point};
 use kicad_core::parse_schematic;
 use kicad_core::schematic::model::{
-    Fill, FlagShape, LabelKind, Mirror, PinElectrical, PinShape, Schematic, SymbolShape,
+    Fill, FlagShape, LabelKind, Mirror, PaperSize, PinElectrical, PinShape, Sheet, SymbolShape,
 };
 use test_case::test_case;
 
@@ -16,8 +16,8 @@ const SCHEMATIC_PATH: &str = concat!(
     "/../viewer-drop/board/midi8knob.kicad_sch"
 );
 
-fn schematic() -> &'static Schematic {
-    static SCHEMATIC: OnceLock<Schematic> = OnceLock::new();
+fn schematic() -> &'static Sheet {
+    static SCHEMATIC: OnceLock<Sheet> = OnceLock::new();
     SCHEMATIC.get_or_init(|| {
         let source =
             std::fs::read_to_string(SCHEMATIC_PATH).expect("the hand-off schematic is in the repo");
@@ -35,7 +35,7 @@ fn reads_the_header() {
     assert_eq!(sch.version, 20_260_306);
     assert_eq!(sch.generator.as_deref(), Some("eeschema"));
     assert_eq!(sch.generator_version.as_deref(), Some("10.0"));
-    assert_eq!(sch.paper.name, "A4");
+    assert_eq!(sch.paper.kind, PaperSize::A4);
     assert!(close(sch.paper.size.width, 297.0) && close(sch.paper.size.height, 210.0));
 }
 
@@ -56,7 +56,7 @@ fn pins_the_hand_off_counts() {
         "every label of the hand-off is global"
     );
     assert_eq!(sch.texts.len(), 1, "free texts");
-    assert_eq!(sch.sheets.len(), 0, "sheet symbols");
+    assert_eq!(sch.sheet_symbols.len(), 0, "sheet symbols");
     assert_eq!(sch.graphics.len(), 0, "sheet-level graphics");
 }
 
@@ -232,13 +232,13 @@ fn the_swo_label_is_an_input_flag_reading_right_from_its_anchor() {
     let swo = sch
         .labels
         .iter()
-        .find(|label| label.text == "SWO")
+        .find(|label| label.text.text == "SWO")
         .expect("SWO is a label");
     assert_eq!(swo.kind, LabelKind::Global(FlagShape::Input));
-    assert!(close(swo.at.x, 33.02) && close(swo.at.y, 104.14));
-    assert!(close(swo.rotation, 0.0));
-    assert_eq!(swo.justify.horizontal, Horizontal::Left);
-    assert!(close(swo.font.size.height, 1.27));
+    assert!(close(swo.text.at.x, 33.02) && close(swo.text.at.y, 104.14));
+    assert!(close(swo.text.rotation, 0.0));
+    assert_eq!(swo.text.justify.horizontal, Horizontal::Left);
+    assert!(close(swo.text.font.size.height, 1.27));
     assert!(
         swo.fields
             .iter()
@@ -306,7 +306,7 @@ fn a_kicad9_schematic_reads_what_the_hand_off_lacks() {
     ));
     assert_eq!(sch.labels.len(), 2);
     assert_eq!(sch.labels[0].kind, LabelKind::Local);
-    assert!(close(sch.labels[0].rotation, 90.0));
+    assert!(close(sch.labels[0].text.rotation, 90.0));
     assert_eq!(
         sch.labels[1].kind,
         LabelKind::Hierarchical(FlagShape::Output)
@@ -314,12 +314,12 @@ fn a_kicad9_schematic_reads_what_the_hand_off_lacks() {
     let symbol = &sch.symbols[0];
     assert_eq!(symbol.mirror, Mirror::X);
     assert!(symbol.dnp);
-    let sheet = &sch.sheets[0];
+    let sheet = &sch.sheet_symbols[0];
     assert!(close(sheet.size.width, 20.0) && close(sheet.size.height, 15.0));
     assert_eq!(sheet.pins.len(), 2);
-    assert_eq!(sheet.pins[0].name, "VIN");
+    assert_eq!(sheet.pins[0].text.text, "VIN");
     assert_eq!(sheet.pins[0].shape, FlagShape::Input);
-    assert!(close(sheet.pins[0].rotation, 180.0));
+    assert!(close(sheet.pins[0].text.rotation, 180.0));
     assert_eq!(sheet.pins[1].shape, FlagShape::Output);
     assert_eq!(
         sheet.name(),

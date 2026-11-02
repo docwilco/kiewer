@@ -7,7 +7,7 @@
 
 use kicad_core::geometry::Bounds;
 use kicad_core::model::Point;
-use kicad_core::schematic::model::Schematic;
+use kicad_core::schematic::model::Sheet;
 use kicad_core::tessellate::Tessellator;
 use kicad_core::tessellate::schematic::SchematicLayer;
 
@@ -29,14 +29,13 @@ pub mod palette {
             SchematicLayer::Background => Rgb(0xff, 0xff, 0xc2),
             SchematicLayer::Device
             | SchematicLayer::Pin
-            | SchematicLayer::Sheet
+            | SchematicLayer::SheetSymbol
             | SchematicLayer::GlobalLabel => Rgb(0x84, 0x00, 0x00),
             SchematicLayer::Notes => Rgb(0x00, 0x00, 0xc2),
-            SchematicLayer::Bus => Rgb(0x00, 0x00, 0xff),
             SchematicLayer::Wire | SchematicLayer::Junction => Rgb(0x00, 0x96, 0x00),
             SchematicLayer::LocalLabel => Rgb(0x00, 0x00, 0x00),
             SchematicLayer::HierLabel | SchematicLayer::SheetFile => Rgb(0x72, 0x56, 0x00),
-            SchematicLayer::NoConnect => Rgb(0x00, 0x00, 0x84),
+            SchematicLayer::Bus | SchematicLayer::NoConnect => Rgb(0x00, 0x00, 0x84),
             SchematicLayer::SheetName
             | SchematicLayer::SheetLabel
             | SchematicLayer::PinName
@@ -57,14 +56,14 @@ pub fn clear_color(format: wgpu::TextureFormat) -> wgpu::Color {
 
 /// Triangles ready for upload, and the draws that colour them.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Sheet {
+pub struct SheetScene {
     /// The world point the positions are relative to: the middle of the
     /// paper (grown to hold anything drawn off it).
     pub origin: Point,
     /// What the camera fits to, in world millimetres: the paper, grown to
     /// hold anything drawn off it.
     pub bounds: Bounds,
-    /// Positions relative to [`Sheet::origin`].
+    /// Positions relative to [`SheetScene::origin`].
     pub vertices: Vec<Vertex>,
     /// Three per triangle.
     pub indices: Vec<u32>,
@@ -76,7 +75,7 @@ pub struct Sheet {
 /// Every layer of `sheet`, coloured for a target of `format`; `None` for
 /// a sheet with nothing drawn on it.
 #[must_use]
-pub fn build(sheet: &Schematic, format: wgpu::TextureFormat) -> Option<Sheet> {
+pub fn build(sheet: &Sheet, format: wgpu::TextureFormat) -> Option<SheetScene> {
     let tessellator = Tessellator::new(TOLERANCE);
     let layers = tessellator.sheet(sheet);
     let drawn = layers
@@ -92,7 +91,7 @@ pub fn build(sheet: &Schematic, format: wgpu::TextureFormat) -> Option<Sheet> {
     };
     let bounds = paper.union(drawn);
     let origin = bounds.center();
-    let mut out = Sheet {
+    let mut out = SheetScene {
         origin,
         bounds,
         vertices: Vec::new(),
@@ -132,16 +131,19 @@ fn relative(position: [f32; 2], origin: Point) -> [f32; 2] {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::OnceLock;
+
+    use test_case::test_case;
+
+    use super::*;
 
     const SCHEMATIC_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../viewer-drop/board/midi8knob.kicad_sch"
     );
 
-    fn hand_off() -> &'static Schematic {
-        static SCHEMATIC: OnceLock<Schematic> = OnceLock::new();
+    fn hand_off() -> &'static Sheet {
+        static SCHEMATIC: OnceLock<Sheet> = OnceLock::new();
         SCHEMATIC.get_or_init(|| {
             let source = std::fs::read_to_string(SCHEMATIC_PATH)
                 .expect("the hand-off schematic is in the repo");
@@ -190,19 +192,25 @@ mod tests {
             last.color,
             palette::of(SchematicLayer::Dnp).for_format(format)
         );
-        for layer in [
-            SchematicLayer::Device,
-            SchematicLayer::Wire,
-            SchematicLayer::GlobalLabel,
-            SchematicLayer::Reference,
-        ] {
-            let color = palette::of(layer).for_format(format);
-            assert!(
-                sheet.draws.iter().any(|d| d.color == color),
-                "{layer:?} is drawn"
-            );
-        }
         assert!(sheet.draws.iter().all(|d| (d.color[3] - 1.0).abs() < 1e-6));
+    }
+
+    #[test_case(SchematicLayer::Device; "bodies")]
+    #[test_case(SchematicLayer::Wire; "wires")]
+    #[test_case(SchematicLayer::GlobalLabel; "global labels")]
+    #[test_case(SchematicLayer::Reference; "references")]
+    fn the_hand_off_sheet_draws_in_the_layers_colour(layer: SchematicLayer) {
+        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let sheet = build(hand_off(), format).expect("a sheet with content");
+        let color = palette::of(layer).for_format(format);
+        // The test_case wrapper is where a function-level expect would
+        // land, so the expect sits on the comparison itself.
+        #[expect(
+            clippy::float_cmp,
+            reason = "the colours compared were produced by the same conversion of the same bytes, so they are bit-identical"
+        )]
+        let drawn = sheet.draws.iter().any(|d| d.color == color);
+        assert!(drawn);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //!
 //! [`parse_board`] reads a KiCad 9 or 10 `.kicad_pcb` into a
 //! [`model::Board`]; [`parse_schematic`] reads a `.kicad_sch` of the same
-//! generations into a [`schematic::model::Schematic`], its symbols from the
+//! generations into a [`schematic::model::Sheet`], its symbols from the
 //! file's own `lib_symbols`. [`tessellate::Tessellator`] turns a board's
 //! copper and outline into triangles, [`tessellate::schematic`] a sheet's
 //! symbols, wires and labels. Elements the models have no place for

@@ -19,8 +19,8 @@ use crate::font::{self, Placement, block_size};
 use crate::geometry::{Arc, Bounds, Transform};
 use crate::model::{Font, Horizontal, Justify, Point, Size, Vertical};
 use crate::schematic::model::{
-    Fill, FlagShape, Frame, Graphic, Label, LabelKind, LibrarySymbol, Pin, PinShape, Schematic,
-    Sheet, SheetPin, Spin, Symbol, SymbolShape, TextItem, label_vertical,
+    Fill, FlagShape, Frame, Graphic, Label, LabelKind, LibrarySymbol, Mirror, Pin, PinShape, Sheet,
+    SheetPin, SheetSymbol, Spin, Symbol, SymbolShape, TextItem, label_vertical,
 };
 
 /// KiCad's default line width, 6 mils: symbol strokes written as 0, pin
@@ -43,8 +43,10 @@ const TEXT_OFFSET_RATIO: f64 = 0.15;
 /// The do-not-populate cross: three default line widths.
 const DNP_STROKE: f64 = 3.0 * DEFAULT_LINE_WIDTH;
 
-/// The colour classes of a sheet, KiCad's schematic layers, in the order
-/// they are painted from the bottom up ([`SchematicLayer::DRAW_ORDER`]).
+/// The colour classes of a sheet, KiCad's schematic layers, declared in
+/// the order they are painted from the bottom up: a layer compares less
+/// than every layer painted over it, which is the order
+/// [`Tessellator::sheet`] hands them out in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SchematicLayer {
     /// Symbol body fills.
@@ -68,7 +70,7 @@ pub enum SchematicLayer {
     /// Junction dots.
     Junction,
     /// Sheet symbol borders.
-    Sheet,
+    SheetSymbol,
     /// Sheet names.
     SheetName,
     /// Sheet file names.
@@ -91,39 +93,11 @@ pub enum SchematicLayer {
     Dnp,
 }
 
-impl SchematicLayer {
-    /// Every layer, bottom first: what is painted later covers what came
-    /// before.
-    pub const DRAW_ORDER: [SchematicLayer; 21] = [
-        SchematicLayer::Background,
-        SchematicLayer::Device,
-        SchematicLayer::Notes,
-        SchematicLayer::Bus,
-        SchematicLayer::Wire,
-        SchematicLayer::LocalLabel,
-        SchematicLayer::GlobalLabel,
-        SchematicLayer::HierLabel,
-        SchematicLayer::NoConnect,
-        SchematicLayer::Junction,
-        SchematicLayer::Sheet,
-        SchematicLayer::SheetName,
-        SchematicLayer::SheetFile,
-        SchematicLayer::SheetLabel,
-        SchematicLayer::Pin,
-        SchematicLayer::PinName,
-        SchematicLayer::PinNumber,
-        SchematicLayer::Fields,
-        SchematicLayer::Value,
-        SchematicLayer::Reference,
-        SchematicLayer::Dnp,
-    ];
-}
-
 impl Tessellator {
-    /// Every layer of `sheet` that has something on it, in
-    /// [`SchematicLayer::DRAW_ORDER`].
+    /// Every layer of `sheet` that has something on it, in draw order
+    /// (the [`SchematicLayer`] order).
     #[must_use]
-    pub fn sheet(&self, sheet: &Schematic) -> Vec<(SchematicLayer, Mesh)> {
+    pub fn sheet(&self, sheet: &Sheet) -> Vec<(SchematicLayer, Mesh)> {
         let mut layers = Layers::new(self.tolerance);
         for symbol in &sheet.symbols {
             if let Some(library) = sheet.library_symbol(symbol) {
@@ -163,7 +137,7 @@ impl Tessellator {
         for label in &sheet.labels {
             layers.label(label);
         }
-        for sheet_symbol in &sheet.sheets {
+        for sheet_symbol in &sheet.sheet_symbols {
             layers.sheet_symbol(sheet_symbol);
         }
         for text in &sheet.texts {
@@ -173,12 +147,7 @@ impl Tessellator {
             }
         }
         for graphic in &sheet.graphics {
-            layers.graphic(
-                graphic,
-                &Transform::identity().into(),
-                SchematicLayer::Notes,
-                None,
-            );
+            layers.graphic(graphic, &Carried::sheet(), SchematicLayer::Notes, None);
         }
         layers.finish()
     }
@@ -186,7 +155,7 @@ impl Tessellator {
     /// The box around everything `sheet` draws, or `None` for an empty
     /// sheet.
     #[must_use]
-    pub fn sheet_bounds(&self, sheet: &Schematic) -> Option<Bounds> {
+    pub fn sheet_bounds(&self, sheet: &Sheet) -> Option<Bounds> {
         self.sheet(sheet)
             .iter()
             .filter_map(|(_, mesh)| mesh.bounds())
@@ -214,19 +183,15 @@ fn placement(font: &Font, justify: Justify, position: Point, angle: f64) -> Plac
 }
 
 /// A frame to carry points by: a symbol's [`Frame`], or the identity for
-/// a sheet-level item.
+/// an item drawn on the sheet itself.
 struct Carried(Frame);
 
-impl From<Transform> for Carried {
-    fn from(_: Transform) -> Self {
-        // The identity frame: sheet points are already on the sheet.
-        // `Frame::new` flips y for the library's axis; a sheet-level item
-        // is not in that frame, so the flip is undone by a mirror in x.
-        Carried(Frame::new(
-            Point::default(),
-            0.0,
-            crate::schematic::model::Mirror::X,
-        ))
+impl Carried {
+    /// The frame of an item on the sheet: its points are already sheet
+    /// points. `Frame::new` flips y for the library's axis, so the flip
+    /// is undone by a mirror in x.
+    fn sheet() -> Self {
+        Carried(Frame::new(Point::default(), 0.0, Mirror::X))
     }
 }
 
@@ -258,20 +223,14 @@ impl Layers {
             .or_insert_with(|| MeshBuilder::new(tolerance))
     }
 
+    /// The meshes in draw order: the map iterates its keys in the
+    /// layers' order, which is the draw order.
     fn finish(self) -> Vec<(SchematicLayer, Mesh)> {
-        let mut meshes: Vec<(SchematicLayer, Mesh)> = self
-            .builders
+        self.builders
             .into_iter()
             .map(|(layer, builder)| (layer, builder.finish()))
             .filter(|(_, mesh)| !mesh.is_empty())
-            .collect();
-        meshes.sort_by_key(|(layer, _)| {
-            SchematicLayer::DRAW_ORDER
-                .iter()
-                .position(|l| l == layer)
-                .unwrap_or(usize::MAX)
-        });
-        meshes
+            .collect()
     }
 
     /// Text at `placement` on `layer`; a stroke of one point is a dot.
@@ -625,8 +584,9 @@ impl Layers {
     /// and the flag of a global or hierarchical one.
     fn label(&mut self, label: &Label) {
         let spin = label.spin();
-        let h = label.font.size.height;
-        let pen = font::pen_width(&label.font);
+        let text = &label.text;
+        let h = text.font.size.height;
+        let pen = font::pen_width(&text.font);
         let (layer, distance) = match label.kind {
             LabelKind::Local => (SchematicLayer::LocalLabel, TEXT_OFFSET_RATIO * h + pen),
             LabelKind::Global(shape) => {
@@ -641,7 +601,7 @@ impl Layers {
             }
             LabelKind::Hierarchical(_) => (
                 SchematicLayer::HierLabel,
-                TEXT_OFFSET_RATIO * h + label.font.size.width,
+                TEXT_OFFSET_RATIO * h + text.font.size.width,
             ),
         };
         // A local label stands off its wire, across the reading
@@ -650,17 +610,17 @@ impl Layers {
         let anchor = match label.kind {
             LabelKind::Local => match spin {
                 Spin::Right | Spin::Left => Point {
-                    x: label.at.x,
-                    y: label.at.y - distance,
+                    x: text.at.x,
+                    y: text.at.y - distance,
                 },
                 Spin::Up | Spin::Bottom => Point {
-                    x: label.at.x - distance,
-                    y: label.at.y,
+                    x: text.at.x - distance,
+                    y: text.at.y,
                 },
             },
             _ => Point {
-                x: label.at.x + dir.x * distance,
-                y: label.at.y + dir.y * distance,
+                x: text.at.x + dir.x * distance,
+                y: text.at.y + dir.y * distance,
             },
         };
         let justify = Justify {
@@ -668,16 +628,16 @@ impl Layers {
             vertical: label_vertical(label.kind),
             mirror: false,
         };
-        let placement = placement(&label.font, justify, anchor, spin.angle());
-        self.text(layer, &label.text, &placement);
+        let placement = placement(&text.font, justify, anchor, spin.angle());
+        self.text(layer, &text.text, &placement);
         match label.kind {
             LabelKind::Local => {}
             LabelKind::Global(shape) => {
-                let outline = global_flag(&label.text, &label.font, shape, spin, label.at);
+                let outline = global_flag(&text.text, &text.font, shape, spin, text.at);
                 self.on(layer).stroke(&outline, pen, true);
             }
             LabelKind::Hierarchical(shape) => {
-                let outline = hierarchical_flag(h, shape, spin, label.at);
+                let outline = hierarchical_flag(h, shape, spin, text.at);
                 self.on(layer).stroke(&outline, pen, true);
             }
         }
@@ -685,7 +645,7 @@ impl Layers {
 
     /// A sheet symbol: its border, its fields, and its pins as inverted
     /// hierarchical flags with the text inside the sheet.
-    fn sheet_symbol(&mut self, sheet: &Sheet) {
+    fn sheet_symbol(&mut self, sheet: &SheetSymbol) {
         let corners = [
             sheet.at,
             Point {
@@ -702,7 +662,8 @@ impl Layers {
             },
         ];
         let width = default(sheet.width, DEFAULT_LINE_WIDTH);
-        self.on(SchematicLayer::Sheet).stroke(&corners, width, true);
+        self.on(SchematicLayer::SheetSymbol)
+            .stroke(&corners, width, true);
         for field in &sheet.fields {
             if field.text.hidden {
                 continue;
@@ -722,8 +683,9 @@ impl Layers {
     }
 
     fn sheet_pin(&mut self, pin: &SheetPin) {
+        let text = &pin.text;
         // The pin's edge, from its angle, puts the text inside the sheet.
-        let spin = match (pin.rotation.rem_euclid(360.0) / 90.0).round() {
+        let spin = match (text.rotation.rem_euclid(360.0) / 90.0).round() {
             r if (r - 1.0).abs() < 0.5 => Spin::Bottom,
             r if (r - 2.0).abs() < 0.5 => Spin::Right,
             r if (r - 3.0).abs() < 0.5 => Spin::Up,
@@ -736,22 +698,22 @@ impl Layers {
             FlagShape::Output => FlagShape::Input,
             other => other,
         };
-        let h = pin.font.size.height;
-        let pen = font::pen_width(&pin.font);
-        let distance = TEXT_OFFSET_RATIO * h + pin.font.size.width;
+        let h = text.font.size.height;
+        let pen = font::pen_width(&text.font);
+        let distance = TEXT_OFFSET_RATIO * h + text.font.size.width;
         let dir = spin.direction();
         let anchor = Point {
-            x: pin.at.x + dir.x * distance,
-            y: pin.at.y + dir.y * distance,
+            x: text.at.x + dir.x * distance,
+            y: text.at.y + dir.y * distance,
         };
         let justify = Justify {
             horizontal: spin.justify(),
             vertical: Vertical::Center,
             mirror: false,
         };
-        let placement = placement(&pin.font, justify, anchor, spin.angle());
-        self.text(SchematicLayer::SheetLabel, &pin.name, &placement);
-        let outline = hierarchical_flag(h, shape, spin, pin.at);
+        let placement = placement(&text.font, justify, anchor, spin.angle());
+        self.text(SchematicLayer::SheetLabel, &text.text, &placement);
+        let outline = hierarchical_flag(h, shape, spin, text.at);
         self.on(SchematicLayer::SheetLabel)
             .stroke(&outline, pen, true);
     }
@@ -857,9 +819,14 @@ fn placed_text_centre(frame: &Frame, text: &TextItem) -> (Point, f64) {
         Vertical::Bottom => -block.height / 2.0,
     };
     let turned = Transform::new(Point::default(), text.rotation).rotate(Point { x: dx, y: dy });
+    // The offset was laid out with y down, as text is; the anchor's
+    // numbers are the library's, where y is up. KiCad mirrors the box
+    // about the anchor here (SCH_FIELD::GetBoundingBox) before the
+    // frame's own flip, so a right-justified vertical field on a turned
+    // symbol ends at its anchor instead of starting there.
     let centre = frame.apply(Point {
         x: text.at.x + turned.x,
-        y: text.at.y + turned.y,
+        y: text.at.y - turned.y,
     });
     let angle = text.rotation.rem_euclid(360.0);
     let horizontal = angle.rem_euclid(180.0) < 1.0 || angle.rem_euclid(180.0) > 179.0;

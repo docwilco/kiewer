@@ -549,9 +549,19 @@ impl DesignHead {
     /// name among equals, or `None` for a revision without one.
     #[must_use]
     pub fn board(&self) -> Option<&TreeEntry> {
+        self.shallowest("kicad_pcb")
+    }
+
+    /// The files with `extension`, in path order.
+    fn with_extension<'a>(&'a self, extension: &'a str) -> impl Iterator<Item = &'a TreeEntry> {
         self.files
             .iter()
-            .filter(|entry| entry.path.extension().as_deref() == Some("kicad_pcb"))
+            .filter(move |entry| entry.path.extension().as_deref() == Some(extension))
+    }
+
+    /// The shallowest file with `extension`, first by name among equals.
+    fn shallowest<'a>(&'a self, extension: &'a str) -> Option<&'a TreeEntry> {
+        self.with_extension(extension)
             .min_by_key(|entry| (entry.path.depth(), &entry.path))
     }
 
@@ -568,25 +578,16 @@ impl DesignHead {
                 .rsplit_once('.')
                 .map(|(stem, _)| stem.to_owned())
         };
-        let sheets = || {
-            self.files
-                .iter()
-                .filter(|entry| entry.path.extension().as_deref() == Some("kicad_sch"))
-        };
         let named_like = |extension: &str| {
-            let anchor = self
-                .files
-                .iter()
-                .filter(|entry| entry.path.extension().as_deref() == Some(extension))
-                .min_by_key(|entry| (entry.path.depth(), &entry.path))?;
+            let anchor = self.shallowest(extension)?;
             let wanted = stem(anchor)?;
-            sheets()
+            self.with_extension("kicad_sch")
                 .filter(|entry| entry.path.depth() == anchor.path.depth())
                 .find(|entry| stem(entry).as_deref() == Some(wanted.as_str()))
         };
         named_like("kicad_pro")
             .or_else(|| named_like("kicad_pcb"))
-            .or_else(|| sheets().min_by_key(|entry| (entry.path.depth(), &entry.path)))
+            .or_else(|| self.shallowest("kicad_sch"))
     }
 }
 

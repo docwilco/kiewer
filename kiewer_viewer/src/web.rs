@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 use crate::render::atlas_pipeline::Coverage;
 use crate::render::{Backend, MSAA_SAMPLES, Renderer, Target, device_descriptor};
 use crate::scene::{Scene, clear_color};
-use crate::schematic::{self, Sheet};
+use crate::schematic::{self, SheetScene};
 use crate::view::{Layer, Side, View, ViewState, palette};
 
 /// The viewer over one canvas.
@@ -39,7 +39,7 @@ pub struct Viewer {
     scene: Option<Scene>,
     /// The sheet shown instead of a board, when a schematic was loaded
     /// last: its own draws and paper colour, no views.
-    sheet: Option<Sheet>,
+    sheet: Option<SheetScene>,
     /// The view in force and the toggles on it; the page's layer panel
     /// and the URL fragment mirror it.
     state: ViewState,
