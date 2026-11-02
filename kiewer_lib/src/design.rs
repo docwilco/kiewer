@@ -16,6 +16,7 @@ use crate::error::{Error, Refusal, Result};
 use crate::revision::{
     Metadata, RevisionDraft, RevisionHash, TreeEntry, TreeHash, TreePath, revision_hash, tree_hash,
 };
+use crate::roles::Visibility;
 
 /// A design's row id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, sqlx::Type)]
@@ -97,7 +98,9 @@ impl FromStr for Slug {
     }
 }
 
-/// A design as its row has it.
+/// A design as its row has it. The owner is the one person it belongs
+/// to (`roles`: exactly one, since the column is never null); the other
+/// roles are rows of their own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Design {
     pub id: DesignId,
@@ -105,36 +108,57 @@ pub struct Design {
     pub slug: Slug,
     pub name: String,
     pub default_branch: String,
+    pub visibility: Visibility,
 }
 
-type DesignRow = (DesignId, AccountId, String, String, String);
+/// A design's row, read by column name so the columns can sit inside a
+/// wider row (a page's, a listing's) unchanged.
+#[derive(sqlx::FromRow)]
+pub(crate) struct DesignRow {
+    id: DesignId,
+    owner_id: AccountId,
+    slug: String,
+    name: String,
+    default_branch: String,
+    visibility: String,
+}
 
-fn design_from_row((id, owner_id, slug, name, default_branch): DesignRow) -> Design {
-    Design {
-        id,
-        owner_id,
-        slug: Slug::from_row(slug),
-        name,
-        default_branch,
+/// The columns every read of a design selects, under [`DesignRow`]'s
+/// names, from a `design` aliased `d`.
+pub(crate) const DESIGN_COLUMNS: &str =
+    "d.id, d.owner_id, d.slug, d.name, d.default_branch, d.visibility";
+
+impl TryFrom<DesignRow> for Design {
+    type Error = Error;
+
+    fn try_from(row: DesignRow) -> Result<Self> {
+        Ok(Design {
+            id: row.id,
+            owner_id: row.owner_id,
+            slug: Slug::from_row(row.slug),
+            name: row.name,
+            default_branch: row.default_branch,
+            visibility: Visibility::from_row(&row.visibility)?,
+        })
     }
 }
 
-/// `owner`'s designs, newest first: what the upload form offers to add a
-/// revision to.
+/// `owner`'s designs, newest first.
 ///
 /// # Errors
 ///
-/// [`Error::Db`] when Postgres refuses.
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row's
+/// visibility is not one, which the schema forbids.
 pub async fn by_owner(db: &PgPool, owner: AccountId) -> Result<Vec<Design>> {
-    // One read on the pool: a form's listing, part of no write.
-    let rows: Vec<DesignRow> = sqlx::query_as(
-        "SELECT id, owner_id, slug, name, default_branch FROM design
-         WHERE owner_id = $1 ORDER BY created_at DESC, id DESC",
-    )
+    // One read on the pool: a listing, part of no write.
+    let rows: Vec<DesignRow> = sqlx::query_as(&format!(
+        "SELECT {DESIGN_COLUMNS} FROM design d
+         WHERE d.owner_id = $1 ORDER BY d.created_at DESC, d.id DESC"
+    ))
     .bind(owner)
     .fetch_all(db)
     .await?;
-    Ok(rows.into_iter().map(design_from_row).collect())
+    rows.into_iter().map(Design::try_from).collect()
 }
 
 /// `owner`'s design at `slug`, within the upload's transaction. Not
@@ -144,21 +168,42 @@ pub async fn by_owner(db: &PgPool, owner: AccountId) -> Result<Vec<Design>> {
 ///
 /// # Errors
 ///
-/// [`Error::Db`] when Postgres refuses.
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when the
+/// row's visibility is not one, which the schema forbids.
 pub async fn find_owned(
     tx: &mut PgConnection,
     owner: AccountId,
     slug: &Slug,
 ) -> Result<Option<Design>> {
-    let row: Option<DesignRow> = sqlx::query_as(
-        "SELECT id, owner_id, slug, name, default_branch FROM design
-         WHERE owner_id = $1 AND slug = $2",
-    )
+    let row: Option<DesignRow> = sqlx::query_as(&format!(
+        "SELECT {DESIGN_COLUMNS} FROM design d WHERE d.owner_id = $1 AND d.slug = $2"
+    ))
     .bind(owner)
     .bind(slug.as_str())
     .fetch_optional(tx)
     .await?;
-    Ok(row.map(design_from_row))
+    row.map(Design::try_from).transpose()
+}
+
+/// The design at `/{owner}/{slug}`, within the upload's transaction: the
+/// one a push names, whoever pushes (`roles::require` says whether they
+/// may). Not locked, for the reason [`find_owned`] gives.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when the
+/// row's visibility is not one, which the schema forbids.
+pub async fn find_at(tx: &mut PgConnection, owner: &Handle, slug: &Slug) -> Result<Option<Design>> {
+    let row: Option<DesignRow> = sqlx::query_as(&format!(
+        "SELECT {DESIGN_COLUMNS} FROM design d
+         JOIN account a ON a.id = d.owner_id
+         WHERE a.handle = $1 AND d.slug = $2"
+    ))
+    .bind(owner.as_str())
+    .bind(slug.as_str())
+    .fetch_optional(tx)
+    .await?;
+    row.map(Design::try_from).transpose()
 }
 
 /// A new design of `owner` at `slug`, within the upload's transaction.
@@ -188,6 +233,7 @@ pub async fn create(
             slug: slug.clone(),
             name: name.to_owned(),
             default_branch: DEFAULT_BRANCH.to_owned(),
+            visibility: Visibility::Public,
         }),
         Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
             Err(Error::Refused(Refusal::SlugTaken {
@@ -605,17 +651,14 @@ pub async fn show(db: &PgPool, handle: &str, slug: &str) -> Result<Option<Design
     // written.
     #[derive(sqlx::FromRow)]
     struct HeadRow {
-        id: DesignId,
-        owner_id: AccountId,
-        slug: String,
-        name: String,
-        default_branch: String,
+        #[sqlx(flatten)]
+        design: DesignRow,
         handle: String,
         #[sqlx(flatten)]
         revision: RevisionRow,
     }
     let row: Option<HeadRow> = sqlx::query_as(&format!(
-        "SELECT d.id, d.owner_id, d.slug, d.name, d.default_branch, a.handle, {REVISION_COLUMNS}
+        "SELECT {DESIGN_COLUMNS}, a.handle, {REVISION_COLUMNS}
          FROM design d
          JOIN account a ON a.id = d.owner_id
          JOIN branch b ON b.design_id = d.id AND b.name = d.default_branch
@@ -632,16 +675,11 @@ pub async fn show(db: &PgPool, handle: &str, slug: &str) -> Result<Option<Design
     };
     let revision = Revision::try_from(row.revision)?;
     let files = entries(db, revision.tree).await?;
+    let design = Design::try_from(row.design)?;
     Ok(Some(DesignHead {
-        design: Design {
-            id: row.id,
-            owner_id: row.owner_id,
-            slug: Slug::from_row(row.slug),
-            name: row.name,
-            default_branch: row.default_branch.clone(),
-        },
+        branch: design.default_branch.clone(),
+        design,
         owner: Handle::from_row(row.handle),
-        branch: row.default_branch,
         revision,
         files,
     }))

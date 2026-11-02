@@ -87,6 +87,12 @@ pub struct DesignView {
     pub files: Vec<FileView>,
     /// The revision's schematic page, when it holds a sheet.
     pub schematic_url: Option<String>,
+    /// `public` or `unlisted`, as the summary says it. Text, like every
+    /// field here: the page is the same for everyone (ADR 0003), so it
+    /// shows the state and the people page holds the change.
+    pub visibility: String,
+    /// The design's people page.
+    pub people_url: String,
 }
 
 /// The viewer page: the hand-off board at `/viewer`, a design's revision

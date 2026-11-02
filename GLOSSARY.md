@@ -89,8 +89,20 @@ _Avoid_: login, token
 **Session key**:
 The stored hash the sessions page names a session by, as against the session id the cookie carries.
 
+**Public**:
+A design every listing may show: the home page's recent designs, its owner's page.
+_Avoid_: visible, listed
+
 **Unlisted**:
 A design anyone with the link can open and nothing lists.
+
+**Transfer**:
+The owner handing a design to another person, who becomes its owner while the previous owner stays on as an admin.
+_Avoid_: reassign, hand over
+
+**People page**:
+Where an admin or the owner manages who has which role on a design.
+_Avoid_: members page, collaborators page, access settings
 
 ### Viewing
 

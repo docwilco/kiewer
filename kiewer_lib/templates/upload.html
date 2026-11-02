@@ -19,8 +19,8 @@
   <label>Design
     <select name="design">
       <option value="">A new design</option>
-      {% for design in designs %}
-      <option value="{{ design.slug }}">{{ design.name }} ({{ design.slug }})</option>
+      {% for member in designs %}
+      <option value="{{ member.path() }}">{{ member.design.name }} ({{ member.path() }})</option>
       {% endfor %}
     </select>
   </label>

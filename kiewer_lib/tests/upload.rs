@@ -214,7 +214,8 @@ async fn uploading_the_hand_off_files_makes_a_design_shown_with_the_viewer() {
     // A second upload onto the design: a new head with the first as parent.
     let form = browser.get("/upload").await;
     assert!(
-        form.body.contains(r#"<option value="midi8knob">"#),
+        form.body
+            .contains(&format!(r#"<option value="{handle}/midi8knob">"#)),
         "the design is offered: {}",
         form.body
     );
@@ -222,7 +223,7 @@ async fn uploading_the_hand_off_files_makes_a_design_shown_with_the_viewer() {
         .post_multipart(
             "/upload",
             &[
-                Part::text("design", "midi8knob"),
+                Part::text("design", &format!("{handle}/midi8knob")),
                 Part::text("message", "schematic only"),
                 Part::file("midi8knob.kicad_sch", SCHEMATIC),
             ],

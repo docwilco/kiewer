@@ -26,6 +26,7 @@ use crate::blob::{BlobHash, BlobStore};
 use crate::design::{self, Design, Slug};
 use crate::error::{Error, Refusal, Result};
 use crate::revision::{Metadata, RevisionDraft, RevisionHash, TreeEntry, TreePath};
+use crate::roles::{self, Role};
 
 /// The caps an upload is measured against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,8 +288,10 @@ pub enum Target {
     /// A new design of the author's, named `name` or after the project
     /// folder's file, with a slug from the name.
     New { name: Option<String> },
-    /// The head of the default branch of the author's design at `slug`.
-    Existing { slug: Slug },
+    /// The head of the default branch of the design at `/{owner}/{slug}`,
+    /// which the author has at least the collaborator role on
+    /// (`roles::require`).
+    Existing { owner: Handle, slug: Slug },
 }
 
 /// What a push made.
@@ -378,7 +381,8 @@ fn parse(kind: FileKind, path: &TreePath, bytes: &[u8]) -> Result<Option<Metadat
 /// # Errors
 ///
 /// [`Error::Refused`] for every reason the uploader can act on
-/// ([`Refusal`]); [`Error::Io`], [`Error::Db`] and the blob store's own
+/// ([`Refusal`]); [`Error::Forbidden`] for a push to a design the author
+/// has no role on; [`Error::Io`], [`Error::Db`] and the blob store's own
 /// errors otherwise.
 pub async fn push(
     db: &PgPool,
@@ -500,14 +504,15 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Push
         design::record_blob(&mut tx, &entry.blob, entry.size).await?;
     }
     let (design, created) = match target {
-        Target::Existing { slug } => {
-            let design = design::find_owned(&mut tx, author.account_id, &slug)
+        Target::Existing { owner, slug } => {
+            let design = design::find_at(&mut tx, &owner, &slug)
                 .await?
                 .ok_or_else(|| {
                     Error::Refused(Refusal::NoSuchDesign {
-                        slug: slug.to_string(),
+                        slug: format!("{owner}/{slug}"),
                     })
                 })?;
+            roles::require(&mut *tx, design.id, author.account_id, Role::Collaborator).await?;
             (design, false)
         }
         Target::New { name } => {

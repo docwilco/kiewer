@@ -10,6 +10,7 @@ pub mod design;
 pub mod error;
 mod hex;
 pub mod revision;
+pub mod roles;
 pub mod server;
 pub mod session;
 pub mod upload;

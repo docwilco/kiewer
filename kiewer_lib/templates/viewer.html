@@ -26,6 +26,9 @@
   #design a { color: inherit; }
   #design dl { display: grid; grid-template-columns: max-content auto; gap: 0.2em 1em; margin: 0.5em 0; }
   #design dd { margin: 0; }
+  /* Visibility and the people link, under the details (roles, #21). */
+  #people { margin: 0; padding: 0.3em 0.8em; border-top: 1px solid #444; opacity: 0.8; }
+  #people a { color: inherit; }
   /* The font warning and picker (docs/v1-scope.md, Fonts): over the
      stage's top right, one line per face the browser lacks. */
   #fonts { position: absolute; right: 0.8em; top: 0.8em; max-width: 28em; padding: 0.6em 0.8em; background: #4a3f1e; border-radius: 4px; }
@@ -120,6 +123,7 @@
   {% endfor %}
   </ul>
 </details>
+<p id="people">{{ design.visibility }} · <a href="{{ design.people_url }}">people</a></p>
 {% endif %}
 <p hidden><small>{{ build }}</small></p>
 {% if !embedded %}

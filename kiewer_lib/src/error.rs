@@ -9,6 +9,7 @@ use crate::account::Handle;
 use crate::auth::Provider;
 use crate::blob::BlobHash;
 use crate::blob::gcs::BlobOp;
+use crate::roles::Role;
 
 /// Every way the library fails. Variants are failure kinds with context,
 /// never one per call site.
@@ -97,6 +98,12 @@ pub enum Error {
     /// choosing.
     #[display("upload refused: {_0}")]
     Refused(#[error(not(source))] Refusal),
+    /// The signed-in person's role on the design is below what the write
+    /// needs, or they have none (`roles::require`); the web layer answers
+    /// 403 with this message.
+    #[display("this needs the {needed} role on the design")]
+    #[from(ignore)]
+    Forbidden { needed: Role },
 }
 
 /// Why an upload was refused (docs/v1-scope.md, Uploads). The message is
@@ -127,8 +134,9 @@ pub enum Refusal {
     /// A new design's slug is one the owner already has.
     #[display("you already have a design at {slug}; give this one another name")]
     SlugTaken { slug: String },
-    /// The upload names a design the person does not have.
-    #[display("you have no design {slug}")]
+    /// The upload names a design that does not exist; `slug` is the path
+    /// as the form carried it (`handle/slug`).
+    #[display("there is no design {slug}")]
     NoSuchDesign { slug: String },
     /// The branch's head moved while the upload was in flight. Pending
     /// revisions (docs/v1-scope.md, Push) are not built yet, so the upload
@@ -231,7 +239,10 @@ impl Error {
             Error::Env { .. } | Error::GcsClient { .. } => Exit::Config,
             Error::Db(_) | Error::Migrate(_) => Exit::Db,
             Error::Template(_) => Exit::Template,
-            Error::Failed { .. } | Error::HandleTaken(_) | Error::Refused(_) => Exit::Failed,
+            Error::Failed { .. }
+            | Error::HandleTaken(_)
+            | Error::Refused(_)
+            | Error::Forbidden { .. } => Exit::Failed,
             Error::OAuth { .. } | Error::Http(_) => Exit::Upstream,
         }
     }
