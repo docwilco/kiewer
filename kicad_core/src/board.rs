@@ -536,13 +536,13 @@ impl Parser {
 /// A boolean child: `(name yes)` or `(name no)` as KiCad 8 and later write
 /// them, or a bare `(name)` from older files, which meant yes. Absent is
 /// no. The one reading for `hide`, `free`, `bold` and `italic`.
-fn flag(node: &Node, name: &str) -> bool {
+pub(crate) fn flag(node: &Node, name: &str) -> bool {
     node.child(name)
         .is_some_and(|child| child.atom_opt(0) != Some("no"))
 }
 
 /// The first value of the child `name`, when the child is present.
-fn optional_text(node: &Node, name: &str) -> Result<Option<String>> {
+pub(crate) fn optional_text(node: &Node, name: &str) -> Result<Option<String>> {
     node.child(name)
         .map(|child| child.atom(0).map(str::to_owned))
         .transpose()
@@ -550,7 +550,7 @@ fn optional_text(node: &Node, name: &str) -> Result<Option<String>> {
 
 /// The first value of the child `name` as a number, when the child is
 /// present.
-fn optional_number(node: &Node, name: &str) -> Result<Option<f64>> {
+pub(crate) fn optional_number(node: &Node, name: &str) -> Result<Option<f64>> {
     node.child(name).map(|child| child.number(0)).transpose()
 }
 
@@ -565,7 +565,7 @@ fn clearances(node: &Node) -> Result<Clearances> {
 }
 
 /// A `(start x y)`, `(end x y)`, `(xy x y)`: two numbers.
-fn point(node: &Node) -> Result<Point> {
+pub(crate) fn point(node: &Node) -> Result<Point> {
     Ok(Point {
         x: node.number(0)?,
         y: node.number(1)?,
@@ -573,7 +573,7 @@ fn point(node: &Node) -> Result<Point> {
 }
 
 /// A `(size w h)`.
-fn size(node: &Node) -> Result<Size> {
+pub(crate) fn size(node: &Node) -> Result<Size> {
     Ok(Size {
         width: node.number(0)?,
         height: node.number(1)?,
@@ -582,7 +582,7 @@ fn size(node: &Node) -> Result<Size> {
 
 /// An `(at x y [rotation])`. KiCad 7 wrote `(at x y unlocked)`; that word
 /// is not a rotation and is skipped.
-fn at(node: &Node) -> Result<(Point, f64)> {
+pub(crate) fn at(node: &Node) -> Result<(Point, f64)> {
     let rotation = match node.atom_opt(2) {
         None | Some("unlocked") => 0.0,
         Some(_) => node.number(2)?,

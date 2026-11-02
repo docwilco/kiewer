@@ -293,3 +293,185 @@ fn a_mutated_number_in_a_required_field_is_an_error() {
     let error = parse_board(&mutated).expect_err("every number is a word");
     assert!(error.to_string().contains("found \"abc\""), "{error}");
 }
+
+// The schematic parser refuses what the board parser refuses, the same
+// way: a position on every malformed field, the version named when it is
+// too old, no panic on a cut or mutated file.
+
+use kicad_core::{MIN_SCHEMATIC_VERSION, parse_schematic};
+
+const SCHEMATIC_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../viewer-drop/board/midi8knob.kicad_sch"
+);
+
+fn schematic_source() -> &'static str {
+    static SOURCE: OnceLock<String> = OnceLock::new();
+    SOURCE.get_or_init(|| {
+        std::fs::read_to_string(SCHEMATIC_PATH).expect("the hand-off schematic is in the repo")
+    })
+}
+
+/// A small well-formed sheet to mutate one field at a time.
+fn tiny_sheet(version: u32, extra: &str) -> String {
+    format!(
+        r#"(kicad_sch (version {version}) (generator "eeschema")
+  (lib_symbols
+    (symbol "Device:R" (symbol "R_0_1" (rectangle (start -1 -2) (end 1 2) (stroke (width 0.254) (type default)) (fill (type none))))
+      (symbol "R_1_1" (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27))))))))
+  (wire (pts (xy 0 0) (xy 10 0)) (stroke (width 0) (type default)) (uuid "w"))
+  {extra}
+)"#
+    )
+}
+
+fn schematic_error_of(source: &str) -> Error {
+    parse_schematic(source).expect_err("the schematic is refused")
+}
+
+#[test]
+fn the_tiny_sheet_itself_parses() {
+    let sch = parse_schematic(&tiny_sheet(MIN_SCHEMATIC_VERSION, "")).expect("parses");
+    assert_eq!(sch.wires.len(), 1);
+    assert_eq!(sch.library.len(), 1);
+}
+
+#[test_case(20_211_123; "KiCad 6")]
+#[test_case(20_231_120; "KiCad 8")]
+#[test_case(20_250_113; "the day before KiCad 9")]
+fn an_older_schematic_format_is_refused_naming_its_version(version: u32) {
+    let error = schematic_error_of(&tiny_sheet(version, ""));
+    assert_eq!(error, Error::UnsupportedSchematicVersion { version });
+    let message = error.to_string();
+    assert!(message.contains(&version.to_string()), "{message}");
+    assert!(message.starts_with("schematic format version"), "{message}");
+    assert!(message.contains("save it again"), "{message}");
+}
+
+#[test]
+fn the_schematic_version_is_checked_before_anything_else() {
+    let error = schematic_error_of("(kicad_sch (version 20231120) (symbol))");
+    assert_eq!(
+        error,
+        Error::UnsupportedSchematicVersion {
+            version: 20_231_120
+        }
+    );
+}
+
+#[test_case("(kicad_pcb (version 20241229))", "expected (kicad_sch ...), found (kicad_pcb ...)"; "a board")]
+#[test_case("(kicad_sch (generator \"x\"))", "expected (version ...) in (kicad_sch ...)"; "no version")]
+#[test_case("(kicad_sch (version abc))", "expected value 1 of (version ...) to be an integer, found \"abc\""; "version not a number")]
+#[test_case("(kicad_sch (version -5))", "expected the format version to be a positive integer, found -5"; "negative version")]
+fn a_file_that_is_not_a_schematic_is_refused_with_the_reason(source: &str, message: &str) {
+    let error = schematic_error_of(source).to_string();
+    assert!(error.ends_with(message), "{error}");
+}
+
+#[test_case(r#"(symbol (lib_id "Device:C") (at 0 0 0) (unit 1) (uuid "s"))"#, "the symbol names \"Device:C\", which is not in lib_symbols"; "a symbol the library lacks")]
+#[test_case(r#"(symbol (at 0 0 0) (unit 1) (uuid "s"))"#, "expected (lib_id ...) in (symbol ...)"; "a symbol without a lib_id")]
+#[test_case(r#"(symbol (lib_id "Device:R") (unit 1) (uuid "s"))"#, "expected (at ...) in (symbol ...)"; "a symbol without a position")]
+#[test_case(r#"(symbol (lib_id "Device:R") (at 0 0 0) (unit -1) (uuid "s"))"#, "expected a unit of 0 or more, found -1"; "a negative unit")]
+#[test_case(r#"(wire (stroke (width 0) (type default)) (uuid "w"))"#, "expected (pts ...) in (wire ...)"; "a wire without points")]
+#[test_case(r#"(wire (pts (xy 0) (xy 1 1)) (uuid "w"))"#, "expected at least 2 value(s) in (xy ...), found 1"; "a point with one coordinate")]
+#[test_case(r#"(junction (diameter 0) (uuid "j"))"#, "expected (at ...) in (junction ...)"; "a junction without a position")]
+#[test_case(r#"(global_label "X" (shape sideways) (at 0 0 0) (uuid "g"))"#, "expected a label shape"; "a label with an unknown shape")]
+#[test_case(r#"(label "X" (at 0 0 abc) (uuid "l"))"#, "expected value 3 of (at ...) to be a number, found \"abc\""; "a label rotation that is no number")]
+#[test_case(r#"(text "X" (effects (font (size 1 1))) (uuid "t"))"#, "expected (at ...) in (text ...)"; "a text without a position")]
+#[test_case(r#"(sheet (at 0 0) (uuid "s"))"#, "expected (size ...) in (sheet ...)"; "a sheet without a size")]
+#[test_case(r#"(polyline (pts (xy 0 0) (xy 1 x)) (uuid "p"))"#, "to be a number, found \"x\""; "a graphic with a bad coordinate")]
+#[test_case(r#"(arc (start 0 0) (end 1 1) (uuid "a"))"#, "expected (mid ...) in (arc ...)"; "an arc without a mid point")]
+#[test_case(r#"(circle (center 0 0) (uuid "c"))"#, "expected (radius ...) in (circle ...)"; "a circle without a radius")]
+fn a_missing_or_malformed_schematic_field_is_an_error_naming_it(item: &str, message: &str) {
+    let error = schematic_error_of(&tiny_sheet(MIN_SCHEMATIC_VERSION, item)).to_string();
+    assert!(error.contains(message), "{error}");
+    assert!(error.starts_with("line "), "{error}");
+}
+
+#[test_case(r#"(lib_symbols (symbol "Device:R" (symbol "R_0_1" (pin sideways line (at 0 0 0) (length 1)))))"#, "expected a pin electrical type"; "a pin with an unknown electrical type")]
+#[test_case(r#"(lib_symbols (symbol "Device:R" (symbol "R_0_1" (pin passive wavy (at 0 0 0) (length 1)))))"#, "expected a pin shape"; "a pin with an unknown shape")]
+#[test_case(r#"(lib_symbols (symbol "Device:R" (symbol "R_0_1" (pin passive line (length 1)))))"#, "expected (at ...) in (pin ...)"; "a pin without a position")]
+#[test_case(r#"(lib_symbols (symbol "Device:R" (symbol "R" (rectangle (start 0 0) (end 1 1)))))"#, "expected a sub-symbol named NAME_UNIT_STYLE, found \"R\""; "a sub-symbol without unit and style")]
+#[test_case(r#"(lib_symbols (symbol "Device:R" (symbol "R_a_1")))"#, "expected a sub-symbol named NAME_UNIT_STYLE, found \"R_a_1\""; "a sub-symbol with a bad unit")]
+#[test_case(r#"(paper "B9")"#, "expected a paper size"; "an unknown paper")]
+#[test_case(r#"(paper "User" 100)"#, "expected at least 3 value(s) in (paper ...), found 2"; "a user paper without a height")]
+fn a_bad_library_or_paper_is_an_error_naming_it(table: &str, message: &str) {
+    let source = format!("(kicad_sch (version {MIN_SCHEMATIC_VERSION}) {table})");
+    let error = schematic_error_of(&source).to_string();
+    assert!(error.contains(message), "{error}");
+}
+
+#[test]
+fn unknown_schematic_elements_are_skipped() {
+    let sch = parse_schematic(&tiny_sheet(
+        MIN_SCHEMATIC_VERSION,
+        r#"(image (at 0 0) (data "x")) (netclass_flag "" (length 2.54) (shape round) (at 0 0 0)) (text_box "t" (at 0 0 0) (size 1 1)) (rule_area (polyline (pts))) (table (column_count 1)) (unknown_future_thing 1 2 3)"#,
+    ))
+    .expect("unknown elements do not refuse the sheet");
+    assert_eq!(sch.wires.len(), 1);
+    assert_eq!(
+        sch.graphics.len(),
+        0,
+        "a rule area's polyline is not a free graphic"
+    );
+}
+
+/// Parses `text` as a schematic and reports whether it panicked.
+fn schematic_panics(text: &str) -> bool {
+    catch_unwind(AssertUnwindSafe(|| {
+        let _ = parse_schematic(text);
+    }))
+    .is_err()
+}
+
+#[test]
+fn schematic_truncations_at_regular_offsets_never_panic() {
+    let source = schematic_source();
+    let stride = 4_093;
+    let failures: Vec<usize> = (0..source.len())
+        .step_by(stride)
+        .filter(|&offset| schematic_panics(truncated(source, offset)))
+        .collect();
+    assert!(failures.is_empty(), "panics at offsets {failures:?}");
+}
+
+#[test]
+fn schematic_truncations_at_seeded_random_offsets_never_panic() {
+    let source = schematic_source();
+    let mut rng = Rng(0x5851_F42D_4C95_7F2D);
+    let offsets: Vec<usize> = (0..128).map(|_| rng.below(source.len())).collect();
+    let failures: Vec<usize> = offsets
+        .into_iter()
+        .filter(|&offset| schematic_panics(truncated(source, offset)))
+        .collect();
+    assert!(failures.is_empty(), "panics at offsets {failures:?}");
+}
+
+#[test]
+fn a_truncated_schematic_is_an_error_not_a_sheet() {
+    let source = schematic_source();
+    let half = truncated(source, source.len() / 2);
+    let error = parse_schematic(half).expect_err("half a sheet is refused");
+    // The cut lands wherever it lands: inside a string or between lists.
+    assert!(
+        error.to_string().contains("found the end of the text"),
+        "{error}"
+    );
+}
+
+#[test_case("abc", 1; "every number a word")]
+#[test_case("abc", 7; "every 7th number a word")]
+#[test_case("1e999", 1; "every number infinity")]
+#[test_case("1e999", 7; "every 7th number infinity")]
+#[test_case("-", 7; "every 7th number a sign")]
+#[test_case("", 7; "every 7th number nothing")]
+#[test_case("NaN", 7; "every 7th number NaN")]
+#[test_case("99999999999999999999999", 7; "every 7th number a huge integer")]
+#[test_case("-0.0", 1; "every number negative zero, still a number")]
+fn mutated_schematic_numbers_never_panic(mutant: &str, every: usize) {
+    let mutated = mutate_numbers(schematic_source(), every, mutant);
+    assert!(
+        !schematic_panics(&mutated),
+        "panicked with every {every}th number as {mutant:?}"
+    );
+}

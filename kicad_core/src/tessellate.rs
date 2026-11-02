@@ -27,6 +27,8 @@ use lyon_tessellation::{
     StrokeTessellator, StrokeVertex,
 };
 
+pub mod schematic;
+
 use crate::font::{self, Placement, TextShape};
 use crate::geometry::{Arc, Bounds, Transform, segments_for};
 use crate::model::{

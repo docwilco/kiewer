@@ -6,6 +6,10 @@ use derive_more::{Display, Error};
 /// Everything older is refused with [`Error::UnsupportedVersion`].
 pub const MIN_BOARD_VERSION: u32 = 20_241_229;
 
+/// The oldest schematic format this crate reads: KiCad 9.0's `20250114`.
+/// Everything older is refused with [`Error::UnsupportedSchematicVersion`].
+pub const MIN_SCHEMATIC_VERSION: u32 = 20_250_114;
+
 /// Why a file did not become a model.
 ///
 /// Every failure names where in the text it was found (1-based line and
@@ -35,6 +39,16 @@ pub enum Error {
         MIN_BOARD_VERSION
     )]
     UnsupportedVersion {
+        /// The `(version N)` the file carries.
+        version: u32,
+    },
+    /// The schematic was written by a KiCad older than 9.0.
+    #[display(
+        "schematic format version {version} is older than KiCad 9 (version {} and later); \
+         open the schematic in KiCad 9 or later and save it again",
+        MIN_SCHEMATIC_VERSION
+    )]
+    UnsupportedSchematicVersion {
         /// The `(version N)` the file carries.
         version: u32,
     },

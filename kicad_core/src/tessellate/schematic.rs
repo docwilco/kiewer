@@ -1,0 +1,1069 @@
+//! Triangles from a schematic sheet: every symbol's body, pins and texts
+//! carried onto the sheet by its [`Frame`], the wires, buses, junctions
+//! and no-connect marks, the labels in their flags, the sheet symbols
+//! with their pins, and the free text and graphics, each on the
+//! [`SchematicLayer`] KiCad colours it by.
+//!
+//! The placement rules are KiCad's `SCH_PAINTER`: pin names and numbers
+//! sit along the pin by its drawn orientation, a symbol's fields and body
+//! texts are drawn centred on their transformed text box (so a mirrored
+//! symbol keeps its text readable), a label's flag is sized by the text
+//! and the label size ratio, and a do-not-populate symbol gets a cross
+//! over its body. Widths and sizes of 0 in the file mean KiCad's defaults,
+//! named below.
+
+use std::collections::BTreeMap;
+
+use super::{Mesh, MeshBuilder, Tessellator, bezier, circle};
+use crate::font::{self, Placement, block_size};
+use crate::geometry::{Arc, Bounds, Transform};
+use crate::model::{Font, Horizontal, Justify, Point, Size, Vertical};
+use crate::schematic::model::{
+    Fill, FlagShape, Frame, Graphic, Label, LabelKind, LibrarySymbol, Pin, PinShape, Schematic,
+    Sheet, SheetPin, Spin, Symbol, SymbolShape, TextItem, label_vertical,
+};
+
+/// KiCad's default line width, 6 mils: symbol strokes written as 0, pin
+/// lines, no-connect marks, the free graphics.
+pub const DEFAULT_LINE_WIDTH: f64 = 0.1524;
+/// KiCad's default wire width, 6 mils.
+pub const DEFAULT_WIRE_WIDTH: f64 = 0.1524;
+/// KiCad's default bus width, 12 mils.
+pub const DEFAULT_BUS_WIDTH: f64 = 0.3048;
+/// KiCad's default junction diameter, 36 mils.
+pub const DEFAULT_JUNCTION_DIAMETER: f64 = 0.9144;
+/// KiCad's no-connect mark, 48 mils corner to corner.
+pub const NO_CONNECT_SIZE: f64 = 1.2192;
+/// The gap between a pin line and the text beside it, 4 mils.
+const PIN_TEXT_MARGIN: f64 = 0.1016;
+/// A label's flag grows by this fraction of the text height on each side.
+const LABEL_SIZE_RATIO: f64 = 0.375;
+/// A label's text sits this fraction of its height off its wire.
+const TEXT_OFFSET_RATIO: f64 = 0.15;
+/// The do-not-populate cross: three default line widths.
+const DNP_STROKE: f64 = 3.0 * DEFAULT_LINE_WIDTH;
+
+/// The colour classes of a sheet, KiCad's schematic layers, in the order
+/// they are painted from the bottom up ([`SchematicLayer::DRAW_ORDER`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SchematicLayer {
+    /// Symbol body fills.
+    Background,
+    /// Symbol outlines, outline fills and body text.
+    Device,
+    /// Free text and graphics.
+    Notes,
+    /// Buses.
+    Bus,
+    /// Wires and bus entries.
+    Wire,
+    /// Local labels.
+    LocalLabel,
+    /// Global labels, flag and text.
+    GlobalLabel,
+    /// Hierarchical labels, flag and text.
+    HierLabel,
+    /// No-connect marks.
+    NoConnect,
+    /// Junction dots.
+    Junction,
+    /// Sheet symbol borders.
+    Sheet,
+    /// Sheet names.
+    SheetName,
+    /// Sheet file names.
+    SheetFile,
+    /// Sheet pins, flag and text.
+    SheetLabel,
+    /// Pin lines and their decorations.
+    Pin,
+    /// Pin names.
+    PinName,
+    /// Pin numbers.
+    PinNumber,
+    /// Every field but the reference and the value, on symbols and sheets.
+    Fields,
+    /// Value fields.
+    Value,
+    /// Reference fields.
+    Reference,
+    /// Do-not-populate crosses.
+    Dnp,
+}
+
+impl SchematicLayer {
+    /// Every layer, bottom first: what is painted later covers what came
+    /// before.
+    pub const DRAW_ORDER: [SchematicLayer; 21] = [
+        SchematicLayer::Background,
+        SchematicLayer::Device,
+        SchematicLayer::Notes,
+        SchematicLayer::Bus,
+        SchematicLayer::Wire,
+        SchematicLayer::LocalLabel,
+        SchematicLayer::GlobalLabel,
+        SchematicLayer::HierLabel,
+        SchematicLayer::NoConnect,
+        SchematicLayer::Junction,
+        SchematicLayer::Sheet,
+        SchematicLayer::SheetName,
+        SchematicLayer::SheetFile,
+        SchematicLayer::SheetLabel,
+        SchematicLayer::Pin,
+        SchematicLayer::PinName,
+        SchematicLayer::PinNumber,
+        SchematicLayer::Fields,
+        SchematicLayer::Value,
+        SchematicLayer::Reference,
+        SchematicLayer::Dnp,
+    ];
+}
+
+impl Tessellator {
+    /// Every layer of `sheet` that has something on it, in
+    /// [`SchematicLayer::DRAW_ORDER`].
+    #[must_use]
+    pub fn sheet(&self, sheet: &Schematic) -> Vec<(SchematicLayer, Mesh)> {
+        let mut layers = Layers::new(self.tolerance);
+        for symbol in &sheet.symbols {
+            if let Some(library) = sheet.library_symbol(symbol) {
+                layers.symbol(symbol, library);
+            }
+        }
+        for wire in &sheet.wires {
+            let width = default(wire.width, DEFAULT_WIRE_WIDTH);
+            layers
+                .on(SchematicLayer::Wire)
+                .stroke(&wire.points, width, false);
+        }
+        for bus in &sheet.buses {
+            let width = default(bus.width, DEFAULT_BUS_WIDTH);
+            layers
+                .on(SchematicLayer::Bus)
+                .stroke(&bus.points, width, false);
+        }
+        for entry in &sheet.bus_entries {
+            let end = Point {
+                x: entry.at.x + entry.size.x,
+                y: entry.at.y + entry.size.y,
+            };
+            let width = default(entry.width, DEFAULT_WIRE_WIDTH);
+            layers
+                .on(SchematicLayer::Wire)
+                .stroke(&[entry.at, end], width, false);
+        }
+        for junction in &sheet.junctions {
+            let diameter = default(junction.diameter, DEFAULT_JUNCTION_DIAMETER);
+            let dot = circle(junction.at, diameter / 2.0, self.tolerance);
+            layers.on(SchematicLayer::Junction).fill(&[dot], &[]);
+        }
+        for &at in &sheet.no_connects {
+            layers.no_connect(at);
+        }
+        for label in &sheet.labels {
+            layers.label(label);
+        }
+        for sheet_symbol in &sheet.sheets {
+            layers.sheet_symbol(sheet_symbol);
+        }
+        for text in &sheet.texts {
+            if !text.hidden {
+                let placement = placement(&text.font, text.justify, text.at, text.rotation);
+                layers.text(SchematicLayer::Notes, &text.text, &placement);
+            }
+        }
+        for graphic in &sheet.graphics {
+            layers.graphic(
+                graphic,
+                &Transform::identity().into(),
+                SchematicLayer::Notes,
+                None,
+            );
+        }
+        layers.finish()
+    }
+
+    /// The box around everything `sheet` draws, or `None` for an empty
+    /// sheet.
+    #[must_use]
+    pub fn sheet_bounds(&self, sheet: &Schematic) -> Option<Bounds> {
+        self.sheet(sheet)
+            .iter()
+            .filter_map(|(_, mesh)| mesh.bounds())
+            .reduce(Bounds::union)
+    }
+}
+
+/// `value`, or `fallback` when the file wrote 0 for "the default".
+fn default(value: f64, fallback: f64) -> f64 {
+    if value > 0.0 { value } else { fallback }
+}
+
+/// How a text is laid out: the font as the file gives it (its pen from
+/// [`font::pen_width`]), anchored at `position` with `justify`, turned by
+/// `angle`.
+fn placement(font: &Font, justify: Justify, position: Point, angle: f64) -> Placement {
+    Placement {
+        size: font.size,
+        pen: font::pen_width(font),
+        italic: font.italic,
+        justify,
+        position,
+        angle,
+    }
+}
+
+/// A frame to carry points by: a symbol's [`Frame`], or the identity for
+/// a sheet-level item.
+struct Carried(Frame);
+
+impl From<Transform> for Carried {
+    fn from(_: Transform) -> Self {
+        // The identity frame: sheet points are already on the sheet.
+        // `Frame::new` flips y for the library's axis; a sheet-level item
+        // is not in that frame, so the flip is undone by a mirror in x.
+        Carried(Frame::new(
+            Point::default(),
+            0.0,
+            crate::schematic::model::Mirror::X,
+        ))
+    }
+}
+
+impl From<Frame> for Carried {
+    fn from(frame: Frame) -> Self {
+        Carried(frame)
+    }
+}
+
+/// One mesh builder per layer, filled in any order and handed out in
+/// draw order.
+struct Layers {
+    tolerance: f64,
+    builders: BTreeMap<SchematicLayer, MeshBuilder>,
+}
+
+impl Layers {
+    fn new(tolerance: f64) -> Self {
+        Self {
+            tolerance,
+            builders: BTreeMap::new(),
+        }
+    }
+
+    fn on(&mut self, layer: SchematicLayer) -> &mut MeshBuilder {
+        let tolerance = self.tolerance;
+        self.builders
+            .entry(layer)
+            .or_insert_with(|| MeshBuilder::new(tolerance))
+    }
+
+    fn finish(self) -> Vec<(SchematicLayer, Mesh)> {
+        let mut meshes: Vec<(SchematicLayer, Mesh)> = self
+            .builders
+            .into_iter()
+            .map(|(layer, builder)| (layer, builder.finish()))
+            .filter(|(_, mesh)| !mesh.is_empty())
+            .collect();
+        meshes.sort_by_key(|(layer, _)| {
+            SchematicLayer::DRAW_ORDER
+                .iter()
+                .position(|l| l == layer)
+                .unwrap_or(usize::MAX)
+        });
+        meshes
+    }
+
+    /// Text at `placement` on `layer`; a stroke of one point is a dot.
+    fn text(&mut self, layer: SchematicLayer, content: &str, placement: &Placement) {
+        if content.is_empty() {
+            return;
+        }
+        let shape = font::shape(content, placement);
+        self.on(layer).strokes(&shape);
+    }
+
+    /// A no-connect mark: a cross of [`NO_CONNECT_SIZE`].
+    fn no_connect(&mut self, at: Point) {
+        let d = NO_CONNECT_SIZE / 2.0;
+        let corner = |dx: f64, dy: f64| Point {
+            x: at.x + dx,
+            y: at.y + dy,
+        };
+        let builder = self.on(SchematicLayer::NoConnect);
+        builder.stroke(&[corner(-d, -d), corner(d, d)], DEFAULT_LINE_WIDTH, false);
+        builder.stroke(&[corner(d, -d), corner(-d, d)], DEFAULT_LINE_WIDTH, false);
+    }
+
+    /// A graphic carried by `frame` onto `layer`: its fill (a background
+    /// fill on [`SchematicLayer::Background`], an outline fill on the
+    /// layer itself) and its stroke. `bounds` grows to hold it when given.
+    fn graphic(
+        &mut self,
+        graphic: &Graphic,
+        frame: &Carried,
+        layer: SchematicLayer,
+        bounds: Option<&mut Option<Bounds>>,
+    ) {
+        let f = |p: &Point| frame.0.apply(*p);
+        let (points, closed) = match &graphic.shape {
+            SymbolShape::Polyline { points } => (points.iter().map(f).collect::<Vec<_>>(), false),
+            SymbolShape::Rect { start, end } => (
+                [
+                    *start,
+                    Point {
+                        x: end.x,
+                        y: start.y,
+                    },
+                    *end,
+                    Point {
+                        x: start.x,
+                        y: end.y,
+                    },
+                ]
+                .iter()
+                .map(f)
+                .collect(),
+                true,
+            ),
+            SymbolShape::Circle { center, radius } => {
+                (circle(f(center), *radius, self.tolerance), true)
+            }
+            SymbolShape::Arc { start, mid, end } => (
+                match Arc::through(f(start), f(mid), f(end)) {
+                    Some(arc) => arc.flatten(self.tolerance),
+                    None => vec![f(start), f(end)],
+                },
+                false,
+            ),
+            SymbolShape::Bezier { points } => {
+                let control: Vec<Point> = points.iter().map(f).collect();
+                (bezier(&control), false)
+            }
+        };
+        if let Some(bounds) = bounds {
+            let own = Bounds::around(points.iter().copied());
+            *bounds = match (*bounds, own) {
+                (Some(a), Some(b)) => Some(a.union(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        let width = default(graphic.width, DEFAULT_LINE_WIDTH);
+        match graphic.fill {
+            Fill::None => {}
+            // A free graphic's background is the page: nothing to paint.
+            Fill::Background if layer == SchematicLayer::Notes => {}
+            Fill::Background => self
+                .on(SchematicLayer::Background)
+                .fill(std::slice::from_ref(&points), &[]),
+            Fill::Outline => self.on(layer).fill(std::slice::from_ref(&points), &[]),
+        }
+        self.on(layer).stroke(&points, width, closed);
+    }
+
+    /// A placed symbol: its applicable units' graphics, body texts and
+    /// pins through its frame, its fields, and its cross when it is not
+    /// populated.
+    fn symbol(&mut self, symbol: &Symbol, library: &LibrarySymbol) {
+        let frame = symbol.frame();
+        let carried = Carried::from(frame);
+        let mut body: Option<Bounds> = None;
+        let mut pins: Option<Bounds> = None;
+        for unit in library.units_for(symbol.unit, symbol.body_style) {
+            for graphic in &unit.graphics {
+                self.graphic(graphic, &carried, SchematicLayer::Device, Some(&mut body));
+            }
+            for text in &unit.texts {
+                if !text.hidden {
+                    let (centre, angle) = placed_text_centre(&frame, text);
+                    let placement = placement(&text.font, Justify::default(), centre, angle);
+                    self.text(SchematicLayer::Device, &text.text, &placement);
+                }
+            }
+            for pin in &unit.pins {
+                if !pin.hidden {
+                    self.pin(pin, library, &frame, &mut pins);
+                }
+            }
+        }
+        for field in &symbol.fields {
+            if field.text.hidden {
+                continue;
+            }
+            let layer = match field.name.as_str() {
+                "Reference" => SchematicLayer::Reference,
+                "Value" => SchematicLayer::Value,
+                _ => SchematicLayer::Fields,
+            };
+            // The field's anchor is written on the sheet; KiCad keeps it
+            // in the library frame and places the text by the centre of
+            // its box carried through the frame, as for a body text.
+            let local = TextItem {
+                at: frame.unapply(field.text.at),
+                ..field.text.clone()
+            };
+            let (centre, angle) = placed_text_centre(&frame, &local);
+            let placement = placement(&field.text.font, Justify::default(), centre, angle);
+            self.text(layer, &field.shown(), &placement);
+        }
+        if symbol.dnp {
+            self.dnp_cross(body, pins);
+        }
+    }
+
+    /// A pin on the sheet: its line with the decoration its shape asks
+    /// for, and its name and number placed by its drawn orientation.
+    fn pin(
+        &mut self,
+        pin: &Pin,
+        library: &LibrarySymbol,
+        frame: &Frame,
+        bounds: &mut Option<Bounds>,
+    ) {
+        let pos = frame.apply(pin.at);
+        let (sin, cos) = pin.rotation.to_radians().sin_cos();
+        let d = frame.rotate(Point { x: cos, y: sin });
+        let len = pin.length;
+        let end = Point {
+            x: pos.x + d.x * len,
+            y: pos.y + d.y * len,
+        };
+        let along = |from: Point, distance: f64| Point {
+            x: from.x + d.x * distance,
+            y: from.y + d.y * distance,
+        };
+        let perp = Point { x: -d.y, y: d.x };
+        let across = |from: Point, distance: f64| Point {
+            x: from.x + perp.x * distance,
+            y: from.y + perp.y * distance,
+        };
+        for point in [pos, end] {
+            *bounds = Some(bounds.map_or(Bounds::of(point), |b| b.including(point)));
+        }
+        // KiCad's decoration sizes: half the number's height outside the
+        // body, half the name's inside.
+        let outer = pin.number_size.height / 2.0;
+        let inner = if pin.name_size.height > 0.0 {
+            pin.name_size.height / 2.0
+        } else {
+            outer
+        };
+        let tolerance = self.tolerance;
+        let builder = self.on(SchematicLayer::Pin);
+        match pin.shape {
+            PinShape::Inverted | PinShape::InvertedClock => {
+                let bubble = circle(along(end, -outer), outer, tolerance);
+                builder.stroke(&bubble, DEFAULT_LINE_WIDTH, true);
+                builder.stroke(&[pos, along(end, -2.0 * outer)], DEFAULT_LINE_WIDTH, false);
+            }
+            PinShape::NonLogic => {
+                let r = outer;
+                let diagonal = Point {
+                    x: (d.x + perp.x) * r,
+                    y: (d.y + perp.y) * r,
+                };
+                let other = Point {
+                    x: (d.x - perp.x) * r,
+                    y: (d.y - perp.y) * r,
+                };
+                for v in [diagonal, other] {
+                    builder.stroke(
+                        &[
+                            Point {
+                                x: end.x - v.x,
+                                y: end.y - v.y,
+                            },
+                            Point {
+                                x: end.x + v.x,
+                                y: end.y + v.y,
+                            },
+                        ],
+                        DEFAULT_LINE_WIDTH,
+                        false,
+                    );
+                }
+                builder.stroke(&[pos, end], DEFAULT_LINE_WIDTH, false);
+            }
+            // The low-active and edge shapes draw their line; their small
+            // triangles are left out.
+            PinShape::Line
+            | PinShape::Clock
+            | PinShape::InputLow
+            | PinShape::ClockLow
+            | PinShape::OutputLow
+            | PinShape::EdgeClockHigh => {
+                builder.stroke(&[pos, end], DEFAULT_LINE_WIDTH, false);
+            }
+        }
+        if matches!(pin.shape, PinShape::Clock | PinShape::InvertedClock) {
+            // The clock mark: a chevron inside the body at the pin's end.
+            let apex = along(end, inner);
+            builder.stroke(
+                &[across(end, inner), apex, across(end, -inner)],
+                DEFAULT_LINE_WIDTH,
+                false,
+            );
+        }
+        self.pin_texts(pin, library, pos, d, len);
+    }
+
+    /// The name and number of a pin at `pos` extending along `d` for
+    /// `len`: KiCad's table by drawn orientation, with the name inside
+    /// the body when the library gives an offset and above the pin (the
+    /// number below) when it does not.
+    fn pin_texts(&mut self, pin: &Pin, library: &LibrarySymbol, pos: Point, d: Point, len: f64) {
+        let name = if library.pin_names_hidden {
+            ""
+        } else {
+            pin.shown_name()
+        };
+        let number = if library.pin_numbers_hidden {
+            ""
+        } else {
+            pin.number.as_str()
+        };
+        let name_font = text_font(pin.name_size);
+        let number_font = text_font(pin.number_size);
+        let line = DEFAULT_LINE_WIDTH;
+        let inside_offset = library.pin_name_offset;
+        // Which text goes where: inside the body, above the pin, below it.
+        let (inside, above, below): (PinText<'_>, PinText<'_>, PinText<'_>) = if inside_offset > 0.0
+        {
+            (Some((name, &name_font)), Some((number, &number_font)), None)
+        } else {
+            (None, Some((name, &name_font)), Some((number, &number_font)))
+        };
+        let offset_for = |text: PinText<'_>| {
+            text.map_or(0.0, |(_, font)| {
+                PIN_TEXT_MARGIN + f64::midpoint(font::pen_width(font), line)
+            })
+        };
+        let above_offset = offset_for(above);
+        let below_offset = offset_for(below);
+        let orientation = Orientation::of(d);
+        let angle = if orientation.is_vertical() { 90.0 } else { 0.0 };
+        let place = |along: f64, across: f64| orientation.place(pos, along, across);
+        if let Some((text, font)) = inside {
+            let placement = placement(
+                font,
+                Justify {
+                    horizontal: orientation.inside_justify(),
+                    vertical: Vertical::Center,
+                    mirror: false,
+                },
+                place(inside_offset + len, 0.0),
+                angle,
+            );
+            self.text(SchematicLayer::PinName, text, &placement);
+        }
+        let mid = len / 2.0;
+        if let Some((text, font)) = above {
+            let placement = placement(
+                font,
+                Justify {
+                    horizontal: Horizontal::Center,
+                    vertical: Vertical::Bottom,
+                    mirror: false,
+                },
+                place(mid, -above_offset),
+                angle,
+            );
+            let layer = if inside.is_some() {
+                SchematicLayer::PinNumber
+            } else {
+                SchematicLayer::PinName
+            };
+            self.text(layer, text, &placement);
+        }
+        if let Some((text, font)) = below {
+            let placement = placement(
+                font,
+                Justify {
+                    horizontal: Horizontal::Center,
+                    vertical: Vertical::Top,
+                    mirror: false,
+                },
+                place(mid, below_offset),
+                angle,
+            );
+            self.text(SchematicLayer::PinNumber, text, &placement);
+        }
+    }
+
+    /// KiCad's do-not-populate cross: the body's box grown towards the
+    /// pins' (by at least six tenths of the way, less the stroke), with
+    /// its two diagonals in three line widths.
+    fn dnp_cross(&mut self, body: Option<Bounds>, pins: Option<Bounds>) {
+        let Some(body) = body.or(pins) else {
+            return;
+        };
+        let pins = pins.map_or(body, |p| p.union(body));
+        let margin = |body_min: f64, body_max: f64, pins_min: f64, pins_max: f64| {
+            let m = (body_min - pins_min).max(pins_max - body_max).max(0.0);
+            (m * 0.6).max(m - DNP_STROKE)
+        };
+        let mx = margin(body.min.x, body.max.x, pins.min.x, pins.max.x);
+        let my = margin(body.min.y, body.max.y, pins.min.y, pins.max.y);
+        let min = Point {
+            x: body.min.x - mx,
+            y: body.min.y - my,
+        };
+        let max = Point {
+            x: body.max.x + mx,
+            y: body.max.y + my,
+        };
+        let builder = self.on(SchematicLayer::Dnp);
+        builder.stroke(&[min, max], DNP_STROKE, false);
+        builder.stroke(
+            &[Point { x: max.x, y: min.y }, Point { x: min.x, y: max.y }],
+            DNP_STROKE,
+            false,
+        );
+    }
+
+    /// A label of any kind: its text beside the anchor as its spin says,
+    /// and the flag of a global or hierarchical one.
+    fn label(&mut self, label: &Label) {
+        let spin = label.spin();
+        let h = label.font.size.height;
+        let pen = font::pen_width(&label.font);
+        let (layer, distance) = match label.kind {
+            LabelKind::Local => (SchematicLayer::LocalLabel, TEXT_OFFSET_RATIO * h + pen),
+            LabelKind::Global(shape) => {
+                let margin = LABEL_SIZE_RATIO * h;
+                let room = match shape {
+                    FlagShape::Input | FlagShape::Bidirectional | FlagShape::TriState => {
+                        h * 3.0 / 4.0
+                    }
+                    FlagShape::Output | FlagShape::Passive => 0.0,
+                };
+                (SchematicLayer::GlobalLabel, margin + room)
+            }
+            LabelKind::Hierarchical(_) => (
+                SchematicLayer::HierLabel,
+                TEXT_OFFSET_RATIO * h + label.font.size.width,
+            ),
+        };
+        // A local label stands off its wire, across the reading
+        // direction; a flagged one moves along it, past the flag.
+        let dir = spin.direction();
+        let anchor = match label.kind {
+            LabelKind::Local => match spin {
+                Spin::Right | Spin::Left => Point {
+                    x: label.at.x,
+                    y: label.at.y - distance,
+                },
+                Spin::Up | Spin::Bottom => Point {
+                    x: label.at.x - distance,
+                    y: label.at.y,
+                },
+            },
+            _ => Point {
+                x: label.at.x + dir.x * distance,
+                y: label.at.y + dir.y * distance,
+            },
+        };
+        let justify = Justify {
+            horizontal: spin.justify(),
+            vertical: label_vertical(label.kind),
+            mirror: false,
+        };
+        let placement = placement(&label.font, justify, anchor, spin.angle());
+        self.text(layer, &label.text, &placement);
+        match label.kind {
+            LabelKind::Local => {}
+            LabelKind::Global(shape) => {
+                let outline = global_flag(&label.text, &label.font, shape, spin, label.at);
+                self.on(layer).stroke(&outline, pen, true);
+            }
+            LabelKind::Hierarchical(shape) => {
+                let outline = hierarchical_flag(h, shape, spin, label.at);
+                self.on(layer).stroke(&outline, pen, true);
+            }
+        }
+    }
+
+    /// A sheet symbol: its border, its fields, and its pins as inverted
+    /// hierarchical flags with the text inside the sheet.
+    fn sheet_symbol(&mut self, sheet: &Sheet) {
+        let corners = [
+            sheet.at,
+            Point {
+                x: sheet.at.x + sheet.size.width,
+                y: sheet.at.y,
+            },
+            Point {
+                x: sheet.at.x + sheet.size.width,
+                y: sheet.at.y + sheet.size.height,
+            },
+            Point {
+                x: sheet.at.x,
+                y: sheet.at.y + sheet.size.height,
+            },
+        ];
+        let width = default(sheet.width, DEFAULT_LINE_WIDTH);
+        self.on(SchematicLayer::Sheet).stroke(&corners, width, true);
+        for field in &sheet.fields {
+            if field.text.hidden {
+                continue;
+            }
+            let layer = match field.name.as_str() {
+                "Sheetname" => SchematicLayer::SheetName,
+                "Sheetfile" => SchematicLayer::SheetFile,
+                _ => SchematicLayer::Fields,
+            };
+            let text = &field.text;
+            let placement = placement(&text.font, text.justify, text.at, text.rotation);
+            self.text(layer, &field.shown(), &placement);
+        }
+        for pin in &sheet.pins {
+            self.sheet_pin(pin);
+        }
+    }
+
+    fn sheet_pin(&mut self, pin: &SheetPin) {
+        // The pin's edge, from its angle, puts the text inside the sheet.
+        let spin = match (pin.rotation.rem_euclid(360.0) / 90.0).round() {
+            r if (r - 1.0).abs() < 0.5 => Spin::Bottom,
+            r if (r - 2.0).abs() < 0.5 => Spin::Right,
+            r if (r - 3.0).abs() < 0.5 => Spin::Up,
+            _ => Spin::Left,
+        };
+        // A sheet pin's flag is drawn the other way round from a
+        // hierarchical label's: an input into the sheet points in.
+        let shape = match pin.shape {
+            FlagShape::Input => FlagShape::Output,
+            FlagShape::Output => FlagShape::Input,
+            other => other,
+        };
+        let h = pin.font.size.height;
+        let pen = font::pen_width(&pin.font);
+        let distance = TEXT_OFFSET_RATIO * h + pin.font.size.width;
+        let dir = spin.direction();
+        let anchor = Point {
+            x: pin.at.x + dir.x * distance,
+            y: pin.at.y + dir.y * distance,
+        };
+        let justify = Justify {
+            horizontal: spin.justify(),
+            vertical: Vertical::Center,
+            mirror: false,
+        };
+        let placement = placement(&pin.font, justify, anchor, spin.angle());
+        self.text(SchematicLayer::SheetLabel, &pin.name, &placement);
+        let outline = hierarchical_flag(h, shape, spin, pin.at);
+        self.on(SchematicLayer::SheetLabel)
+            .stroke(&outline, pen, true);
+    }
+}
+
+/// A font of `size` with KiCad's defaults otherwise: pin names and
+/// numbers carry only their size.
+fn text_font(size: Size) -> Font {
+    Font {
+        face: None,
+        size,
+        thickness: None,
+        bold: false,
+        italic: false,
+    }
+}
+
+/// Which way a pin points on the sheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Orientation {
+    Right,
+    Left,
+    Up,
+    Down,
+}
+
+impl Orientation {
+    /// The orientation nearest the unit direction `d` (sheet frame, y
+    /// down).
+    fn of(d: Point) -> Self {
+        if d.x.abs() >= d.y.abs() {
+            if d.x >= 0.0 {
+                Orientation::Right
+            } else {
+                Orientation::Left
+            }
+        } else if d.y >= 0.0 {
+            Orientation::Down
+        } else {
+            Orientation::Up
+        }
+    }
+
+    fn is_vertical(self) -> bool {
+        matches!(self, Orientation::Up | Orientation::Down)
+    }
+
+    /// A point beside a pin at `pos` pointing this way: `along` the pin
+    /// towards the body, and `across` it, where "above" on the sheet
+    /// (up, or left for a vertical pin) is negative.
+    fn place(self, pos: Point, along: f64, across: f64) -> Point {
+        match self {
+            Orientation::Right => Point {
+                x: pos.x + along,
+                y: pos.y + across,
+            },
+            Orientation::Left => Point {
+                x: pos.x - along,
+                y: pos.y + across,
+            },
+            Orientation::Down => Point {
+                x: pos.x + across,
+                y: pos.y + along,
+            },
+            Orientation::Up => Point {
+                x: pos.x + across,
+                y: pos.y - along,
+            },
+        }
+    }
+
+    /// How a pin's inside name anchors at the body's edge so it reads
+    /// away from the pin: left for a pin pointing right or up, right for
+    /// one pointing left or down (vertical text reads upward, so "left"
+    /// is its bottom).
+    fn inside_justify(self) -> Horizontal {
+        match self {
+            Orientation::Right | Orientation::Up => Horizontal::Left,
+            Orientation::Left | Orientation::Down => Horizontal::Right,
+        }
+    }
+}
+
+/// A pin's name or number with its font, or nothing to draw.
+type PinText<'a> = Option<(&'a str, &'a Font)>;
+
+/// Where a symbol's text (a body text, a field) is drawn and at what
+/// angle: the centre of its text box, laid out in the library frame with
+/// its own justification and angle, carried through `frame`; the angle
+/// swapped between horizontal and vertical when the frame turns by a
+/// quarter. KiCad draws it centred there, unmirrored, so it stays
+/// readable however the symbol is placed.
+fn placed_text_centre(frame: &Frame, text: &TextItem) -> (Point, f64) {
+    let block = block_size(&text.text, text.font.size);
+    let dx = match text.justify.horizontal {
+        Horizontal::Left => block.width / 2.0,
+        Horizontal::Center => 0.0,
+        Horizontal::Right => -block.width / 2.0,
+    };
+    let dy = match text.justify.vertical {
+        Vertical::Top => block.height / 2.0,
+        Vertical::Center => 0.0,
+        Vertical::Bottom => -block.height / 2.0,
+    };
+    let turned = Transform::new(Point::default(), text.rotation).rotate(Point { x: dx, y: dy });
+    let centre = frame.apply(Point {
+        x: text.at.x + turned.x,
+        y: text.at.y + turned.y,
+    });
+    let angle = text.rotation.rem_euclid(360.0);
+    let horizontal = angle.rem_euclid(180.0) < 1.0 || angle.rem_euclid(180.0) > 179.0;
+    let vertical = (angle.rem_euclid(180.0) - 90.0).abs() < 1.0;
+    let angle = if frame.swaps_axes() {
+        if horizontal {
+            90.0
+        } else if vertical {
+            0.0
+        } else {
+            angle
+        }
+    } else if vertical {
+        90.0
+    } else if horizontal {
+        0.0
+    } else {
+        angle
+    };
+    (centre, angle)
+}
+
+/// The outline of a global label's flag around `text`, as KiCad's
+/// `SCH_GLOBALLABEL::CreateGraphicShape` builds it: a box of the text's
+/// width plus margins, half a text height plus the margin above and
+/// below, pointed at the anchor for an input, away from it for an output,
+/// both ways for a bidirectional or tri-state, and plain for a passive.
+fn global_flag(text: &str, font: &Font, shape: FlagShape, spin: Spin, anchor: Point) -> Vec<Point> {
+    let h = font.size.height;
+    let margin = LABEL_SIZE_RATIO * h;
+    let half = h / 2.0 + margin;
+    let pen = font::pen_width(font);
+    let length = block_size(text, font.size).width + 2.0 * margin;
+    let x = length + pen;
+    let y = half + pen;
+    // The base shape sits to the left of the anchor (KiCad's "left" spin).
+    let mut points = [
+        Point { x: 0.0, y: 0.0 },
+        Point { x: 0.0, y: -y },
+        Point { x: -x, y: -y },
+        Point { x: -x, y: 0.0 },
+        Point { x: -x, y },
+        Point { x: 0.0, y },
+    ];
+    let mut shift = 0.0;
+    match shape {
+        FlagShape::Input => {
+            shift = -half;
+            points[0].x += half;
+        }
+        FlagShape::Output => points[3].x -= half,
+        FlagShape::Bidirectional | FlagShape::TriState => {
+            shift = -half;
+            points[0].x += half;
+            points[3].x -= half;
+        }
+        FlagShape::Passive => {}
+    }
+    points
+        .iter()
+        .map(|p| {
+            let p = Point {
+                x: p.x + shift,
+                y: p.y,
+            };
+            let turned = match spin {
+                Spin::Left => p,
+                Spin::Up => Point { x: -p.y, y: p.x },
+                Spin::Right => Point { x: -p.x, y: -p.y },
+                Spin::Bottom => Point { x: p.y, y: -p.x },
+            };
+            Point {
+                x: turned.x + anchor.x,
+                y: turned.y + anchor.y,
+            }
+        })
+        .collect()
+}
+
+/// The outline of a hierarchical label's or sheet pin's flag: KiCad's
+/// template shapes in units of half the text height, by shape and spin.
+fn hierarchical_flag(height: f64, shape: FlagShape, spin: Spin, anchor: Point) -> Vec<Point> {
+    const IN: [[(f64, f64); 5]; 4] = [
+        [
+            (0.0, 0.0),
+            (-1.0, -1.0),
+            (-2.0, -1.0),
+            (-2.0, 1.0),
+            (-1.0, 1.0),
+        ],
+        [
+            (0.0, 0.0),
+            (1.0, -1.0),
+            (1.0, -2.0),
+            (-1.0, -2.0),
+            (-1.0, -1.0),
+        ],
+        [(0.0, 0.0), (1.0, 1.0), (2.0, 1.0), (2.0, -1.0), (1.0, -1.0)],
+        [(0.0, 0.0), (1.0, 1.0), (1.0, 2.0), (-1.0, 2.0), (-1.0, 1.0)],
+    ];
+    const OUT: [[(f64, f64); 5]; 4] = [
+        [
+            (-2.0, 0.0),
+            (-1.0, 1.0),
+            (0.0, 1.0),
+            (0.0, -1.0),
+            (-1.0, -1.0),
+        ],
+        [
+            (0.0, -2.0),
+            (1.0, -1.0),
+            (1.0, 0.0),
+            (-1.0, 0.0),
+            (-1.0, -1.0),
+        ],
+        [(2.0, 0.0), (1.0, -1.0), (0.0, -1.0), (0.0, 1.0), (1.0, 1.0)],
+        [(0.0, 2.0), (1.0, 1.0), (1.0, 0.0), (-1.0, 0.0), (-1.0, 1.0)],
+    ];
+    const BIDI: [[(f64, f64); 4]; 4] = [
+        [(0.0, 0.0), (-1.0, -1.0), (-2.0, 0.0), (-1.0, 1.0)],
+        [(0.0, 0.0), (-1.0, -1.0), (0.0, -2.0), (1.0, -1.0)],
+        [(0.0, 0.0), (1.0, -1.0), (2.0, 0.0), (1.0, 1.0)],
+        [(0.0, 0.0), (-1.0, 1.0), (0.0, 2.0), (1.0, 1.0)],
+    ];
+    const PLAIN: [[(f64, f64); 4]; 4] = [
+        [(0.0, -1.0), (-2.0, -1.0), (-2.0, 1.0), (0.0, 1.0)],
+        [(1.0, 0.0), (1.0, -2.0), (-1.0, -2.0), (-1.0, 0.0)],
+        [(0.0, -1.0), (2.0, -1.0), (2.0, 1.0), (0.0, 1.0)],
+        [(1.0, 0.0), (1.0, 2.0), (-1.0, 2.0), (-1.0, 0.0)],
+    ];
+    let index = match spin {
+        Spin::Left => 0,
+        Spin::Up => 1,
+        Spin::Right => 2,
+        Spin::Bottom => 3,
+    };
+    let half = height / 2.0;
+    let template: &[(f64, f64)] = match shape {
+        FlagShape::Input => IN.get(index).map_or(&[], |t| t.as_slice()),
+        FlagShape::Output => OUT.get(index).map_or(&[], |t| t.as_slice()),
+        FlagShape::Bidirectional | FlagShape::TriState => {
+            BIDI.get(index).map_or(&[], |t| t.as_slice())
+        }
+        FlagShape::Passive => PLAIN.get(index).map_or(&[], |t| t.as_slice()),
+    };
+    template
+        .iter()
+        .map(|&(x, y)| Point {
+            x: anchor.x + half * x,
+            y: anchor.y + half * y,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orientations_follow_the_nearest_axis() {
+        assert_eq!(
+            Orientation::of(Point { x: 1.0, y: 0.0 }),
+            Orientation::Right
+        );
+        assert_eq!(
+            Orientation::of(Point { x: -1.0, y: 0.0 }),
+            Orientation::Left
+        );
+        assert_eq!(Orientation::of(Point { x: 0.0, y: -1.0 }), Orientation::Up);
+        assert_eq!(Orientation::of(Point { x: 0.0, y: 1.0 }), Orientation::Down);
+        assert!(Orientation::Up.is_vertical() && !Orientation::Left.is_vertical());
+    }
+
+    #[test]
+    fn an_input_flag_to_the_right_has_its_tip_at_the_anchor() {
+        let font = text_font(Size {
+            width: 1.27,
+            height: 1.27,
+        });
+        let flag = global_flag("I", &font, FlagShape::Input, Spin::Right, Point::default());
+        assert_eq!(flag.len(), 6);
+        let tip = flag.first().expect("six points");
+        assert!(tip.x.abs() < 1e-9 && tip.y.abs() < 1e-9, "{tip:?}");
+        assert!(flag.iter().all(|p| p.x >= -1e-9), "{flag:?}");
+        let far = flag.iter().map(|p| p.x).fold(0.0, f64::max);
+        // halfSize 1.111 for the tip, the glyph's advance, two margins,
+        // and the pen.
+        let expected = 1.111_25 + 10.0 / 21.0 * 1.27 + 2.0 * 0.476_25 + 0.158_75;
+        assert!((far - expected).abs() < 1e-6, "{far} vs {expected}");
+    }
+
+    #[test]
+    fn a_hierarchical_input_flag_is_two_half_heights_long() {
+        let flag = hierarchical_flag(
+            1.27,
+            FlagShape::Input,
+            Spin::Right,
+            Point { x: 5.0, y: 5.0 },
+        );
+        let far = flag.iter().map(|p| p.x).fold(0.0, f64::max);
+        assert!((far - 6.27).abs() < 1e-9, "{far}");
+        assert!(
+            flag.iter()
+                .any(|p| (p.x - 5.0).abs() < 1e-9 && (p.y - 5.0).abs() < 1e-9)
+        );
+    }
+}

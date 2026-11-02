@@ -316,6 +316,27 @@ fn cursors(line: &str, size: Size, start: Point) -> Vec<(char, Point)> {
     out
 }
 
+/// The nominal box of `text` laid out at `size`, before justification
+/// and rotation: the widest line's advance by the height of the block
+/// (one text height for the first line, one interline for each further
+/// line). This is what KiCad's text box is: a schematic places a
+/// symbol's fields by the centre of this box, and sizes a label's flag
+/// by its width.
+#[must_use]
+pub fn block_size(text: &str, size: Size) -> Size {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let width = lines
+        .iter()
+        .map(|line| line_width(line, size))
+        .fold(0.0, f64::max);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a text has far fewer lines than 2^53"
+    )]
+    let height = size.height + lines.len().saturating_sub(1) as f64 * size.height * INTERLINE;
+    Size { width, height }
+}
+
 /// The advance of a whole line.
 fn line_width(line: &str, size: Size) -> f64 {
     cursors(line, size, Point::default())
@@ -584,6 +605,22 @@ mod tests {
             shape("", &placement(Justify::default(), 0.0)).knockout_box,
             None
         );
+    }
+
+    #[test]
+    fn the_block_size_is_the_widest_line_by_the_lines_height() {
+        let size = Size {
+            width: 1.0,
+            height: 1.0,
+        };
+        let one = block_size("II", size);
+        // Two I's: 10/21 each.
+        assert!(close(one.width, 20.0 / 21.0), "{one:?}");
+        assert!(close(one.height, 1.0), "{one:?}");
+        let two = block_size("I\nIII", size);
+        assert!(close(two.width, 30.0 / 21.0), "{two:?}");
+        assert!(close(two.height, 1.0 + 1.68 * 0.9583), "{two:?}");
+        assert!(close(block_size("", size).width, 0.0));
     }
 
     #[test]
