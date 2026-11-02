@@ -8,7 +8,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use sqlx::{PgConnection, PgPool};
+use sqlx::{PgConnection, PgExecutor, PgPool};
 
 use crate::account::{AccountId, Handle, slugify};
 use crate::blob::BlobHash;
@@ -185,15 +185,20 @@ pub async fn find_owned(
     row.map(Design::try_from).transpose()
 }
 
-/// The design at `/{owner}/{slug}`, within the upload's transaction: the
-/// one a push names, whoever pushes (`roles::require` says whether they
-/// may). Not locked, for the reason [`find_owned`] gives.
+/// The design at `/{owner}/{slug}`: the one a push names, whoever pushes
+/// (`roles::require` says whether they may), within the upload's
+/// transaction; on the pool for a page about the design. Not locked, for
+/// the reason [`find_owned`] gives.
 ///
 /// # Errors
 ///
 /// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when the
 /// row's visibility is not one, which the schema forbids.
-pub async fn find_at(tx: &mut PgConnection, owner: &Handle, slug: &Slug) -> Result<Option<Design>> {
+pub async fn find_at<'c>(
+    db: impl PgExecutor<'c>,
+    owner: &Handle,
+    slug: &Slug,
+) -> Result<Option<Design>> {
     let row: Option<DesignRow> = sqlx::query_as(&format!(
         "SELECT {DESIGN_COLUMNS} FROM design d
          JOIN account a ON a.id = d.owner_id
@@ -201,7 +206,7 @@ pub async fn find_at(tx: &mut PgConnection, owner: &Handle, slug: &Slug) -> Resu
     ))
     .bind(owner.as_str())
     .bind(slug.as_str())
-    .fetch_optional(tx)
+    .fetch_optional(db)
     .await?;
     row.map(Design::try_from).transpose()
 }

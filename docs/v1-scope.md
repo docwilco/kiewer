@@ -62,7 +62,7 @@ The decisions behind v1, settled in the design grilling of 2026-10-30, grouped b
 
 ## Pages and URLs
 
-- `/{handle}/{slug}` head of the default branch; `/b/{branch}` branch head; `/r/{hash}` a revision checked against the design; `/r/{hash}/f/{path}` one file with its original filename and a `Content-Disposition`, cached under the revision hash; `/blob/{hash}` raw bytes; `/{handle}` a person's public designs; `/` recent public designs. No search. (Q27, Q47, Q49)
+- `/{handle}/{slug}` head of the default branch; `/b/{branch}` branch head; `/r/{hash}` a revision checked against the design; `/r/{hash}/f/{path}` one file with its original filename and a `Content-Disposition`, cached under the revision hash; `/blob/{hash}` raw bytes; `/{handle}` a person's public designs; `/` recent public designs; `/{handle}/{slug}/people` the people page, for an admin or the owner, private. No search. (Q27, Q47, Q49)
 - Description: Markdown via comrak (CommonMark plus GitHub tables and strikethrough); allowed output is headings, paragraphs, emphasis, lists, http and https links with `rel="nofollow noopener"`, inline code and code blocks, blockquotes, tables; no raw HTML, images or embeds; rendered HTML cached in the row. (Q48, Q56)
 - Thumbnails per ADR 0004. Open Graph tags on design, branch and revision pages. (Q10, Q21, Q22, Q23)
 

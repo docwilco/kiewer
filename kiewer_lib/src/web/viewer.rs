@@ -14,6 +14,7 @@ use axum::routing::get;
 
 use super::AppState;
 use crate::error::Result;
+use crate::roles::Visibility;
 
 /// The viewer's routes, merged into the server's router.
 pub fn routes() -> Router<AppState> {
@@ -87,10 +88,10 @@ pub struct DesignView {
     pub files: Vec<FileView>,
     /// The revision's schematic page, when it holds a sheet.
     pub schematic_url: Option<String>,
-    /// `public` or `unlisted`, as the summary says it. Text, like every
-    /// field here: the page is the same for everyone (ADR 0003), so it
-    /// shows the state and the people page holds the change.
-    pub visibility: String,
+    /// Public or unlisted, as the summary says it. The page is the same
+    /// for everyone (ADR 0003), so it shows the state and the people page
+    /// holds the change.
+    pub visibility: Visibility,
     /// The design's people page.
     pub people_url: String,
 }

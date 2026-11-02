@@ -505,7 +505,7 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Push
     }
     let (design, created) = match target {
         Target::Existing { owner, slug } => {
-            let design = design::find_at(&mut tx, &owner, &slug)
+            let design = design::find_at(&mut *tx, &owner, &slug)
                 .await?
                 .ok_or_else(|| {
                     Error::Refused(Refusal::NoSuchDesign {

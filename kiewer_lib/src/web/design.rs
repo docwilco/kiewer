@@ -79,7 +79,7 @@ pub(super) async fn page(
             })
             .collect(),
         schematic_url,
-        visibility: shown.design.visibility.to_string(),
+        visibility: shown.design.visibility,
         people_url: people_url(&shown.owner, &shown.design.slug),
     };
     let page = Page::new(shown.design.name, board_url, Some(view));

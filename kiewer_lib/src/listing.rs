@@ -47,7 +47,11 @@ const LISTED_COLUMNS: &str = r#"a.handle, d.slug, d.name,
 pub async fn recent_public(db: &PgPool) -> Result<Vec<Listed>> {
     // One read on the pool: a page's listing, part of no write. Walks
     // branch by its updated_at index, newest first, and stops at the
-    // limit; the joins are by primary key.
+    // limit; the joins are by primary key. The walk runs past the limit
+    // by however many of the newest branches are not a default branch or
+    // belong to an unlisted design, which is a few per page while most
+    // pushes go to main on a public design; a partial index over the
+    // join is the answer if that stops being true.
     Ok(sqlx::query_as(&format!(
         "SELECT {LISTED_COLUMNS}
          FROM branch b

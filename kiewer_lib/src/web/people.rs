@@ -33,12 +33,12 @@ pub fn routes() -> Router<AppState> {
 
 /// One person as the page lists them.
 struct PersonView {
-    handle: String,
-    role: String,
+    handle: Handle,
+    role: Role,
     /// The owner's row has no form: a transfer is how that changes.
     is_owner: bool,
-    /// The grantable roles as `(name, selected)`, for the row's select.
-    options: Vec<(String, bool)>,
+    /// The grantable roles as `(role, selected)`, for the row's select.
+    options: Vec<(Role, bool)>,
 }
 
 #[derive(Template)]
@@ -55,11 +55,11 @@ struct PeoplePage {
     /// visibility forms are theirs alone.
     is_owner: bool,
     people: Vec<PersonView>,
-    /// The grantable roles as `(name, selected)` for the add form, none
+    /// The grantable roles as `(role, selected)` for the add form, none
     /// selected.
-    grantable: Vec<(String, bool)>,
-    /// Both visibilities as `(name, selected)`.
-    visibilities: Vec<(String, bool)>,
+    grantable: Vec<(Role, bool)>,
+    /// Both visibilities as `(visibility, selected)`.
+    visibilities: Vec<(Visibility, bool)>,
     /// Why the last change was refused, or none.
     error: Option<String>,
 }
@@ -93,11 +93,9 @@ async fn access(
     // Two reads on the pool for one page: the design, then the role. A
     // transfer between them is seen by the role read, which is the one
     // that decides.
-    let mut conn = state.db.acquire().await?;
-    let Some(design) = design::find_at(&mut conn, &owner, &slug).await? else {
+    let Some(design) = design::find_at(&state.db, &owner, &slug).await? else {
         return not_found(settled);
     };
-    drop(conn);
     match roles::require(&state.db, design.id, settled.account_id, at_least).await {
         Ok(role) => Ok(Ok(Access {
             settled,
@@ -124,17 +122,17 @@ async fn render(
     let options = |selected: Option<Role>| {
         Role::GRANTABLE
             .into_iter()
-            .map(|role| (role.to_string(), Some(role) == selected))
+            .map(|role| (role, Some(role) == selected))
             .collect::<Vec<_>>()
     };
     let people = roles::people(&state.db, access.design.id)
         .await?
         .into_iter()
         .map(|person| PersonView {
-            handle: person.handle.to_string(),
-            role: person.role.to_string(),
             is_owner: person.role == Role::Owner,
             options: options(Some(person.role)),
+            handle: person.handle,
+            role: person.role,
         })
         .collect();
     let page = PeoplePage {
@@ -148,12 +146,7 @@ async fn render(
         grantable: options(None),
         visibilities: Visibility::ALL
             .into_iter()
-            .map(|visibility| {
-                (
-                    visibility.to_string(),
-                    visibility == access.design.visibility,
-                )
-            })
+            .map(|visibility| (visibility, visibility == access.design.visibility))
             .collect(),
         error,
     };

@@ -470,6 +470,7 @@ async fn the_people_page_is_for_admins_and_the_owner(granted: Option<Role>, stat
     );
 }
 
+#[test_case(None, 403; "a stranger may not")]
 #[test_case(Some(Role::Collaborator), 403; "a collaborator may not")]
 #[test_case(Some(Role::Admin), 303; "an admin may")]
 #[test_case(Some(Role::Owner), 303; "the owner may")]
@@ -575,6 +576,8 @@ async fn adding_changing_and_removing_a_person_needs_the_admin_role(
     assert_eq!(owner_removed.status, 409, "{}", owner_removed.body);
 }
 
+#[test_case(None, 403; "a stranger may not")]
+#[test_case(Some(Role::Collaborator), 403; "a collaborator may not")]
 #[test_case(Some(Role::Admin), 403; "an admin may not")]
 #[test_case(Some(Role::Owner), 303; "the owner may")]
 #[tokio::test]
@@ -677,6 +680,7 @@ async fn the_home_page_and_a_persons_page_list_public_designs_and_never_unlisted
     let empty = format!(r#"href="/{handle}/empty""#);
     let home = http::request(addr, "GET", "/", &[], "").await;
     assert_eq!(home.status, 200, "{}", home.body);
+    assert!(home.body.contains("<title>kiewer</title>"), "{}", home.body);
     assert!(home.body.contains("Recent designs"), "{}", home.body);
     assert!(home.body.contains(&shown), "{}", home.body);
     assert!(!home.body.contains(&hidden), "unlisted: {}", home.body);
@@ -688,21 +692,21 @@ async fn the_home_page_and_a_persons_page_list_public_designs_and_never_unlisted
         home.body
     );
 
-    let person = http::request(addr, "GET", &format!("/{handle}"), &[], "").await;
-    assert_eq!(person.status, 200, "{}", person.body);
+    let theirs = http::request(addr, "GET", &format!("/{handle}"), &[], "").await;
+    assert_eq!(theirs.status, 200, "{}", theirs.body);
     assert!(
-        person
+        theirs
             .body
             .contains(&format!("<title>{handle} - kiewer</title>")),
         "{}",
-        person.body
+        theirs.body
     );
-    assert!(person.body.contains(&shown), "{}", person.body);
-    assert!(!person.body.contains(&hidden), "unlisted: {}", person.body);
+    assert!(theirs.body.contains(&shown), "{}", theirs.body);
+    assert!(!theirs.body.contains(&hidden), "unlisted: {}", theirs.body);
     assert!(
-        !person.body.contains(&empty),
+        !theirs.body.contains(&empty),
         "no revision: {}",
-        person.body
+        theirs.body
     );
     let own = owner.get(&format!("/{handle}")).await;
     assert!(
@@ -714,7 +718,8 @@ async fn the_home_page_and_a_persons_page_list_public_designs_and_never_unlisted
     let opened = http::request(addr, "GET", &format!("/{handle}/hidden"), &[], "").await;
     assert_eq!(opened.status, 200, "an unlisted design opens by its link");
 
-    let (_, nobody) = person_without_designs(&db).await;
+    // A person with a handle and nothing uploaded has a page too.
+    let (_, nobody) = person(&db).await;
     let bare = http::request(addr, "GET", &format!("/{nobody}"), &[], "").await;
     assert_eq!(bare.status, 200, "{}", bare.body);
     assert!(bare.body.contains("No public designs yet"), "{}", bare.body);
@@ -722,11 +727,6 @@ async fn the_home_page_and_a_persons_page_list_public_designs_and_never_unlisted
     assert_eq!(status, 404);
     let (status, _) = http::get(addr, "/Not%20A%20Handle").await;
     assert_eq!(status, 404);
-}
-
-/// A person with a handle and nothing uploaded.
-async fn person_without_designs(db: &PgPool) -> (AccountId, Handle) {
-    person(db).await
 }
 
 #[test_case("/about", 200; "the about page")]

@@ -304,10 +304,14 @@ pub async fn set_role(
     // One statement: the reads that decide the write (is there such an
     // account, is it the owner) are the write's own conditions. Nothing
     // written is the whole outcome too; the read after only names why.
+    // FOR SHARE on the design row: a transfer in flight holds it, so this
+    // waits and then sees the new owner, rather than giving the owner a
+    // row beside the column.
     let written = sqlx::query(
         "INSERT INTO design_role (design_id, account_id, role)
          SELECT d.id, a.id, $3 FROM design d, account a
          WHERE d.id = $1 AND a.handle = $2 AND d.owner_id <> a.id
+         FOR SHARE OF d
          ON CONFLICT (design_id, account_id) DO UPDATE SET role = EXCLUDED.role",
     )
     .bind(design)
