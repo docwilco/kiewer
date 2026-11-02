@@ -50,6 +50,20 @@
   #labels label { display: flex; gap: 0.4em; align-items: center; margin: 0.2em 0; }
   #labels input[type=range] { width: 8em; margin: 0; }
   #labels .threshold { font-variant-numeric: tabular-nums; }
+  /* The net interaction and the reference search (docs/v1-scope.md, Net
+     interaction, Search box): the tooltip beside the pointer, the search
+     box and the pinned net's pad list stacked at the stage's bottom
+     right above the zoom readout. */
+  #net { position: absolute; right: 0.8em; bottom: 2.4em; max-width: 20em; max-height: calc(100% - 4em); display: flex; flex-direction: column; gap: 0.4em; align-items: flex-end; font-size: 13px; }
+  #net-tip { position: absolute; padding: 0.2em 0.5em; background: rgba(43, 43, 43, 0.95); border: 1px solid #666; border-radius: 3px; white-space: nowrap; pointer-events: none; font-size: 13px; }
+  #net-pinned { padding: 0.3em 0.6em; background: rgba(43, 43, 43, 0.9); border: 1px solid #444; border-radius: 4px; overflow: auto; min-height: 0; }
+  #net-pinned p { margin: 0.2em 0; display: flex; gap: 0.6em; align-items: baseline; }
+  #net-pinned ul { list-style: none; margin: 0.3em 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(5em, 1fr)); gap: 0.1em 0.6em; }
+  #net-pinned button, #net-search button, #net-search input { font: inherit; }
+  #net-pinned li button { background: none; border: none; color: inherit; padding: 0; cursor: pointer; text-decoration: underline dotted; }
+  #net-search { display: flex; gap: 0.4em; align-items: baseline; margin: 0; }
+  #net-search input { width: 8em; }
+  #net-miss { color: #e8b2a7; }
 </style>
 </head>
 <body>
@@ -78,6 +92,18 @@
       <div id="label-list"></div>
       <label>show from <input id="label-threshold" type="range" min="2" max="40" step="0.1" title="text height on screen at which a label shows"> <span class="threshold" id="label-threshold-value"></span></label>
     </details>
+  </div>
+  <span id="net-tip" hidden></span>
+  <div id="net" hidden>
+    <div id="net-pinned" hidden>
+      <p><b id="net-name"></b> <button id="net-clear" type="button" title="Escape">clear</button></p>
+      <ul id="net-pads"></ul>
+    </div>
+    <form id="net-search">
+      <span id="net-miss"></span>
+      <input id="net-query" type="search" placeholder="reference, e.g. U1" title="pan to a footprint by its reference designator" autocomplete="off">
+      <button type="submit">Go</button>
+    </form>
   </div>
 </div>
 {% if let Some(design) = design %}
@@ -739,6 +765,128 @@ window.addEventListener("kiewer-board", function (e) {
   buildLabels();
   showThreshold();
   labelsPanel.hidden = false;
+});
+</script>
+<script type="module">
+// Net interaction and the reference search (docs/v1-scope.md, Net
+// interaction, Search box; the wasm side is the net block of
+// kiewer_viewer/src/web.rs, the hit test kicad_core/src/hit.rs). Hovering
+// a pad, via, track or zone names its net in a tooltip beside the pointer
+// and dims everything not on that net; a click pins the highlight and
+// lists the net's pads, each a button that pans to the pad; Escape, the
+// clear button, or a click on empty space clears. The search box takes a
+// reference designator, whatever its case, and frames the footprint, or
+// says it is not on the board. This block's listeners sit beside the
+// main module's: hover is a mouse move with no button held (a drag is a
+// pan, and a touch has no hover), and a click is the browser's own
+// click event, which a middle or right drag never sends; a left drag or
+// a touch pan that still ends in one is told apart by how far the
+// pointer moved since it went down (CLICK_SLOP), and ignored.
+const CLICK_SLOP = 4;
+const netCanvas = document.getElementById("board");
+const netStage = document.getElementById("stage");
+const netBox = document.getElementById("net");
+const netTip = document.getElementById("net-tip");
+const netPinned = document.getElementById("net-pinned");
+const netName = document.getElementById("net-name");
+const netPads = document.getElementById("net-pads");
+const netClear = document.getElementById("net-clear");
+const netSearch = document.getElementById("net-search");
+const netQuery = document.getElementById("net-query");
+const netMiss = document.getElementById("net-miss");
+let netViewer = null;
+let netSchedule = null;
+// Where the pointer went down, in client pixels, for the drag check.
+let netDown = null;
+
+function netPoint(e) {
+  const r = netCanvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  return [(e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr];
+}
+function hideTip() { netTip.hidden = true; }
+function showTip(e, text) {
+  if (!text) { hideTip(); return; }
+  const r = netStage.getBoundingClientRect();
+  netTip.textContent = text;
+  netTip.style.left = (e.clientX - r.left + 14) + "px";
+  netTip.style.top = (e.clientY - r.top + 14) + "px";
+  netTip.hidden = false;
+}
+// The pinned net's name and its pads, one button per pad.
+function refreshPinned() {
+  const name = netViewer.pinned_net();
+  netPinned.hidden = !name;
+  if (!name) { netPads.replaceChildren(); return; }
+  netName.textContent = name;
+  netPads.replaceChildren();
+  netViewer.net_pads().forEach(function (entry, index) {
+    const [reference, number] = entry.split("\t");
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = number ? reference + "." + number : reference;
+    button.title = "pan to this pad";
+    button.addEventListener("click", function () {
+      if (netViewer.go_to_pad(index)) netSchedule();
+    });
+    item.append(button);
+    netPads.append(item);
+  });
+}
+netCanvas.addEventListener("pointermove", function (e) {
+  if (!netViewer) return;
+  if (e.pointerType !== "mouse" || e.buttons) { hideTip(); return; }
+  const [x, y] = netPoint(e);
+  if (netViewer.hover(x, y)) netSchedule();
+  showTip(e, netViewer.hover_text());
+});
+netCanvas.addEventListener("pointerleave", function () {
+  hideTip();
+  if (netViewer && netViewer.hover_leave()) netSchedule();
+});
+netCanvas.addEventListener("pointerdown", function (e) {
+  netDown = [e.clientX, e.clientY];
+});
+netCanvas.addEventListener("click", function (e) {
+  if (!netViewer) return;
+  if (netDown && Math.hypot(e.clientX - netDown[0], e.clientY - netDown[1]) > CLICK_SLOP) return;
+  const [x, y] = netPoint(e);
+  netViewer.click(x, y);
+  refreshPinned();
+  netSchedule();
+});
+function clearNet() {
+  if (!netViewer) return;
+  hideTip();
+  if (netViewer.clear_net()) netSchedule();
+  refreshPinned();
+}
+netClear.addEventListener("click", clearNet);
+window.addEventListener("keydown", function (e) {
+  if (e.key !== "Escape" || !netViewer) return;
+  if (e.target === netQuery) { netQuery.blur(); return; }
+  clearNet();
+});
+netSearch.addEventListener("submit", function (e) {
+  e.preventDefault();
+  if (!netViewer) return;
+  const query = netQuery.value.trim();
+  if (!query) { netMiss.textContent = ""; return; }
+  if (netViewer.search_reference(query)) {
+    netMiss.textContent = "";
+    netSchedule();
+  } else {
+    netMiss.textContent = "no " + query + " on this board";
+  }
+});
+netQuery.addEventListener("input", function () { netMiss.textContent = ""; });
+window.addEventListener("kiewer-board", function (e) {
+  netViewer = e.detail.viewer;
+  netSchedule = e.detail.schedule;
+  netMiss.textContent = "";
+  refreshPinned();
+  netBox.hidden = false;
 });
 </script>
 </body>

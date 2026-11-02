@@ -201,7 +201,15 @@ impl Camera {
     /// Fit `bounds` in the viewport with [`FIT_MARGIN`] free on each side,
     /// centred.
     pub fn fit(&mut self, bounds: Bounds) {
-        let usable = 1.0 - 2.0 * FIT_MARGIN;
+        self.frame(bounds, FIT_MARGIN);
+    }
+
+    /// Fit `bounds` in the viewport with `margin` of the viewport free on
+    /// each side (0.3 leaves the box the middle 40%), centred: a
+    /// footprint found by its reference, a pad from the net's list. A
+    /// margin outside 0..0.5, or a box of no size, leaves the scale at 1.
+    pub fn frame(&mut self, bounds: Bounds, margin: f64) {
+        let usable = 1.0 - 2.0 * margin;
         let by_width = self.viewport.width * usable / bounds.width();
         let by_height = self.viewport.height * usable / bounds.height();
         let scale = by_width.min(by_height);

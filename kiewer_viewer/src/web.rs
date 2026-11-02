@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use kicad_core::font::outline::{self, FaceMetrics};
 use kicad_core::font::placed_texts;
+use kicad_core::hit::{Hit, find_footprint, footprint_bounds, net_pads};
 use kicad_core::labels::LabelClass;
 use kicad_core::model::{Board, LayerId, Point};
 use wasm_bindgen::prelude::*;
@@ -22,6 +23,7 @@ use web_sys::HtmlCanvasElement;
 use crate::atlas::{self, Plan, Quads};
 use crate::camera::{Camera, DOUBLE_CLICK, Size};
 use crate::error::{Error, Result};
+use crate::highlight::{self, Highlight, SLOP_PX};
 use crate::render::atlas_pipeline::Coverage;
 use crate::render::label_pipeline::LabelFrame;
 use crate::render::{Backend, MSAA_SAMPLES, Renderer, Target, device_descriptor};
@@ -57,6 +59,9 @@ pub struct Viewer {
     /// The faces the page draws from the browser's fonts, by the name
     /// the design uses, with what the page measured and planned.
     system_faces: BTreeMap<String, SystemFace>,
+    /// The net under the pointer and the one a click pinned, with the
+    /// hit test over the board (`crate::highlight`).
+    highlight: Highlight,
 }
 
 /// A face the page rasterises (docs/v1-scope.md, Fonts), as far as the
@@ -301,6 +306,7 @@ impl Viewer {
             fit_scale: 0.0,
             board: None,
             system_faces: BTreeMap::new(),
+            highlight: Highlight::none(),
         })
     }
 
@@ -368,6 +374,7 @@ impl Viewer {
         self.fit_scale = self.camera.scale();
         self.scene = Some(scene);
         self.sheet = None;
+        self.highlight = Highlight::new(&board);
         self.board = Some(board);
         self.mirror_for_view();
         Ok(())
@@ -387,6 +394,7 @@ impl Viewer {
         self.system_faces.clear();
         self.scene = None;
         self.board = None;
+        self.highlight = Highlight::none();
         self.camera.set_mirrored(false);
         self.camera.fit(sheet.bounds);
         self.fit_scale = self.camera.scale();
@@ -735,8 +743,17 @@ impl Viewer {
         let target = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        // The highlighted net's copper rides after the scene's own
+        // geometry; when the net changed since the last upload, the
+        // buffers are replaced before the draws name the new ranges.
+        if let (Some(board), Some(scene)) = (&self.board, &self.scene)
+            && let Some((vertices, indices)) = self.highlight.geometry(board, scene)
+        {
+            self.renderer.upload(&self.device, &vertices, &indices);
+        }
         // A sheet, when one is loaded, has its own origin, draws and
-        // paper; otherwise the board's view in force says what is drawn.
+        // paper; otherwise the board's view in force says what is drawn,
+        // dimmed around the highlighted net when there is one.
         let (origin, draws, clear) = match (&self.sheet, &self.scene) {
             (Some(sheet), _) => (
                 sheet.origin,
@@ -745,7 +762,7 @@ impl Viewer {
             ),
             (None, Some(scene)) => (
                 scene.origin,
-                scene.draw_list(&self.state, self.config.format),
+                self.highlight.draws(scene, &self.state, self.config.format),
                 clear_color(self.config.format),
             ),
             (None, None) => (
@@ -989,6 +1006,138 @@ impl Viewer {
                 .upload(&self.device, &scene.vertices, &scene.indices);
             self.renderer.upload_labels(&self.device, &scene.labels);
             self.scene = Some(scene);
+            // The scene alone is on the GPU now; the next frame appends
+            // the highlighted net's copper again.
+            self.highlight.invalidate();
         }
+    }
+}
+
+/// The net interaction and the reference search (docs/v1-scope.md, Net
+/// interaction, Search box; the state is `crate::highlight`, the hit
+/// test `kicad_core::hit`). The page hands each pointer position here in
+/// device pixels: `hover` on a move, `click` on a click, `hover_leave`
+/// when the pointer leaves the canvas, `clear_net` on Escape. Each says
+/// whether a frame is due. `pinned_net` and `net_pads` are what the page
+/// lists for a pinned net, `go_to_pad` and `search_reference` move the
+/// camera.
+#[wasm_bindgen]
+impl Viewer {
+    /// The pointer is at (`x`, `y`): the item there, within [`SLOP_PX`]
+    /// pixels, is hovered. Whether the highlight changed, so a frame is
+    /// due; the tooltip is [`Viewer::hover_text`].
+    pub fn hover(&mut self, x: f64, y: f64) -> bool {
+        let hit = self.hit_at(x, y);
+        self.highlight.hover(hit)
+    }
+
+    /// The pointer left the canvas: nothing hovered. Whether a frame is
+    /// due.
+    pub fn hover_leave(&mut self) -> bool {
+        self.highlight.hover(None)
+    }
+
+    /// What the pointer is over, for the tooltip: `LED6 pad 3: GND`,
+    /// `via: GND`, `track: GND`, `zone: GND`; empty over nothing.
+    #[must_use]
+    pub fn hover_text(&self) -> String {
+        self.board
+            .as_ref()
+            .map(|board| self.highlight.tooltip(board))
+            .unwrap_or_default()
+    }
+
+    /// A click at (`x`, `y`): the net of the item there is pinned, and a
+    /// click on empty space clears the pin. Whether a frame is due.
+    pub fn click(&mut self, x: f64, y: f64) -> bool {
+        let hit = self.hit_at(x, y);
+        self.highlight.pin(hit)
+    }
+
+    /// Escape: nothing pinned, nothing hovered. Whether a frame is due.
+    pub fn clear_net(&mut self) -> bool {
+        self.highlight.clear()
+    }
+
+    /// The name of the pinned net; empty when none is.
+    #[must_use]
+    pub fn pinned_net(&self) -> String {
+        let (Some(board), Some(net)) = (&self.board, self.highlight.pinned()) else {
+            return String::new();
+        };
+        board
+            .net(net)
+            .map(|net| net.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// The pads of the pinned net, one `reference<tab>number` per pad in
+    /// natural order (`R2` before `R10`); the position in this list is
+    /// what [`Viewer::go_to_pad`] takes. Empty without a pin.
+    #[must_use]
+    pub fn net_pads(&self) -> Vec<String> {
+        let (Some(board), Some(net)) = (&self.board, self.highlight.pinned()) else {
+            return Vec::new();
+        };
+        net_pads(board, net)
+            .into_iter()
+            .map(|pad| format!("{}\t{}", pad.reference, pad.number))
+            .collect()
+    }
+
+    /// Pan to pad `index` of [`Viewer::net_pads`], zooming in only when
+    /// it would be too small to see. Whether a frame is due.
+    pub fn go_to_pad(&mut self, index: usize) -> bool {
+        let (Some(board), Some(net)) = (&self.board, self.highlight.pinned()) else {
+            return false;
+        };
+        let Some(pad) = net_pads(board, net).into_iter().nth(index) else {
+            return false;
+        };
+        highlight::go_to_pad(&mut self.camera, pad.bounds);
+        true
+    }
+
+    /// Frame the footprint whose reference designator is `reference`,
+    /// letter case aside. False, with the camera untouched, when the
+    /// board has no such footprint.
+    pub fn search_reference(&mut self, reference: &str) -> bool {
+        let Some(board) = &self.board else {
+            return false;
+        };
+        let Some(bounds) = find_footprint(board, reference)
+            .and_then(|index| board.footprints.get(index))
+            .and_then(footprint_bounds)
+        else {
+            return false;
+        };
+        highlight::go_to_footprint(&mut self.camera, bounds);
+        true
+    }
+}
+
+impl Viewer {
+    /// The item under the screen point (`x`, `y`) on the copper layers
+    /// the view in force shows, top first, within [`SLOP_PX`] pixels.
+    fn hit_at(&self, x: f64, y: f64) -> Option<Hit> {
+        let (board, scene, view) = (
+            self.board.as_ref()?,
+            self.scene.as_ref()?,
+            self.current_view()?,
+        );
+        let layers: Vec<LayerId> = scene
+            .stack
+            .order(view.top)
+            .into_iter()
+            .rev()
+            .filter(|layer| {
+                matches!(layer, Layer::Copper(_)) && self.state.opacity(view, layer).is_some()
+            })
+            .filter_map(|layer| board.layer_named(&layer.to_string()))
+            .collect();
+        let world = self.camera.screen_to_world(Point { x, y });
+        self.highlight
+            .index()
+            .hit(world, SLOP_PX / self.camera.scale(), &layers)
     }
 }

@@ -175,8 +175,9 @@ struct Entry {
     shape: Shape,
 }
 
-/// The board's copper with a net, binned for point queries.
-#[derive(Debug, Clone, PartialEq)]
+/// The board's copper with a net, binned for point queries. The default
+/// is empty: nothing to hit, for a viewer without a board.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Index {
     entries: Vec<Entry>,
     /// The entries whose box reaches each cell, by the cell's column and
