@@ -1,9 +1,10 @@
 //! The HTTP side: the router, its handlers and the server loop. Sign-in,
 //! the welcome page, sign-out and `/api/me` are in `web/auth.rs`; the
 //! settings pages in `web/settings.rs`; the viewer page and its assets
-//! in `web/viewer.rs`.
+//! in `web/viewer.rs`; the renderer beacon in `web/beacon.rs`.
 
 mod auth;
+pub mod beacon;
 mod settings;
 pub mod viewer;
 
@@ -49,6 +50,7 @@ pub fn router(state: AppState) -> Router {
             post(settings::revoke_others),
         )
         .merge(viewer::routes())
+        .merge(beacon::routes())
         .with_state(state)
 }
 
