@@ -74,6 +74,21 @@ A person who may push to any branch of a design, manage people, and edit name an
 A person who may push revisions to a design and manage their own branches.
 _Avoid_: contributor, member, editor
 
+**Account**:
+What a person holds on kiewer: one handle, the sign-in methods that open it, the designs it owns. One per person.
+_Avoid_: user, profile
+
+**Identity**:
+One sign-in method of an account: a provider and that provider's own id for the person. An identity belongs to one account for good; an email address never finds an account.
+_Avoid_: connection, linked account, social login, login
+
+**Session**:
+A signed-in browser: a row behind a cookie, with its sliding expiry, listed and revocable in settings.
+_Avoid_: login, token
+
+**Session key**:
+The stored hash the sessions page names a session by, as against the session id the cookie carries.
+
 **Unlisted**:
 A design anyone with the link can open and nothing lists.
 
