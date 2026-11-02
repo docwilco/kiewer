@@ -149,12 +149,16 @@ _Avoid_: centroid, centre (both can fall outside a fill with a hole)
 The answer to what copper is under a point on the board: a pad over a via over a track over a zone, on the layers the view shows, within a few pixels of the pointer.
 _Avoid_: picking, selection
 
+**Zone**:
+An area of copper on a board that belongs to one net, as KiCad filled it.
+_Avoid_: pour
+
 **Net highlight**:
-The viewer showing one net lit and everything else dimmed: the net under the pointer, or the pinned one.
+The viewer showing a net lit and everything else dimmed: the net under the pointer, or the pinned ones.
 _Avoid_: selection, focus
 
 **Pinned net**:
-The net a click fixed the highlight on; it stays through pan, zoom and hover until Escape or a click on empty space.
+A net a click fixed the highlight on, one of possibly several; it stays through pan, zoom and hover until it is unpinned or Escape or a click on empty space clears them all.
 _Avoid_: selected net, locked net
 
 **Stroke font**:
