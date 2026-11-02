@@ -10,15 +10,19 @@ use askama::Template;
 use axum::extract::multipart::{Field, Multipart, MultipartError};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::http::header::LOCATION;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 
 use super::auth::{Settled, personal};
+use super::design_settings::SettingsView;
 use super::viewer::{DesignView, FileView, Page};
 use super::{AppState, blob, schematic};
 use crate::account::Handle;
-use crate::design::{self, Slug};
+use crate::description::{self, Description};
+use crate::design::{self, DesignHead, Slug};
 use crate::error::{Error, Refusal, Result};
 use crate::roles::{self, Membership};
+use crate::slug;
 use crate::upload::{self, Author, Incoming, Limits, Target};
 
 /// The URL of a design's page.
@@ -31,24 +35,15 @@ pub(super) fn people_url(handle: &Handle, slug: &Slug) -> String {
     format!("/{handle}/{slug}/people")
 }
 
-/// `GET /{handle}/{slug}`: the viewer at the head of the default branch
-/// with the revision's details, or 404 when there is no such design or
-/// it has no revision yet. Two segments that are not a handle and a slug
-/// (a reserved word such as `viewer`, a file name) are 404 before any
-/// lookup: the route is the last one, so every other path lands here.
-/// An unlisted design opens here like a public one: visibility is about
-/// listings, authorisation about writes (docs/v1-scope.md).
-pub(super) async fn page(
-    State(state): State<AppState>,
-    Path((handle, slug)): Path<(String, String)>,
-) -> Result<Response> {
-    let not_found = || (StatusCode::NOT_FOUND, "no such design\n").into_response();
-    let (Ok(handle), Ok(slug)) = (handle.parse::<Handle>(), slug.parse::<Slug>()) else {
-        return Ok(not_found());
-    };
-    let Some(shown) = design::show(&state.db, handle.as_str(), slug.as_str()).await? else {
-        return Ok(not_found());
-    };
+/// The design page for `shown`: the viewer at the head with the
+/// revision's details, the design's `description`, and `settings` as
+/// its settings block. Rendered here for the page and for the settings
+/// form's refusal, which shows the page again with the reason.
+pub(super) fn design_page(
+    shown: &DesignHead,
+    description: &Description,
+    settings: SettingsView,
+) -> Result<String> {
     let board_url = shown.board().map(|entry| blob::url(&entry.blob));
     let schematic_url = shown
         .schematic()
@@ -56,12 +51,12 @@ pub(super) async fn page(
     let view = DesignView {
         handle: shown.owner.to_string(),
         slug: shown.design.slug.to_string(),
-        branch: shown.branch,
+        branch: shown.branch.clone(),
         revision: shown.revision.hash.to_string(),
         short: shown.revision.hash.short(),
-        author: shown.revision.author,
-        created_at: shown.revision.created_at,
-        message: shown.revision.message,
+        author: shown.revision.author.clone(),
+        created_at: shown.revision.created_at.clone(),
+        message: shown.revision.message.clone(),
         details: shown
             .revision
             .metadata
@@ -81,9 +76,44 @@ pub(super) async fn page(
         schematic_url,
         visibility: shown.design.visibility,
         people_url: people_url(&shown.owner, &shown.design.slug),
+        description_html: description.html.clone(),
+        settings,
     };
-    let page = Page::new(shown.design.name, board_url, Some(view));
-    Ok(Html(page.render()?).into_response())
+    let page = Page::new(shown.design.name.clone(), board_url, Some(view));
+    Ok(page.render()?)
+}
+
+/// `GET /{handle}/{slug}`: the viewer at the head of the default branch
+/// with the revision's details, or 404 when there is no such design or
+/// it has no revision yet. A slug the design was at before answers 301
+/// to where it is now, until another design of the owner's takes the
+/// slug (`crate::slug`). Two segments that are not a handle and a slug
+/// (a reserved word such as `viewer`, a file name) are 404 before any
+/// lookup: the route is the last one, so every other path lands here.
+/// An unlisted design opens here like a public one: visibility is about
+/// listings, authorisation about writes (docs/v1-scope.md).
+pub(super) async fn page(
+    State(state): State<AppState>,
+    Path((handle, slug)): Path<(String, String)>,
+) -> Result<Response> {
+    let not_found = || (StatusCode::NOT_FOUND, "no such design\n").into_response();
+    let (Ok(handle), Ok(slug)) = (handle.parse::<Handle>(), slug.parse::<Slug>()) else {
+        return Ok(not_found());
+    };
+    let Some(shown) = design::show(&state.db, handle.as_str(), slug.as_str()).await? else {
+        let moved = slug::redirect(&state.db, handle.as_str(), slug.as_str()).await?;
+        return Ok(match moved {
+            Some(current) => (
+                StatusCode::MOVED_PERMANENTLY,
+                [(LOCATION, design_url(&handle, &current))],
+            )
+                .into_response(),
+            None => not_found(),
+        });
+    };
+    let description = description::of(&state.db, shown.design.id).await?;
+    let settings = SettingsView::of(&handle, &shown.design, &description);
+    Ok(Html(design_page(&shown, &description, settings)?).into_response())
 }
 
 #[derive(Template)]

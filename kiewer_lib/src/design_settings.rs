@@ -6,8 +6,10 @@
 
 use sqlx::PgPool;
 
+use crate::account::AccountId;
 use crate::design::{Design, Slug};
 use crate::error::{Error, Result};
+use crate::roles::{self, Role};
 use crate::{description, slug};
 
 /// The longest name, in characters.
@@ -73,21 +75,32 @@ impl Settings {
     }
 }
 
-/// `settings` become `design`'s: the name and the description as given,
-/// the slug moved when it differs, with the redirect under the design's
-/// owner whoever edits. The caller has checked the person's right to
-/// edit. What comes back is the design's slug after the save, for the
+/// `settings` become `design`'s, by `editor`, an admin or the owner
+/// (docs/v1-scope.md, Accounts and access: both edit name, slug and
+/// description): the name and the description as given, the slug moved
+/// when it differs, with the redirect under the design's owner whoever
+/// edits. What comes back is the design's slug after the save, for the
 /// page to go to.
 ///
 /// # Errors
 ///
-/// [`Error::Malformed`] when [`Settings::check`] refuses; [`Error::Refused`]
-/// when the slug is taken or the design is no longer at its slug
-/// ([`slug::change`]); [`Error::Db`] when Postgres refuses.
-pub async fn save(db: &PgPool, design: &Design, settings: &Settings) -> Result<Slug> {
+/// [`Error::Malformed`] when [`Settings::check`] refuses;
+/// [`Error::Forbidden`] when `editor` is below admin on the design;
+/// [`Error::Refused`] when the slug is taken or the design is no longer
+/// at its slug ([`slug::change`]); [`Error::Db`] when Postgres refuses.
+pub async fn save(
+    db: &PgPool,
+    editor: AccountId,
+    design: &Design,
+    settings: &Settings,
+) -> Result<Slug> {
     settings.check()?;
     let name = settings.name()?;
     let mut tx = db.begin().await?;
+    // The role is read inside the transaction, as the gate of the writes
+    // that follow it, so a role revoked in the same instant refuses the
+    // whole save rather than half of it.
+    roles::require(&mut *tx, design.id, editor, Role::Admin).await?;
     description::set(&mut tx, design.id, &settings.description).await?;
     sqlx::query("UPDATE design SET name = $2 WHERE id = $1")
         .bind(design.id)

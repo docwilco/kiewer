@@ -10,6 +10,7 @@ use kiewer_lib::auth::{Provider, ProviderUser};
 use kiewer_lib::design::{self, Design, Slug};
 use kiewer_lib::design_settings::{self, Settings};
 use kiewer_lib::error::Refusal;
+use kiewer_lib::roles::Role;
 use kiewer_lib::{Error, description, slug};
 use kiewer_test_support::db::{fresh, pool_from_env};
 use sqlx::PgPool;
@@ -68,7 +69,7 @@ async fn the_description_is_rendered_into_the_row_and_again_on_edit() {
     // The script line is an HTML block of its own (CommonMark ends one at
     // the closing tag's line), so the links get a paragraph of their own.
     let first = "# Hello\n\n<script>x</script>\n\n[go](javascript:1) [ok](https://a.b)";
-    design_settings::save(&db, &design, &settings(&design, "described", first))
+    design_settings::save(&db, owner, &design, &settings(&design, "described", first))
         .await
         .expect("saved");
     let stored = description::of(&db, design.id).await.unwrap();
@@ -86,7 +87,7 @@ async fn the_description_is_rendered_into_the_row_and_again_on_edit() {
     );
 
     let second = "plain now";
-    design_settings::save(&db, &design, &settings(&design, "described", second))
+    design_settings::save(&db, owner, &design, &settings(&design, "described", second))
         .await
         .expect("saved again");
     let stored = description::of(&db, design.id).await.unwrap();
@@ -109,7 +110,7 @@ async fn a_changed_slug_redirects_until_a_new_design_reuses_it() {
         None
     );
 
-    let moved = design_settings::save(&db, &design, &settings(&design, "second", ""))
+    let moved = design_settings::save(&db, owner, &design, &settings(&design, "second", ""))
         .await
         .expect("moved");
     assert_eq!(moved.as_str(), "second");
@@ -141,7 +142,7 @@ async fn a_changed_slug_redirects_until_a_new_design_reuses_it() {
         slug: moved,
         ..design
     };
-    design_settings::save(&db, &design, &settings(&design, "third", ""))
+    design_settings::save(&db, owner, &design, &settings(&design, "third", ""))
         .await
         .expect("moved again");
     for old in ["first", "second"] {
@@ -177,7 +178,7 @@ async fn a_changed_slug_redirects_until_a_new_design_reuses_it() {
         slug: "third".parse().unwrap(),
         ..design
     };
-    design_settings::save(&db, &design, &settings(&design, "second", ""))
+    design_settings::save(&db, owner, &design, &settings(&design, "second", ""))
         .await
         .expect("moved back");
     assert_eq!(
@@ -207,8 +208,32 @@ async fn a_slug_another_design_of_the_owner_has_is_refused_and_nothing_moves() {
     new_design(&db, owner, "taken", "Taken").await;
     new_design(&db, other, "theirs", "Theirs").await;
 
+    let forbidden = design_settings::save(
+        &db,
+        other,
+        &design,
+        &settings(&design, "mine", "not theirs to write"),
+    )
+    .await
+    .expect_err("another person has no role on the design");
+    assert!(
+        matches!(
+            forbidden,
+            Error::Forbidden {
+                needed: Role::Admin
+            }
+        ),
+        "{forbidden}"
+    );
+    assert_eq!(
+        description::of(&db, design.id).await.unwrap().markdown,
+        "",
+        "the refused editor wrote nothing"
+    );
+
     let refused = design_settings::save(
         &db,
+        owner,
         &design,
         &settings(&design, "taken", "described anyway"),
     )
@@ -228,11 +253,11 @@ async fn a_slug_another_design_of_the_owner_has_is_refused_and_nothing_moves() {
         None
     );
 
-    design_settings::save(&db, &design, &settings(&design, "theirs", ""))
+    design_settings::save(&db, owner, &design, &settings(&design, "theirs", ""))
         .await
         .expect("another owner's slug is free for this owner");
 
-    let stale = design_settings::save(&db, &design, &settings(&design, "elsewhere", ""))
+    let stale = design_settings::save(&db, owner, &design, &settings(&design, "elsewhere", ""))
         .await
         .expect_err("the design is no longer at the slug the form was built from");
     assert!(
@@ -252,7 +277,7 @@ async fn the_name_is_saved_trimmed_and_a_malformed_one_is_refused() {
         name: "  Renamed board  ".to_owned(),
         ..settings(&design, "named", "")
     };
-    design_settings::save(&db, &design, &renamed)
+    design_settings::save(&db, owner, &design, &renamed)
         .await
         .expect("saved");
     let listed = design::by_owner(&db, owner).await.unwrap();
@@ -262,7 +287,7 @@ async fn the_name_is_saved_trimmed_and_a_malformed_one_is_refused() {
         name: "   ".to_owned(),
         ..settings(&design, "named", "")
     };
-    let refused = design_settings::save(&db, &design, &blank)
+    let refused = design_settings::save(&db, owner, &design, &blank)
         .await
         .expect_err("a blank name");
     assert!(matches!(refused, Error::Malformed(_)), "{refused}");

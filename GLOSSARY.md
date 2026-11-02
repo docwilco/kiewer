@@ -10,6 +10,10 @@ A site where people upload KiCad designs and share them, Discord first. The brow
 The thing a person owns and shares: a name, a description, branches, and people with roles on it.
 _Avoid_: project (collides with KiCad projects, GCP projects and Cargo projects), board, repo
 
+**Description**:
+What a design's owner or admin writes about it, in Markdown, shown rendered on the design's page.
+_Avoid_: readme, about, notes, summary
+
 **Revision**:
 One immutable snapshot of a design's files, with its parent revision, author, time and optional message, identified by a hash.
 _Avoid_: commit, version, snapshot, upload
@@ -62,7 +66,8 @@ A person's unique name on kiewer, chosen once at first sign-in. The first segmen
 _Avoid_: username, login
 
 **Slug**:
-A design's name in its URL, unique per owner, editable; old slugs redirect.
+A design's name in its URL, unique per owner: suggested by the name when the design is made, editable by owner or admin. A slug the design left redirects to it until another design of the same owner takes the slug.
+_Avoid_: path, short name, id
 
 **Owner**:
 The one person a design belongs to. Alone may delete, transfer and change visibility.

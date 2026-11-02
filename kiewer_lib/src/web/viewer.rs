@@ -94,6 +94,12 @@ pub struct DesignView {
     pub visibility: Visibility,
     /// The design's people page.
     pub people_url: String,
+    /// The description as `crate::description` rendered it: HTML the
+    /// template writes as it is, empty for a design without one.
+    pub description_html: String,
+    /// The settings block: the form's values and a refusal's reason
+    /// (`web/design_settings.rs`).
+    pub settings: super::design_settings::SettingsView,
 }
 
 /// The viewer page: the hand-off board at `/viewer`, a design's revision

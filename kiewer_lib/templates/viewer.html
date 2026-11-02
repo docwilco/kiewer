@@ -29,6 +29,18 @@
   /* Visibility and the people link, under the details (roles, #21). */
   #people { margin: 0; padding: 0.3em 0.8em; border-top: 1px solid #444; opacity: 0.8; }
   #people a { color: inherit; }
+  /* The description (docs/v1-scope.md, Pages and URLs) inside the
+     details, and the settings block below them: the owner's form, in the
+     page for everyone and hidden until /api/me says so. */
+  #description { max-width: 60em; }
+  #description a { text-decoration: underline; }
+  #settings { padding: 0.4em 0.8em; border-top: 1px solid #444; }
+  #settings summary { cursor: pointer; }
+  #settings label { display: block; margin: 0.3em 0; }
+  #settings input, #settings textarea, #settings button { font: inherit; }
+  #settings input { width: 100%; max-width: 30em; box-sizing: border-box; }
+  #settings textarea { width: 100%; max-width: 60em; box-sizing: border-box; }
+  #settings .error { padding: 0.3em 0.5em; background: #5a1e1e; border-radius: 4px; }
   /* The font warning and picker (docs/v1-scope.md, Fonts): over the
      stage's top right, one line per face the browser lacks. */
   #fonts { position: absolute; right: 0.8em; top: 0.8em; max-width: 28em; padding: 0.6em 0.8em; background: #4a3f1e; border-radius: 4px; }
@@ -112,6 +124,7 @@
 {% if let Some(design) = design %}
 <details id="design">
   <summary><a href="/{{ design.handle }}">{{ design.handle }}</a> / {{ design.slug }}: branch {{ design.branch }}, revision <code title="{{ design.revision }}">{{ design.short }}</code> by {{ design.author }} at <time datetime="{{ design.created_at }}">{{ design.created_at }}</time>{% if let Some(message) = design.message %}, "{{ message }}"{% endif %}{% if let Some(url) = design.schematic_url %} <a href="{{ url }}">schematic</a>{% endif %}</summary>
+  {% if !design.description_html.is_empty() %}<div id="description">{{ design.description_html|safe }}</div>{% endif %}
   <dl>
   {% for (label, value) in design.details %}
     <dt>{{ label }}</dt><dd>{{ value }}</dd>
@@ -124,6 +137,16 @@
   </ul>
 </details>
 <p id="people">{{ design.visibility }} · <a href="{{ design.people_url }}">people</a></p>
+<details id="settings"{% if design.settings.error.is_some() %} open{% else %} hidden{% endif %}>
+  <summary>Settings</summary>
+  {% if let Some(error) = design.settings.error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  <form method="post" action="{{ design.settings.action }}">
+    <label>Name <input name="name" value="{{ design.settings.name }}" maxlength="100" required></label>
+    <label>Slug <input name="slug" value="{{ design.settings.slug }}" maxlength="64" pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" title="lowercase letters, digits and hyphens" required> <small>the old address keeps working until another design of yours takes it</small></label>
+    <label>Description, in Markdown <textarea name="description" rows="8">{{ design.settings.description }}</textarea></label>
+    <button type="submit">Save</button>
+  </form>
+</details>
 {% endif %}
 <p hidden><small>{{ build }}</small></p>
 {% if !embedded %}
@@ -896,5 +919,22 @@ window.addEventListener("kiewer-board", function (e) {
   netBox.hidden = false;
 });
 </script>
+{% if let Some(design) = design %}
+<script type="module">
+// The settings block (docs/v1-scope.md, Accounts and access, Q29 and
+// Q34; the server side is kiewer_lib/src/web/design_settings.rs). The
+// page renders the same for everyone (ADR 0003), so the form is in it
+// hidden, and this block shows it once /api/me says the person is the
+// design's owner; the POST checks the right for itself. A refused save
+// comes back with the block open and the reason, without this.
+const settingsBlock = document.getElementById("settings");
+if (settingsBlock && settingsBlock.hidden) {
+  fetch("/api/me", { credentials: "same-origin" })
+    .then(function (response) { return response.ok ? response.json() : null; })
+    .then(function (me) { if (me && me.handle === "{{ design.handle }}") settingsBlock.hidden = false; })
+    .catch(function () { /* signed out or offline: the block stays hidden */ });
+}
+</script>
+{% endif %}
 </body>
 </html>
