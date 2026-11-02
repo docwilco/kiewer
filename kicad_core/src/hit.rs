@@ -89,9 +89,10 @@ pub struct Hit {
     pub layer: LayerId,
 }
 
-/// The geometry an item is measured by.
+/// The geometry an item is measured by: a board's copper here, a
+/// sheet's wires, pins and flags in `schematic::hit`.
 #[derive(Debug, Clone, PartialEq)]
-enum Shape {
+pub(crate) enum Shape {
     /// A disc: a via.
     Disc { center: Point, radius: f64 },
     /// A round-ended stroke along a polyline: a track.
@@ -103,7 +104,7 @@ enum Shape {
 
 impl Shape {
     /// How far `point` is from the shape; 0 inside it.
-    fn distance(&self, point: Point) -> f64 {
+    pub(crate) fn distance(&self, point: Point) -> f64 {
         match self {
             Shape::Disc { center, radius } => {
                 ((point.x - center.x).hypot(point.y - center.y) - radius).max(0.0)
@@ -131,7 +132,7 @@ impl Shape {
     }
 
     /// The box around the shape, its stroke width included.
-    fn bounds(&self) -> Option<Bounds> {
+    pub(crate) fn bounds(&self) -> Option<Bounds> {
         match self {
             Shape::Disc { center, radius } => Some(grow(Bounds::of(*center), *radius)),
             Shape::Stroke { points, radius } => {
@@ -145,7 +146,7 @@ impl Shape {
 }
 
 /// `bounds` grown by `by` on every side.
-fn grow(bounds: Bounds, by: f64) -> Bounds {
+pub(crate) fn grow(bounds: Bounds, by: f64) -> Bounds {
     Bounds {
         min: Point {
             x: bounds.min.x - by,
@@ -159,7 +160,7 @@ fn grow(bounds: Bounds, by: f64) -> Bounds {
 }
 
 /// The distance from `point` to the segment `from`-`to`.
-fn segment_distance(point: Point, from: Point, to: Point) -> f64 {
+pub(crate) fn segment_distance(point: Point, from: Point, to: Point) -> f64 {
     let (dx, dy) = (to.x - from.x, to.y - from.y);
     let mut nearest = from;
     if dx != 0.0 || dy != 0.0 {
@@ -478,7 +479,7 @@ fn cells_of(bounds: Bounds) -> impl Iterator<Item = (i64, i64)> {
 }
 
 /// Whether two boxes share any point.
-fn overlaps(a: Bounds, b: Bounds) -> bool {
+pub(crate) fn overlaps(a: Bounds, b: Bounds) -> bool {
     a.min.x <= b.max.x && b.min.x <= a.max.x && a.min.y <= b.max.y && b.min.y <= a.max.y
 }
 
@@ -558,7 +559,7 @@ pub fn net_pads(board: &Board, net: NetId) -> Vec<NetPad> {
 
 /// `text` as a sort key that orders `R2` before `R10`: its runs of
 /// letters and of digits, each digit run compared as a number.
-fn natural_key(text: &str) -> Vec<(u64, String)> {
+pub(crate) fn natural_key(text: &str) -> Vec<(u64, String)> {
     let mut key = Vec::new();
     let mut run = String::new();
     let mut digits = false;

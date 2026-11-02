@@ -9,6 +9,9 @@
 //! (`extends`) gets its parent's body and pins at parse time, so the model
 //! holds complete symbols.
 
+pub mod connect;
+pub mod hierarchy;
+pub mod hit;
 pub mod model;
 
 use std::collections::BTreeMap;
@@ -72,6 +75,7 @@ pub fn parse_schematic(source: &str) -> Result<Sheet> {
 
     let mut schematic = Sheet {
         version,
+        uuid: None,
         generator: None,
         generator_version: None,
         paper: Paper::a4(),
@@ -89,6 +93,7 @@ pub fn parse_schematic(source: &str) -> Result<Sheet> {
     };
     for node in root.lists() {
         match node.head()? {
+            "uuid" => schematic.uuid = Some(node.atom(0)?.to_owned()),
             "generator" => schematic.generator = Some(node.atom(0)?.to_owned()),
             "generator_version" => schematic.generator_version = Some(node.atom(0)?.to_owned()),
             "paper" => schematic.paper = paper(node)?,
@@ -576,6 +581,7 @@ fn label(node: &Node, kind: LabelKind) -> Result<Label> {
 /// A `(sheet (at ...) (size ...) ... (property ...) (pin ...))`.
 fn sheet(node: &Node) -> Result<SheetSymbol> {
     let mut sheet = SheetSymbol {
+        uuid: optional_text(node, "uuid")?,
         at: point(node.require("at")?)?,
         size: size(node.require("size")?)?,
         width: stroke_width(node)?,

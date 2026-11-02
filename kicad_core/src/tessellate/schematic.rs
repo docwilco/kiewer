@@ -18,6 +18,7 @@ use super::{Mesh, MeshBuilder, Tessellator, bezier, circle};
 use crate::font::{self, Placement, block_size};
 use crate::geometry::{Arc, Bounds, Transform};
 use crate::model::{Font, Horizontal, Justify, Point, Size, Vertical};
+use crate::schematic::connect::{SheetItem, SheetNet};
 use crate::schematic::model::{
     Fill, FlagShape, Frame, Graphic, Label, LabelKind, LibrarySymbol, Mirror, Pin, PinShape, Sheet,
     SheetPin, SheetSymbol, Spin, Symbol, SymbolShape, TextItem, label_vertical,
@@ -379,14 +380,22 @@ impl Layers {
         frame: &Frame,
         bounds: &mut Option<Bounds>,
     ) {
-        let pos = frame.apply(pin.at);
-        let (sin, cos) = pin.rotation.to_radians().sin_cos();
-        let d = frame.rotate(Point { x: cos, y: sin });
+        let (pos, d, len) = self.pin_line(pin, frame, bounds);
+        self.pin_texts(pin, library, pos, d, len);
+    }
+
+    /// A pin's line and the decoration its shape asks for, without its
+    /// texts: where it starts, the unit direction it extends in, and how
+    /// far.
+    fn pin_line(
+        &mut self,
+        pin: &Pin,
+        frame: &Frame,
+        bounds: &mut Option<Bounds>,
+    ) -> (Point, Point, f64) {
+        let (pos, end) = pin_ends(pin, frame);
+        let d = pin_direction(pin, frame);
         let len = pin.length;
-        let end = Point {
-            x: pos.x + d.x * len,
-            y: pos.y + d.y * len,
-        };
         let along = |from: Point, distance: f64| Point {
             x: from.x + d.x * distance,
             y: from.y + d.y * distance,
@@ -463,7 +472,7 @@ impl Layers {
                 false,
             );
         }
-        self.pin_texts(pin, library, pos, d, len);
+        (pos, d, len)
     }
 
     /// The name and number of a pin at `pos` extending along `d` for
@@ -583,63 +592,13 @@ impl Layers {
     /// A label of any kind: its text beside the anchor as its spin says,
     /// and the flag of a global or hierarchical one.
     fn label(&mut self, label: &Label) {
-        let spin = label.spin();
+        let (layer, placement) = label_placement(label);
         let text = &label.text;
-        let h = text.font.size.height;
-        let pen = font::pen_width(&text.font);
-        let (layer, distance) = match label.kind {
-            LabelKind::Local => (SchematicLayer::LocalLabel, TEXT_OFFSET_RATIO * h + pen),
-            LabelKind::Global(shape) => {
-                let margin = LABEL_SIZE_RATIO * h;
-                let room = match shape {
-                    FlagShape::Input | FlagShape::Bidirectional | FlagShape::TriState => {
-                        h * 3.0 / 4.0
-                    }
-                    FlagShape::Output | FlagShape::Passive => 0.0,
-                };
-                (SchematicLayer::GlobalLabel, margin + room)
-            }
-            LabelKind::Hierarchical(_) => (
-                SchematicLayer::HierLabel,
-                TEXT_OFFSET_RATIO * h + text.font.size.width,
-            ),
-        };
-        // A local label stands off its wire, across the reading
-        // direction; a flagged one moves along it, past the flag.
-        let dir = spin.direction();
-        let anchor = match label.kind {
-            LabelKind::Local => match spin {
-                Spin::Right | Spin::Left => Point {
-                    x: text.at.x,
-                    y: text.at.y - distance,
-                },
-                Spin::Up | Spin::Bottom => Point {
-                    x: text.at.x - distance,
-                    y: text.at.y,
-                },
-            },
-            _ => Point {
-                x: text.at.x + dir.x * distance,
-                y: text.at.y + dir.y * distance,
-            },
-        };
-        let justify = Justify {
-            horizontal: spin.justify(),
-            vertical: label_vertical(label.kind),
-            mirror: false,
-        };
-        let placement = placement(&text.font, justify, anchor, spin.angle());
         self.text(layer, &text.text, &placement);
-        match label.kind {
-            LabelKind::Local => {}
-            LabelKind::Global(shape) => {
-                let outline = global_flag(&text.text, &text.font, shape, spin, text.at);
-                self.on(layer).stroke(&outline, pen, true);
-            }
-            LabelKind::Hierarchical(shape) => {
-                let outline = hierarchical_flag(h, shape, spin, text.at);
-                self.on(layer).stroke(&outline, pen, true);
-            }
+        if label.kind != LabelKind::Local {
+            let outline = label_flag(label);
+            let pen = font::pen_width(&text.font);
+            self.on(layer).stroke(&outline, pen, true);
         }
     }
 
@@ -684,20 +643,7 @@ impl Layers {
 
     fn sheet_pin(&mut self, pin: &SheetPin) {
         let text = &pin.text;
-        // The pin's edge, from its angle, puts the text inside the sheet.
-        let spin = match (text.rotation.rem_euclid(360.0) / 90.0).round() {
-            r if (r - 1.0).abs() < 0.5 => Spin::Bottom,
-            r if (r - 2.0).abs() < 0.5 => Spin::Right,
-            r if (r - 3.0).abs() < 0.5 => Spin::Up,
-            _ => Spin::Left,
-        };
-        // A sheet pin's flag is drawn the other way round from a
-        // hierarchical label's: an input into the sheet points in.
-        let shape = match pin.shape {
-            FlagShape::Input => FlagShape::Output,
-            FlagShape::Output => FlagShape::Input,
-            other => other,
-        };
+        let spin = sheet_pin_spin(pin);
         let h = text.font.size.height;
         let pen = font::pen_width(&text.font);
         let distance = TEXT_OFFSET_RATIO * h + text.font.size.width;
@@ -713,10 +659,212 @@ impl Layers {
         };
         let placement = placement(&text.font, justify, anchor, spin.angle());
         self.text(SchematicLayer::SheetLabel, &text.text, &placement);
-        let outline = hierarchical_flag(h, shape, spin, text.at);
+        let outline = sheet_pin_flag(pin);
         self.on(SchematicLayer::SheetLabel)
             .stroke(&outline, pen, true);
     }
+}
+
+impl Tessellator {
+    /// The geometry of one net of `sheet` (docs/v1-scope.md, Net
+    /// interaction), by layer in draw order: its wires, junction dots,
+    /// labels with their flags, pin lines and sheet pin flags, as
+    /// [`Tessellator::sheet`] draws them and nothing else, so a highlight
+    /// can lay them over the dimmed sheet in each layer's own colour.
+    #[must_use]
+    pub fn sheet_net(&self, sheet: &Sheet, net: &SheetNet) -> Vec<(SchematicLayer, Mesh)> {
+        let mut layers = Layers::new(self.tolerance);
+        for &item in &net.items {
+            match item {
+                SheetItem::Wire(index) => {
+                    if let Some(wire) = sheet.wires.get(index) {
+                        let width = default(wire.width, DEFAULT_WIRE_WIDTH);
+                        layers
+                            .on(SchematicLayer::Wire)
+                            .stroke(&wire.points, width, false);
+                    }
+                }
+                SheetItem::Junction(index) => {
+                    if let Some(junction) = sheet.junctions.get(index) {
+                        let diameter = default(junction.diameter, DEFAULT_JUNCTION_DIAMETER);
+                        let dot = circle(junction.at, diameter / 2.0, self.tolerance);
+                        layers.on(SchematicLayer::Junction).fill(&[dot], &[]);
+                    }
+                }
+                SheetItem::Label(index) => {
+                    if let Some(label) = sheet.labels.get(index) {
+                        layers.label(label);
+                    }
+                }
+                SheetItem::Pin { symbol, unit, pin } => {
+                    if let Some((placed, pin)) = sheet_pin_of(sheet, symbol, unit, pin)
+                        && !pin.hidden
+                    {
+                        layers.pin_line(pin, &placed.frame(), &mut None);
+                    }
+                }
+                SheetItem::SheetPin { sheet: index, pin } => {
+                    if let Some(pin) = sheet
+                        .sheet_symbols
+                        .get(index)
+                        .and_then(|symbol| symbol.pins.get(pin))
+                    {
+                        layers.sheet_pin(pin);
+                    }
+                }
+            }
+        }
+        layers.finish()
+    }
+}
+
+/// The placed symbol and the library pin a pin item names.
+fn sheet_pin_of(sheet: &Sheet, symbol: usize, unit: usize, pin: usize) -> Option<(&Symbol, &Pin)> {
+    let placed = sheet.symbols.get(symbol)?;
+    let library = sheet.library_symbol(placed)?;
+    Some((placed, library.units.get(unit)?.pins.get(pin)?))
+}
+
+/// Where a pin starts (its connection point) and ends (at the body) on
+/// the sheet, through its symbol's `frame`.
+#[must_use]
+pub fn pin_ends(pin: &Pin, frame: &Frame) -> (Point, Point) {
+    let pos = frame.apply(pin.at);
+    let d = pin_direction(pin, frame);
+    let end = Point {
+        x: pos.x + d.x * pin.length,
+        y: pos.y + d.y * pin.length,
+    };
+    (pos, end)
+}
+
+/// The unit direction a pin extends in on the sheet, towards the body.
+fn pin_direction(pin: &Pin, frame: &Frame) -> Point {
+    let (sin, cos) = pin.rotation.to_radians().sin_cos();
+    frame.rotate(Point { x: cos, y: sin })
+}
+
+/// Where a label's text is drawn and on which layer: beside its anchor
+/// as its spin says, a local label standing off its wire across the
+/// reading direction, a flagged one moved along it past the flag.
+fn label_placement(label: &Label) -> (SchematicLayer, Placement) {
+    let spin = label.spin();
+    let text = &label.text;
+    let h = text.font.size.height;
+    let pen = font::pen_width(&text.font);
+    let (layer, distance) = match label.kind {
+        LabelKind::Local => (SchematicLayer::LocalLabel, TEXT_OFFSET_RATIO * h + pen),
+        LabelKind::Global(shape) => {
+            let margin = LABEL_SIZE_RATIO * h;
+            let room = match shape {
+                FlagShape::Input | FlagShape::Bidirectional | FlagShape::TriState => h * 3.0 / 4.0,
+                FlagShape::Output | FlagShape::Passive => 0.0,
+            };
+            (SchematicLayer::GlobalLabel, margin + room)
+        }
+        LabelKind::Hierarchical(_) => (
+            SchematicLayer::HierLabel,
+            TEXT_OFFSET_RATIO * h + text.font.size.width,
+        ),
+    };
+    let dir = spin.direction();
+    let anchor = match label.kind {
+        LabelKind::Local => match spin {
+            Spin::Right | Spin::Left => Point {
+                x: text.at.x,
+                y: text.at.y - distance,
+            },
+            Spin::Up | Spin::Bottom => Point {
+                x: text.at.x - distance,
+                y: text.at.y,
+            },
+        },
+        _ => Point {
+            x: text.at.x + dir.x * distance,
+            y: text.at.y + dir.y * distance,
+        },
+    };
+    let justify = Justify {
+        horizontal: spin.justify(),
+        vertical: label_vertical(label.kind),
+        mirror: false,
+    };
+    (layer, placement(&text.font, justify, anchor, spin.angle()))
+}
+
+/// The flag around a global or hierarchical label; empty for a local
+/// one, which has none.
+fn label_flag(label: &Label) -> Vec<Point> {
+    let spin = label.spin();
+    let text = &label.text;
+    match label.kind {
+        LabelKind::Local => Vec::new(),
+        LabelKind::Global(shape) => global_flag(&text.text, &text.font, shape, spin, text.at),
+        LabelKind::Hierarchical(shape) => {
+            hierarchical_flag(text.font.size.height, shape, spin, text.at)
+        }
+    }
+}
+
+/// The outline a label is hit by: its flag, or for a local label the
+/// box around its text's strokes, half a pen wider on every side.
+#[must_use]
+pub fn label_outline(label: &Label) -> Vec<Point> {
+    if label.kind != LabelKind::Local {
+        return label_flag(label);
+    }
+    let (_, placement) = label_placement(label);
+    let shape = font::shape(&label.text.text, &placement);
+    let Some(bounds) = Bounds::around(shape.strokes.iter().flatten().copied()) else {
+        return Vec::new();
+    };
+    let half = shape.pen / 2.0;
+    vec![
+        Point {
+            x: bounds.min.x - half,
+            y: bounds.min.y - half,
+        },
+        Point {
+            x: bounds.max.x + half,
+            y: bounds.min.y - half,
+        },
+        Point {
+            x: bounds.max.x + half,
+            y: bounds.max.y + half,
+        },
+        Point {
+            x: bounds.min.x - half,
+            y: bounds.max.y + half,
+        },
+    ]
+}
+
+/// Which way a sheet pin's text reads: the pin's edge, from its angle,
+/// puts the text inside the sheet.
+fn sheet_pin_spin(pin: &SheetPin) -> Spin {
+    match (pin.text.rotation.rem_euclid(360.0) / 90.0).round() {
+        r if (r - 1.0).abs() < 0.5 => Spin::Bottom,
+        r if (r - 2.0).abs() < 0.5 => Spin::Right,
+        r if (r - 3.0).abs() < 0.5 => Spin::Up,
+        _ => Spin::Left,
+    }
+}
+
+/// The flag of a sheet pin, drawn the other way round from a
+/// hierarchical label's: an input into the sheet points in.
+#[must_use]
+pub fn sheet_pin_flag(pin: &SheetPin) -> Vec<Point> {
+    let shape = match pin.shape {
+        FlagShape::Input => FlagShape::Output,
+        FlagShape::Output => FlagShape::Input,
+        other => other,
+    };
+    hierarchical_flag(
+        pin.text.font.size.height,
+        shape,
+        sheet_pin_spin(pin),
+        pin.text.at,
+    )
 }
 
 /// A font of `size` with KiCad's defaults otherwise: pin names and

@@ -720,6 +720,9 @@ pub struct SheetPin {
 /// A hierarchical sheet symbol: a box standing for another sheet.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SheetSymbol {
+    /// The symbol's uuid, which KiCad's sheet paths are made of; `None`
+    /// when the file has none.
+    pub uuid: Option<String>,
     /// The top-left corner.
     pub at: Point,
     /// Width and height.
@@ -760,6 +763,9 @@ impl SheetSymbol {
 pub struct Sheet {
     /// The file format version, `20250114` and later.
     pub version: u32,
+    /// The sheet's own uuid, the first segment of every KiCad sheet path
+    /// below it; `None` when the file has none.
+    pub uuid: Option<String>,
     /// The program that wrote the file.
     pub generator: Option<String>,
     /// That program's version.
