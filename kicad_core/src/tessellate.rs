@@ -196,7 +196,10 @@ impl Tessellator {
     #[must_use]
     pub fn outline(&self, board: &Board) -> Mesh {
         let mut builder = MeshBuilder::new(self.tolerance);
-        for drawing in outline_drawings(board) {
+        let Some(edge) = board.layer_named(EDGE_CUTS) else {
+            return builder.finish();
+        };
+        for drawing in layer_drawings(board, edge) {
             let width = drawing.width.max(MIN_OUTLINE_WIDTH);
             let (points, closed) = outline_points(&drawing, self.tolerance);
             builder.stroke(&points, width, closed);
@@ -208,7 +211,8 @@ impl Tessellator {
     /// strokes), or `None` for a board without `Edge.Cuts` graphics.
     #[must_use]
     pub fn outline_bounds(&self, board: &Board) -> Option<Bounds> {
-        outline_drawings(board)
+        let edge = board.layer_named(EDGE_CUTS)?;
+        layer_drawings(board, edge)
             .filter_map(|drawing| graphic_bounds(&drawing, self.tolerance))
             .reduce(Bounds::union)
     }
@@ -266,22 +270,6 @@ fn layer_drawings(board: &Board, layer: LayerId) -> impl Iterator<Item = Drawing
             .graphics
             .iter()
             .filter(move |graphic| graphic.layer == layer)
-            .map(move |graphic| transformed(&graphic.drawing, &frame))
-    });
-    own.chain(placed)
-}
-
-/// Every `Edge.Cuts` drawing on the board: the board's own as written,
-/// a footprint's carried into the board's frame.
-fn outline_drawings(board: &Board) -> impl Iterator<Item = Drawing> + '_ {
-    let edge = board.layer_named(EDGE_CUTS);
-    let own = board.outline().map(|graphic| graphic.drawing.clone());
-    let placed = board.footprints.iter().flat_map(move |footprint| {
-        let frame = Transform::new(footprint.at, footprint.rotation);
-        footprint
-            .graphics
-            .iter()
-            .filter(move |graphic| Some(graphic.layer) == edge)
             .map(move |graphic| transformed(&graphic.drawing, &frame))
     });
     own.chain(placed)
@@ -750,15 +738,10 @@ impl MeshBuilder {
         if text.hidden || content.is_empty() {
             return;
         }
-        let placement = Placement {
-            size: text.font.size,
-            pen: font::pen_width(&text.font),
-            italic: text.font.italic,
-            justify: text.justify,
-            position: frame.apply(text.at),
-            angle: font::draw_angle(text.rotation, in_footprint && text.upright),
-        };
-        let shape = font::shape(content, &placement);
+        let shape = font::shape(
+            content,
+            &Placement::of(text, frame.apply(text.at), in_footprint),
+        );
         if text.knockout {
             self.knockout(&shape);
         } else {

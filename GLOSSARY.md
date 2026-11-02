@@ -95,3 +95,6 @@ Newstroke, KiCad's built-in line font, bundled in kiewer and used for every text
 
 **Knockout**:
 A text item drawn inverted: a filled box around the text with the glyphs cut out of it, as KiCad's `knockout` flag on a text's layer asks.
+
+**Upright**:
+A footprint text's rule that its drawn angle is folded into (-90, 90], so it reads from the left or from below whatever way the footprint turns. KiCad's default; `(unlocked yes)` in the file turns it off.

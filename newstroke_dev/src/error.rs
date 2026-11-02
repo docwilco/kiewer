@@ -51,10 +51,6 @@ pub enum Exit {
 }
 
 impl Exit {
-    /// Every kind, in code order.
-    #[cfg(test)]
-    pub const ALL: [Exit; 3] = [Exit::Usage, Exit::Io, Exit::Malformed];
-
     /// The process exit code.
     #[must_use]
     pub fn code(self) -> u8 {
@@ -85,12 +81,14 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
+    use test_case::test_case;
+
     use super::*;
 
-    #[test]
-    fn no_exit_code_is_reserved() {
-        for exit in Exit::ALL {
-            assert!(!Exit::reserved(exit.code()), "{exit:?}");
-        }
+    #[test_case(Exit::Usage)]
+    #[test_case(Exit::Io)]
+    #[test_case(Exit::Malformed)]
+    fn no_exit_code_is_reserved(exit: Exit) {
+        assert!(!Exit::reserved(exit.code()), "{exit:?}");
     }
 }

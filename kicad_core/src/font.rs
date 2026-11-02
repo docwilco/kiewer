@@ -20,7 +20,7 @@
 mod newstroke_table;
 
 use crate::geometry::{Bounds, Transform};
-use crate::model::{Font, Horizontal, Justify, Point, Size, Vertical};
+use crate::model::{Font, Horizontal, Justify, Point, Size, Text, Vertical};
 
 /// Em units per coordinate step.
 const SCALE: f64 = 1.0 / 21.0;
@@ -49,12 +49,6 @@ pub struct Glyph {
     pub strokes: Vec<Vec<Point>>,
     /// The width the next glyph starts after.
     pub advance: f64,
-}
-
-/// Whether the table has a glyph for `c`.
-#[must_use]
-pub fn has_glyph(c: char) -> bool {
-    encoded(c).is_some()
 }
 
 /// The glyph for `c`, or the one for `?` when the table has none.
@@ -119,15 +113,16 @@ fn decode(encoded: &str) -> Glyph {
 }
 
 /// The pen width a text draws with: its thickness when the file gives
-/// one, else KiCad's default for the size (an eighth of the smaller side,
-/// a fifth for bold), and never more than a quarter of the smaller side.
+/// one, else KiCad's default for the size (an eighth of the width, a
+/// fifth for bold), and never more than a quarter of the smaller side.
 #[must_use]
 pub fn pen_width(font: &Font) -> f64 {
-    let min_side = font.size.width.abs().min(font.size.height.abs());
+    let width = font.size.width.abs();
+    let min_side = width.min(font.size.height.abs());
     let pen = match font.thickness {
         Some(thickness) if thickness > 0.0 => thickness,
-        _ if font.bold => min_side / 5.0,
-        _ => min_side / 8.0,
+        _ if font.bold => width / 5.0,
+        _ => width / 8.0,
     };
     pen.min(min_side * 0.25)
 }
@@ -163,6 +158,23 @@ pub struct Placement {
     pub position: Point,
     /// Degrees, counter-clockwise on the screen ([`draw_angle`]).
     pub angle: f64,
+}
+
+impl Placement {
+    /// How `text` is drawn at `position` (its anchor carried into the
+    /// board's frame): the font's pen width, and its rotation folded
+    /// upright when it is a footprint's text that asks for it.
+    #[must_use]
+    pub fn of(text: &Text, position: Point, in_footprint: bool) -> Self {
+        Self {
+            size: text.font.size,
+            pen: pen_width(&text.font),
+            italic: text.font.italic,
+            justify: text.justify,
+            position,
+            angle: draw_angle(text.rotation, in_footprint && text.upright),
+        }
+    }
 }
 
 /// A text laid out on the board.
@@ -338,6 +350,8 @@ fn line_strokes(line: &str, size: Size, italic: bool, start: Point) -> Vec<Vec<P
 
 #[cfg(test)]
 mod tests {
+    use test_case::test_case;
+
     use super::*;
 
     fn close(a: f64, b: f64) -> bool {
@@ -375,37 +389,46 @@ mod tests {
 
     #[test]
     fn a_character_the_table_lacks_draws_as_a_question_mark() {
-        assert!(!has_glyph('\u{10FFFF}'));
-        assert!(has_glyph('Ω'));
         assert_eq!(glyph('\u{10FFFF}'), glyph('?'));
+        assert_ne!(glyph('Ω'), glyph('?'));
     }
 
-    #[test]
-    fn the_pen_is_the_thickness_or_an_eighth_of_the_size_capped_at_a_quarter() {
-        let font = |thickness: Option<f64>, bold: bool| Font {
+    #[test_case(Some(0.15), false, 1.0, 0.15; "the thickness as written")]
+    #[test_case(None, false, 1.0, 0.125; "an eighth of the width without one")]
+    #[test_case(None, false, 1.2, 0.15; "the width, not the smaller side")]
+    #[test_case(None, true, 1.0, 0.2; "a fifth when bold")]
+    #[test_case(Some(0.4), false, 1.0, 0.25; "capped at a quarter of the smaller side")]
+    #[test_case(None, false, 4.0, 0.25; "the default capped too")]
+    fn the_pen_is_the_thickness_or_kicads_default_for_the_size(
+        thickness: Option<f64>,
+        bold: bool,
+        width: f64,
+        expected: f64,
+    ) {
+        let font = Font {
             face: None,
-            size: Size {
-                width: 1.0,
-                height: 1.0,
-            },
+            size: Size { width, height: 1.0 },
             thickness,
             bold,
             italic: false,
         };
-        assert!(close(pen_width(&font(Some(0.15), false)), 0.15));
-        assert!(close(pen_width(&font(None, false)), 0.125));
-        assert!(close(pen_width(&font(None, true)), 0.2));
-        assert!(close(pen_width(&font(Some(0.4), false)), 0.25));
+        let pen = pen_width(&font);
+        assert!(close(pen, expected), "{pen}");
     }
 
-    #[test]
-    fn an_upright_footprint_text_folds_its_angle_into_the_readable_half() {
-        assert!(close(draw_angle(90.0, true), 90.0));
-        assert!(close(draw_angle(270.0, true), 90.0));
-        assert!(close(draw_angle(180.0, true), 0.0));
-        assert!(close(draw_angle(-45.0, true), -45.0));
-        assert!(close(draw_angle(270.0, false), 270.0));
-        assert!(close(draw_angle(-90.0, false), 270.0));
+    #[test_case(90.0, true, 90.0; "90 stays")]
+    #[test_case(270.0, true, 90.0; "270 folds to 90")]
+    #[test_case(180.0, true, 0.0; "180 folds to 0")]
+    #[test_case(-45.0, true, -45.0; "minus 45 stays")]
+    #[test_case(270.0, false, 270.0; "unlocked keeps 270")]
+    #[test_case(-90.0, false, 270.0; "unlocked normalises minus 90")]
+    fn an_upright_footprint_text_folds_its_angle_into_the_readable_half(
+        rotation: f64,
+        upright: bool,
+        expected: f64,
+    ) {
+        let angle = draw_angle(rotation, upright);
+        assert!(close(angle, expected), "{angle}");
     }
 
     fn placement(justify: Justify, angle: f64) -> Placement {

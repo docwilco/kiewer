@@ -269,11 +269,10 @@ fn footprint_text_variables_resolve_to_its_properties() {
 }
 
 #[test]
-fn a_text_is_upright_unless_unlocked() {
+fn the_shown_texts_of_the_hand_off_footprint_are_upright_and_its_hidden_fields_are_not() {
     let board = board();
     let footprint = &board.footprints[0];
-    // KiCad writes `(unlocked yes)` on the fields it hides; the shown
-    // texts of the hand-off's footprint are all upright.
+    // KiCad writes `(unlocked yes)` on the fields it hides.
     let free: Vec<&str> = footprint
         .texts
         .iter()
@@ -282,20 +281,20 @@ fn a_text_is_upright_unless_unlocked() {
         .collect();
     assert!(free.is_empty(), "not upright: {free:?}");
     assert!(footprint.texts.iter().any(|t| t.hidden && !t.upright));
-    let unlocked = parse_board(
+}
+
+#[test_case("(at 0 0 270) (unlocked yes)", false; "unlocked yes")]
+#[test_case("(at 0 0 270 unlocked)", false; "the KiCad 7 word in at")]
+#[test_case("(at 0 0 270) (unlocked no)", true; "unlocked no")]
+#[test_case("(at 0 0 270)", true; "nothing said")]
+fn a_text_is_upright_unless_unlocked(placement: &str, upright: bool) {
+    let board = parse_board(&format!(
         r#"(kicad_pcb (version 20241229) (generator "pcbnew") (layers (0 "F.Cu" signal) (37 "F.SilkS" user))
           (footprint "X" (layer "F.Cu") (at 0 0)
-            (fp_text user "a" (at 0 0 270) (unlocked yes) (layer "F.SilkS") (effects (font (size 1 1))))
-            (fp_text user "b" (at 0 0 270 unlocked) (layer "F.SilkS") (effects (font (size 1 1))))
-            (fp_text user "c" (at 0 0 270) (unlocked no) (layer "F.SilkS") (effects (font (size 1 1))))))"#,
-    )
+            (fp_text user "a" {placement} (layer "F.SilkS") (effects (font (size 1 1))))))"#
+    ))
     .expect("parses");
-    let upright: Vec<bool> = unlocked.footprints[0]
-        .texts
-        .iter()
-        .map(|t| t.upright)
-        .collect();
-    assert_eq!(upright, [false, false, true]);
+    assert_eq!(board.footprints[0].texts[0].upright, upright);
 }
 
 #[test]

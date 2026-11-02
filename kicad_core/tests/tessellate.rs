@@ -649,17 +649,7 @@ fn the_hand_off_silkscreen_text_follows_kicad_anchors() {
         .iter()
         .find(|text| text.text == "3V3")
         .expect("the 3V3 label");
-    let shape = font::shape(
-        &text.text,
-        &font::Placement {
-            size: text.font.size,
-            pen: font::pen_width(&text.font),
-            italic: false,
-            justify: text.justify,
-            position: text.at,
-            angle: text.rotation,
-        },
-    );
+    let shape = font::shape(&text.text, &font::Placement::of(text, text.at, false));
     let points: Vec<Point> = shape.strokes.iter().flatten().copied().collect();
     let lowest = points.iter().map(|p| p.y).fold(f64::MIN, f64::max);
     let leftmost = points.iter().map(|p| p.x).fold(f64::MAX, f64::min);

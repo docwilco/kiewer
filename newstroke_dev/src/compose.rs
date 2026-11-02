@@ -252,13 +252,21 @@ impl Composer<'_> {
         self.metric2(name, name, 0, 0)
     }
 
-    /// The left bearing of `left` (offset `ox1`) and the right bearing of
-    /// `right` (offset `ox2`) as two characters.
-    fn metric2(&mut self, left: &str, right: &str, ox1: i64, ox2: i64) -> Result<String> {
-        let (l, r) = (self.bearings(left), self.bearings(right));
+    /// The left bearing of `left` (moved by `left_offset`) and the right
+    /// bearing of `right` (moved by `right_offset`) as two characters: the
+    /// metric of a glyph widened by an accent or joined to another.
+    fn metric2(
+        &mut self,
+        left: &str,
+        right: &str,
+        left_offset: i64,
+        right_offset: i64,
+    ) -> Result<String> {
+        let (left_bearing, _) = self.bearings(left);
+        let (_, right_bearing) = self.bearings(right);
         let mut out = String::new();
-        out.push(char::from(encode(l.0 + ox1)?));
-        out.push(char::from(encode(r.1 + ox2)?));
+        out.push(char::from(encode(left_bearing + left_offset)?));
+        out.push(char::from(encode(right_bearing + right_offset)?));
         Ok(out)
     }
 
@@ -290,8 +298,8 @@ impl Composer<'_> {
         let (base_anchor, accent_anchor) = anchor.split_once('=').unwrap_or((anchor, anchor));
         // The glyphs as named, without the DEL substitute: a missing glyph
         // has no anchors, as in the awk.
-        let (bt, base_name) = split(base);
-        let (at, accent_name) = split(accent);
+        let (base_t, base_name) = split(base);
+        let (accent_t, accent_name) = split(accent);
         let point = |name: &str, anchor: &str| {
             self.library
                 .glyphs
@@ -303,8 +311,8 @@ impl Composer<'_> {
             point(accent_name, accent_anchor),
         ) {
             (
-                bt.sx * b.0 - at.sx * a.0,
-                bt.sy * b.1 + bt.oy - at.sy * a.1 - at.oy,
+                base_t.sx * b.0 - accent_t.sx * a.0,
+                base_t.sy * b.1 + base_t.oy - accent_t.sy * a.1 - accent_t.oy,
             )
         } else {
             self.warnings.push(format!(
