@@ -563,7 +563,7 @@ fn layer_drawings(board: &Board, layer: LayerId) -> impl Iterator<Item = Drawing
 /// `drawing` with its points carried through `frame`. A rectangle turns
 /// into the polygon of its corners, since a turned rectangle is no
 /// longer axis-aligned.
-fn transformed(drawing: &Drawing, frame: &Transform) -> Drawing {
+pub(crate) fn transformed(drawing: &Drawing, frame: &Transform) -> Drawing {
     let f = |p: &Point| frame.apply(*p);
     let shape = match &drawing.shape {
         Shape::Line { start, end } => Shape::Line {
@@ -610,10 +610,34 @@ fn transformed(drawing: &Drawing, frame: &Transform) -> Drawing {
     }
 }
 
+/// The outline of `pad`'s shape on the board (in its `shape` frame,
+/// [`pad_frame`]), grown by `grow` on every side and flattened to within
+/// `tolerance`: the one outline the copper, the mask, the paste and the
+/// hit test (`crate::hit`) share. See `MeshBuilder::pad_outline`.
+pub(crate) fn pad_outline(pad: &Pad, shape: &Transform, grow: f64, tolerance: f64) -> Vec<Point> {
+    let min_side = pad.size.width.min(pad.size.height);
+    let radius = match pad.shape {
+        PadShape::Circle => pad.size.width / 2.0,
+        // A custom pad's anchor as well: KiCad's default anchor is a
+        // circle and the model does not carry the choice, so the
+        // stadium of the (usually square) anchor size stands for it.
+        PadShape::Oval | PadShape::Custom => min_side / 2.0,
+        // The chamfer sizes and the trapezoid's delta are not in the
+        // model; the plain rectangle is the nearest drawing.
+        PadShape::Rect | PadShape::Trapezoid | PadShape::ChamferedRect => 0.0,
+        PadShape::RoundRect => pad.round_radius_ratio.unwrap_or(0.25) * min_side,
+    };
+    let (size, radius) = grown(pad.size, radius, grow);
+    rounded_rect(size, radius, tolerance)
+        .into_iter()
+        .map(|p| shape.apply(p))
+        .collect()
+}
+
 /// Where `pad` sits on the board, given its footprint's `frame`. The pad's
 /// rotation is absolute in the file, the footprint's included, so the
 /// shape turns by it on the board, not in the footprint's frame.
-fn pad_frame(pad: &Pad, frame: &Transform) -> Transform {
+pub(crate) fn pad_frame(pad: &Pad, frame: &Transform) -> Transform {
     let shape = frame.then(Transform::new(pad.at, 0.0));
     Transform::new(shape.origin(), pad.rotation)
 }
@@ -667,7 +691,7 @@ fn outline_points(drawing: &Drawing, tolerance: f64) -> (Vec<Point>, bool) {
 
 /// The box around an outline drawing's centre line: exact for an arc and
 /// a circle, the flattened points (within `tolerance`) for a curve.
-fn graphic_bounds(drawing: &Drawing, tolerance: f64) -> Option<Bounds> {
+pub(crate) fn graphic_bounds(drawing: &Drawing, tolerance: f64) -> Option<Bounds> {
     match &drawing.shape {
         Shape::Arc { start, mid, end } => Some(match Arc::through(*start, *mid, *end) {
             Some(arc) => arc.bounds(),
@@ -962,23 +986,7 @@ impl MeshBuilder {
     /// corners by the same amount, as KiCad's own expansion does; a shape
     /// shrunk to nothing is empty.
     fn pad_outline(&self, pad: &Pad, shape: &Transform, grow: f64) -> Vec<Point> {
-        let min_side = pad.size.width.min(pad.size.height);
-        let radius = match pad.shape {
-            PadShape::Circle => pad.size.width / 2.0,
-            // A custom pad's anchor as well: KiCad's default anchor is a
-            // circle and the model does not carry the choice, so the
-            // stadium of the (usually square) anchor size stands for it.
-            PadShape::Oval | PadShape::Custom => min_side / 2.0,
-            // The chamfer sizes and the trapezoid's delta are not in the
-            // model; the plain rectangle is the nearest drawing.
-            PadShape::Rect | PadShape::Trapezoid | PadShape::ChamferedRect => 0.0,
-            PadShape::RoundRect => pad.round_radius_ratio.unwrap_or(0.25) * min_side,
-        };
-        let (size, radius) = grown(pad.size, radius, grow);
-        rounded_rect(size, radius, self.tolerance)
-            .into_iter()
-            .map(|p| shape.apply(p))
-            .collect()
+        pad_outline(pad, shape, grow, self.tolerance)
     }
 
     /// The polygons a custom pad's primitives cover on the board, for a

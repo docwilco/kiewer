@@ -988,8 +988,10 @@ impl Ord for Cell {
 }
 
 /// The distance from `point` to the nearest edge of `polygon`, positive
-/// inside and negative outside.
-fn signed_distance(point: Point, polygon: &[Point]) -> f64 {
+/// inside and negative outside; inside is by the even-odd rule, so a
+/// fill with its holes spliced in reads right. The hit test
+/// (`crate::hit`) measures with it too.
+pub(crate) fn signed_distance(point: Point, polygon: &[Point]) -> f64 {
     let mut inside = false;
     let mut nearest = f64::INFINITY;
     let edges = polygon
