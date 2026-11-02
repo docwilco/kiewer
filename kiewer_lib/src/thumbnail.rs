@@ -138,7 +138,24 @@ impl Thumbnail {
     }
 }
 
-/// The thumbnail of `revision`, or `None` while it is not rendered.
+/// When a `thumbnail t` row may be shown: neither of its PNGs is a
+/// blocked blob, nor is any file of its revision. Over the whole tree
+/// rather than the one file drawn, which the row does not record: a
+/// takedown shows the placeholder, and the file a thumbnail drew is
+/// among those. Every read of the row carries this, so the route and the
+/// pages agree; one probe of `blocked_blob` per entry, by primary key.
+pub const SHOWABLE: &str = "NOT EXISTS (
+        SELECT 1 FROM blocked_blob bb WHERE bb.hash IN (t.large_hash, t.small_hash)
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM revision r
+        JOIN tree_entry te ON te.tree_hash = r.tree_hash
+        JOIN blocked_blob bb ON bb.hash = te.blob_hash
+        WHERE r.hash = t.revision_hash
+    )";
+
+/// The thumbnail of `revision`, or `None` while it is not rendered or
+/// is not [`SHOWABLE`].
 ///
 /// # Errors
 ///
@@ -147,11 +164,13 @@ impl Thumbnail {
 pub async fn of(db: &PgPool, revision: RevisionHash) -> Result<Option<Thumbnail>> {
     // One read on the pool: a page's or the thumbnail route's lookup,
     // part of no write; by primary key.
-    let row: Option<(Vec<u8>, Vec<u8>)> =
-        sqlx::query_as("SELECT large_hash, small_hash FROM thumbnail WHERE revision_hash = $1")
-            .bind(revision.as_bytes())
-            .fetch_optional(db)
-            .await?;
+    let row: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(&format!(
+        "SELECT t.large_hash, t.small_hash FROM thumbnail t
+         WHERE t.revision_hash = $1 AND {SHOWABLE}"
+    ))
+    .bind(revision.as_bytes())
+    .fetch_optional(db)
+    .await?;
     row.map(|(large, small)| {
         Ok(Thumbnail {
             large: BlobHash::from_bytes(&large)?,
@@ -161,8 +180,8 @@ pub async fn of(db: &PgPool, revision: RevisionHash) -> Result<Option<Thumbnail>
     .transpose()
 }
 
-/// Which of `revisions` have a thumbnail: what a listing page asks once
-/// for every row it shows.
+/// Which of `revisions` have a [`SHOWABLE`] thumbnail: what a listing
+/// page asks once for every row it shows.
 ///
 /// # Errors
 ///
@@ -175,11 +194,13 @@ pub async fn rendered(db: &PgPool, revisions: &[RevisionHash]) -> Result<HashSet
         .iter()
         .map(|hash| hash.as_bytes().to_vec())
         .collect();
-    let rows: Vec<Vec<u8>> =
-        sqlx::query_scalar("SELECT revision_hash FROM thumbnail WHERE revision_hash = ANY($1)")
-            .bind(&hashes)
-            .fetch_all(db)
-            .await?;
+    let rows: Vec<Vec<u8>> = sqlx::query_scalar(&format!(
+        "SELECT t.revision_hash FROM thumbnail t
+         WHERE t.revision_hash = ANY($1) AND {SHOWABLE}"
+    ))
+    .bind(&hashes)
+    .fetch_all(db)
+    .await?;
     rows.iter()
         .map(|bytes| RevisionHash::from_bytes(bytes))
         .collect()
@@ -425,8 +446,8 @@ pub enum Outcome {
     Rendered,
     /// The revision had its thumbnail already.
     AlreadyRendered,
-    /// The revision holds neither a board nor a sheet to draw, or the
-    /// file is blocked.
+    /// The revision holds neither a board nor a sheet to draw, the file
+    /// has nothing on it to draw, or the file is blocked.
     NothingToRender,
     /// No revision has this hash.
     NoSuchRevision,
@@ -624,8 +645,8 @@ impl Thumbnails {
     /// Render `revision`'s thumbnail with no budget and store it: what
     /// the retry path does, and what [`Thumbnails::after_push`] does
     /// within the budget. Draws the revision's board (the one the design
-    /// page shows), else its root sheet; a revision with neither, or
-    /// whose file is blocked, gets none.
+    /// page shows), else its root sheet; a revision with neither, whose
+    /// file is blocked, or whose file has nothing on it gets none.
     ///
     /// # Errors
     ///
@@ -667,7 +688,15 @@ impl Thumbnails {
         })?;
         let source = as_source(text);
         let renderer = Arc::clone(&self.renderer);
-        let pngs = blocking(move || renderer.render(&source)).await?;
+        let pngs = match blocking(move || renderer.render(&source)).await {
+            Ok(pngs) => pngs,
+            // A board or a sheet with nothing on it: an answer, not a
+            // failure, so the placeholder stays and the queue stops.
+            Err(Error::Render(RenderError::NothingToDraw | RenderError::EmptySheet)) => {
+                return Ok(Outcome::NothingToRender);
+            }
+            Err(error) => return Err(error),
+        };
         store(db, blobs, revision, &pngs).await?;
         Ok(Outcome::Rendered)
     }

@@ -3,10 +3,12 @@
 //! branch, revision and history pages point at them; a render past the
 //! budget leaves the revision saved with a retry queued and the pages on
 //! the placeholder until the retry path renders it; a revision with only
-//! a schematic draws its sheet. The Postgres tests skip without
-//! `DATABASE_URL`, like `tests/db.rs`, and the renders skip on a box with
-//! no Vulkan driver, as the viewer's golden test does; on CI (`CI` set)
-//! both are failures, since the runner has Postgres and lavapipe.
+//! a schematic draws its sheet and its schematic page carries the tags; a
+//! blocked file takes its thumbnail off the route and every page. The
+//! Postgres tests skip without `DATABASE_URL`, like `tests/db.rs`, and
+//! the renders skip on a box with no Vulkan driver, as the viewer's
+//! golden test does; on CI (`CI` set) that skip is a failure, since the
+//! runner has lavapipe.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -16,6 +18,7 @@ use async_trait::async_trait;
 use kiewer_lib::Result;
 use kiewer_lib::account::{self, AccountId, Handle};
 use kiewer_lib::auth::{Auth, Provider, ProviderUser};
+use kiewer_lib::blob::BlobHash;
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::revision::RevisionHash;
 use kiewer_lib::session;
@@ -150,6 +153,16 @@ async fn png(addr: SocketAddr, path: &str) -> Image {
 fn page_colour() -> [u8; 4] {
     let kiewer_viewer::render::Rgb(r, g, b) = palette::PAGE;
     [r, g, b, 255]
+}
+
+/// The hand-off sheet under a uuid of its own: bytes no other test
+/// uploads, since a block outlives the test in the database and refuses
+/// those bytes for every test after it.
+fn unique_sheet() -> Vec<u8> {
+    let text = std::str::from_utf8(SCHEMATIC).expect("the sheet is text");
+    let uuid = "def34376-48e8-4c94-ba5b-58781196d402";
+    assert!(text.contains(uuid), "the sheet's own uuid");
+    text.replacen(uuid, &fresh("sheet"), 1).into_bytes()
 }
 
 /// The head of `design_path`'s default branch, off its history page: the
@@ -315,7 +328,7 @@ async fn a_revision_with_only_a_schematic_draws_its_sheet() {
         return;
     }
     let (addr, _dir, tasks) = server(db.clone(), Duration::from_secs(60)).await;
-    let (mut browser, _, _) = signed_in(&db, addr).await;
+    let (mut browser, _, handle) = signed_in(&db, addr).await;
     let design_path = push(&mut browser, "", &[("midi8knob.kicad_sch", SCHEMATIC)]).await;
     assert!(tasks.queued().is_empty(), "within the budget, no retry");
     let revision = head_on_history(addr, &design_path).await;
@@ -328,6 +341,116 @@ async fn a_revision_with_only_a_schematic_draws_its_sheet() {
     );
     let small = png(addr, &format!("/thumbnail/{revision}/400x400.png")).await;
     assert_eq!((small.width, small.height), (400, 400));
+
+    // The design's URL opens on the schematic page, which is the page
+    // an unfurl lands on, so it carries the tags.
+    let opened = http::request(addr, "GET", &design_path, &[], "").await;
+    assert_eq!(opened.status, 303, "{}", opened.body);
+    let sheet_path = format!("{design_path}/schematic");
+    assert_eq!(opened.header("location"), Some(sheet_path.as_str()));
+    let page = http::request(addr, "GET", &sheet_path, &[], "").await;
+    assert_eq!(page.status, 200, "{}", page.body);
+    for expected in [
+        r#"<meta property="og:title" content="midi8knob">"#.to_owned(),
+        format!(r#"<meta property="og:url" content="{PUBLIC_URL}{sheet_path}">"#),
+        format!(
+            r#"<meta property="og:image" content="{PUBLIC_URL}/thumbnail/{revision}/1200x630.png">"#
+        ),
+        format!(r#"<meta property="og:description" content="A KiCad design by {handle}">"#),
+    ] {
+        assert!(page.body.contains(&expected), "{expected}: {}", page.body);
+    }
+}
+
+#[tokio::test]
+async fn a_sheet_with_nothing_on_it_has_no_thumbnail_and_no_retry() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    if !can_render() {
+        return;
+    }
+    let (addr, _dir, tasks) = server(db.clone(), Duration::from_secs(60)).await;
+    let (mut browser, _, _) = signed_in(&db, addr).await;
+    let sheet = format!(
+        "(kicad_sch (version 20250114) (uuid \"{}\"))",
+        fresh("empty")
+    );
+    let design_path = push(&mut browser, "", &[("empty.kicad_sch", sheet.as_bytes())]).await;
+    assert!(tasks.queued().is_empty(), "nothing to retry");
+    let revision = head_on_history(addr, &design_path).await;
+    let history = history_page(addr, &design_path).await;
+    assert!(
+        history.body.contains(r#"class="thumb placeholder""#),
+        "{}",
+        history.body
+    );
+    let retried = http::request(
+        addr,
+        "POST",
+        &format!("/api/thumbnails/{revision}"),
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(
+        (retried.status, retried.body.as_str()),
+        (200, "nothing to render\n"),
+        "done, so the queue stops asking"
+    );
+}
+
+#[tokio::test]
+async fn a_blocked_file_takes_its_thumbnail_off_the_route_and_every_page() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    if !can_render() {
+        return;
+    }
+    let (addr, _dir, _tasks) = server(db.clone(), Duration::from_secs(60)).await;
+    let (mut browser, _, handle) = signed_in(&db, addr).await;
+    let sheet = unique_sheet();
+    let design_path = push(&mut browser, "", &[("blocked.kicad_sch", &sheet)]).await;
+    let revision = head_on_history(addr, &design_path).await;
+    let small_route = format!("/thumbnail/{revision}/400x400.png");
+    png(addr, &small_route).await;
+    let small_src = format!(r#"src="{small_route}""#);
+    assert!(
+        history_page(addr, &design_path)
+            .await
+            .body
+            .contains(&small_src),
+        "shown before the block"
+    );
+
+    sqlx::query("INSERT INTO blocked_blob (hash, reason) VALUES ($1, 'test')")
+        .bind(BlobHash::of(&sheet).as_bytes())
+        .execute(&db)
+        .await
+        .unwrap();
+
+    for route in [
+        small_route.clone(),
+        format!("/thumbnail/{revision}/1200x630.png"),
+    ] {
+        let gone = http::request(addr, "GET", &route, &[], "").await;
+        assert_eq!(gone.status, 404, "{route}");
+        assert_eq!(gone.header("cache-control"), Some("no-store"), "{route}");
+    }
+    let history = history_page(addr, &design_path).await;
+    assert!(!history.body.contains(&small_src), "{}", history.body);
+    assert!(
+        history.body.contains(r#"class="thumb placeholder""#),
+        "{}",
+        history.body
+    );
+    assert!(!history.body.contains("og:image"), "{}", history.body);
+    let person = http::request(addr, "GET", &format!("/{handle}"), &[], "").await;
+    assert!(!person.body.contains(&small_src), "{}", person.body);
+    let stayed = http::request(addr, "GET", &format!("{design_path}?design"), &[], "").await;
+    assert_eq!(stayed.status, 200, "{}", stayed.body);
+    assert!(!stayed.body.contains("og:image"), "{}", stayed.body);
 }
 
 #[tokio::test]

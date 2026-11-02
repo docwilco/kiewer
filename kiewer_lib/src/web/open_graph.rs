@@ -1,6 +1,6 @@
 //! Open Graph tags (docs/v1-scope.md, Pages and URLs): what Discord reads
-//! from a page's `<head>` to unfurl a link. The design, branch, revision
-//! and history pages carry one [`OpenGraph`] each, written by the
+//! from a page's `<head>` to unfurl a link. The design, branch, revision,
+//! schematic and history pages carry one [`OpenGraph`] each, written by the
 //! `open_graph.html` partial: title, description, the page's absolute
 //! URL, and the revision's large thumbnail (ADR 0004) with its size once
 //! it is rendered; until then the tags carry no image, since Discord

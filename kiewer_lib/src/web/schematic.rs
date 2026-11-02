@@ -25,10 +25,12 @@ use kicad_core::schematic::model::Sheet;
 use kicad_core::schematic::sheet_tree::{self, SheetNode, SheetPath};
 
 use super::history::{self, Linked};
+use super::open_graph::{self, OpenGraph};
 use super::viewer::{NOT_BUILT, embedded, script_url};
 use super::{AppState, blob};
 use crate::account::Handle;
 use crate::blob::blocking;
+use crate::description;
 use crate::design::{self, At, BranchName, DesignHead, Slug};
 use crate::error::Result;
 use crate::revision::RevisionHash;
@@ -156,6 +158,10 @@ pub struct Page {
     pub sheets: Vec<SheetView>,
     /// The way back to the design, when there is one.
     pub back: Option<Back>,
+    /// The Open Graph tags in the head (`web/open_graph.rs`): the page a
+    /// design with no board opens on, so the page a link to it unfurls
+    /// from. `None` for the hand-off sheet, which nobody links.
+    pub og: Option<OpenGraph>,
 }
 
 /// The header's link back from the schematic page: the design's board
@@ -169,7 +175,12 @@ pub struct Back {
 impl Page {
     /// A page for `title` with the viewer's build state filled in.
     #[must_use]
-    pub fn new(title: String, sheets: Vec<SheetView>, back: Option<Back>) -> Self {
+    pub fn new(
+        title: String,
+        sheets: Vec<SheetView>,
+        back: Option<Back>,
+        og: Option<OpenGraph>,
+    ) -> Self {
         Self {
             build: crate::build::line(),
             embedded: embedded(),
@@ -178,6 +189,7 @@ impl Page {
             title,
             sheets,
             back,
+            og,
         }
     }
 }
@@ -193,7 +205,7 @@ async fn hand_off() -> Result<Html<String>> {
         fragment: String::new(),
         url: Some(SCHEMATIC_PATH.to_owned()),
     }];
-    let page = Page::new("midi8knob".to_owned(), sheets, None);
+    let page = Page::new("midi8knob".to_owned(), sheets, None, None);
     Ok(Html(page.render()?))
 }
 
@@ -288,7 +300,15 @@ async fn show(state: &AppState, handle: &str, slug: &str, at: At<'_>) -> Result<
             label: "design page",
         }
     };
-    let page = Page::new(shown.design.name, sheets, Some(back));
+    let description = description::of(&state.db, shown.design.id).await?;
+    let path = url_at(
+        &handle,
+        &shown.design.slug,
+        &shown.design.default_branch,
+        at,
+    );
+    let og = open_graph::for_design(state, &shown, &description, &path).await?;
+    let page = Page::new(shown.design.name, sheets, Some(back), Some(og));
     Ok(Html(page.render()?).into_response())
 }
 

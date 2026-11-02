@@ -39,7 +39,7 @@ fn not_found(what: &str) -> Response {
 
 /// `GET /thumbnail/{hash}/{file}`: the PNG of that size, or 404 for text
 /// that is not a revision hash, a size nobody renders, or a revision
-/// whose thumbnail is not rendered.
+/// whose thumbnail is not rendered or is blocked (`thumbnail::SHOWABLE`).
 async fn serve(
     State(state): State<AppState>,
     Path((hash, file)): Path<(String, String)>,

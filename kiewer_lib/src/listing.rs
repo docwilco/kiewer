@@ -10,7 +10,7 @@ use sqlx::PgPool;
 use crate::account::AccountId;
 use crate::error::Result;
 use crate::revision::RevisionHash;
-use crate::thumbnail::{self, Size};
+use crate::thumbnail::{self, SHOWABLE, Size};
 
 /// How many designs the home page lists.
 pub const RECENT: i64 = 20;
@@ -28,7 +28,7 @@ pub struct Listed {
     /// The head's hash, 64 hex characters: what its thumbnail's URL is
     /// under.
     pub head: String,
-    /// Whether the head's thumbnail is rendered (ADR 0004).
+    /// Whether the head has a thumbnail to show (ADR 0004).
     pub thumbnail: bool,
 }
 
@@ -39,8 +39,8 @@ impl Listed {
         format!("/{}/{}", self.handle, self.slug)
     }
 
-    /// The head's small thumbnail, once it is rendered; the placeholder
-    /// until then.
+    /// The head's small thumbnail, once it is rendered and while it is
+    /// not blocked; the placeholder otherwise.
     #[must_use]
     pub fn thumbnail_url(&self) -> Option<String> {
         if !self.thumbnail {
@@ -53,11 +53,18 @@ impl Listed {
 
 /// The columns a listing selects, under [`Listed`]'s names, from a
 /// `design d`, its owner `a` and its default branch `b`; the thumbnail
-/// flag is one probe of `thumbnail` by its key per row.
-const LISTED_COLUMNS: &str = r#"a.handle, d.slug, d.name,
+/// flag is one probe of `thumbnail` by its key per row, with the block
+/// list's own probes ([`SHOWABLE`]).
+fn listed_columns() -> String {
+    format!(
+        r#"a.handle, d.slug, d.name,
     to_char(b.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
     encode(b.head_hash, 'hex') AS head,
-    EXISTS (SELECT 1 FROM thumbnail t WHERE t.revision_hash = b.head_hash) AS thumbnail"#;
+    EXISTS (
+        SELECT 1 FROM thumbnail t WHERE t.revision_hash = b.head_hash AND {SHOWABLE}
+    ) AS thumbnail"#
+    )
+}
 
 /// The public designs whose default branch moved most recently, newest
 /// first, at most [`RECENT`].
@@ -74,13 +81,14 @@ pub async fn recent_public(db: &PgPool) -> Result<Vec<Listed>> {
     // pushes go to main on a public design; a partial index over the
     // join is the answer if that stops being true.
     Ok(sqlx::query_as(&format!(
-        "SELECT {LISTED_COLUMNS}
+        "SELECT {}
          FROM branch b
          JOIN design d ON d.id = b.design_id AND d.default_branch = b.name
          JOIN account a ON a.id = d.owner_id
          WHERE d.visibility = 'public'
          ORDER BY b.updated_at DESC, d.id DESC
-         LIMIT $1"
+         LIMIT $1",
+        listed_columns()
     ))
     .bind(RECENT)
     .fetch_all(db)
@@ -112,12 +120,13 @@ pub async fn public_of(db: &PgPool, owner: AccountId) -> Result<Vec<Listed>> {
     // owner's designs by the (owner_id, slug) index, each's default
     // branch by primary key.
     Ok(sqlx::query_as(&format!(
-        "SELECT {LISTED_COLUMNS}
+        "SELECT {}
          FROM design d
          JOIN account a ON a.id = d.owner_id
          JOIN branch b ON b.design_id = d.id AND b.name = d.default_branch
          WHERE d.owner_id = $1 AND d.visibility = 'public'
-         ORDER BY b.updated_at DESC, d.id DESC"
+         ORDER BY b.updated_at DESC, d.id DESC",
+        listed_columns()
     ))
     .bind(owner)
     .fetch_all(db)
