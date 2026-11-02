@@ -166,6 +166,25 @@ pub enum Refusal {
     /// The multipart body itself could not be read.
     #[display("the upload could not be read: {reason}")]
     Unreadable { reason: String },
+    /// A zip the server could not read as one, or holding an entry it
+    /// will not inflate: encrypted, in a compression method other than
+    /// deflate or stored, or larger than its directory entry declares.
+    #[display("{path}: {reason}")]
+    BadArchive { path: String, reason: String },
+    /// A zip whose central directory lists more entries than the server
+    /// reads.
+    #[display("{path} lists {count} entries, more than the {limit} the server reads")]
+    TooManyEntries {
+        path: String,
+        count: usize,
+        limit: usize,
+    },
+    /// The account has pushed its hourly allowance of revisions; the web
+    /// layer answers 429 with `retry_after_secs` as `Retry-After`.
+    #[display(
+        "you have made {limit} uploads in the last hour, the limit, refused ones included; try again in {retry_after_secs} seconds"
+    )]
+    RateLimited { limit: u32, retry_after_secs: u64 },
 }
 
 /// The library's result type.

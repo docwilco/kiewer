@@ -2,15 +2,20 @@
 //! the design's default branch in the viewer with the revision's details
 //! (`web/viewer.rs`'s page); `/upload` is the form and its POST for a
 //! signed-in person with a handle, streamed part by part into
-//! `upload::Incoming` and committed by `upload::push`. The upload pages
-//! are the person's own, so they carry `private, no-store`; the design
-//! page renders the same for everyone.
+//! `upload::Incoming` and committed by `upload::push`. A part named
+//! `.zip` is expanded there; a part's file name may be a relative path,
+//! as the folder picker and a dropped folder send (the page's script
+//! builds the body with `webkitRelativePath` and the dropped entries'
+//! paths). The hourly allowance is checked before the body is read, so a
+//! refused upload writes nothing to disk. The upload pages are the
+//! person's own, so they carry `private, no-store`; the design page
+//! renders the same for everyone.
 
 use askama::Template;
 use axum::extract::multipart::{Field, Multipart, MultipartError};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::http::header::LOCATION;
+use axum::http::header::{LOCATION, RETRY_AFTER};
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
@@ -24,6 +29,7 @@ use crate::account::Handle;
 use crate::description::{self, Description};
 use crate::design::{self, At, BranchName, DesignHead, ForkSource, Slug};
 use crate::error::{Error, Refusal, Result};
+use crate::rate_limit;
 use crate::revision::RevisionHash;
 use crate::roles::{self, Membership};
 use crate::slug;
@@ -276,8 +282,18 @@ struct UploadPage {
     from: String,
     /// Why the last attempt was refused, or none.
     error: Option<String>,
+    /// What the last attempt made, when it came back here with warnings
+    /// rather than going to the design's page.
+    pushed: Option<PushedNotice>,
     file_mb: u64,
     revision_mb: u64,
+}
+
+/// A push that went through with something to say: where the revision
+/// is, and `upload::Pushed`'s warnings.
+struct PushedNotice {
+    url: String,
+    warnings: Vec<String>,
 }
 
 async fn upload_page(
@@ -286,6 +302,7 @@ async fn upload_page(
     opened: &Opened,
     status: StatusCode,
     error: Option<String>,
+    pushed: Option<PushedNotice>,
 ) -> Result<Response> {
     let designs = roles::designs_of(&state.db, settled.account_id).await?;
     let selected = designs.iter().find(|member| member.path() == opened.design);
@@ -314,6 +331,7 @@ async fn upload_page(
         from: opened.from.clone(),
         handle: settled.handle,
         error,
+        pushed,
         file_mb: Limits::DEFAULT.file_mb(),
         revision_mb: Limits::DEFAULT.revision_mb(),
     };
@@ -327,13 +345,13 @@ pub(super) async fn upload_form(
     settled: Settled,
     Query(opened): Query<Opened>,
 ) -> Result<Response> {
-    upload_page(&state, settled, &opened, StatusCode::OK, None).await
+    upload_page(&state, settled, &opened, StatusCode::OK, None, None).await
 }
 
 /// The status a refusal is answered with: too large is 413, a file the
 /// server will not take is 422, a conflict with what exists is 409, a
 /// design that does not exist is 404, a body that is not multipart is
-/// 400.
+/// 400, the hourly allowance used is 429.
 fn status(refusal: &Refusal) -> StatusCode {
     match refusal {
         Refusal::FileTooLarge { .. }
@@ -342,7 +360,10 @@ fn status(refusal: &Refusal) -> StatusCode {
         Refusal::NoKicadFile
         | Refusal::DoesNotParse { .. }
         | Refusal::ParseTimeout { .. }
-        | Refusal::Blocked { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        | Refusal::Blocked { .. }
+        | Refusal::BadArchive { .. }
+        | Refusal::TooManyEntries { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        Refusal::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
         Refusal::SlugTaken { .. }
         | Refusal::SlugMoved { .. }
         | Refusal::HeadMoved { .. }
@@ -498,30 +519,85 @@ async fn drain(mut field: Field<'_>) -> Result<()> {
     Ok(())
 }
 
-/// One file part into `incoming`, chunk by chunk, or dropped when it is
-/// not a KiCad file (or the empty part a form sends with no file chosen).
+/// One file part into `incoming`, chunk by chunk: a zip to be expanded,
+/// a KiCad file as it is, or dropped when it is neither (or the empty
+/// part a form sends with no file chosen).
 async fn receive_file(mut field: Field<'_>, incoming: &mut Incoming) -> Result<()> {
-    let Some((path, kind)) = field
+    let name = field
         .file_name()
         .filter(|name| !name.is_empty())
-        .and_then(Incoming::accepts)
-    else {
+        .map(str::to_owned);
+    let Some(name) = name else {
         return drain(field).await;
     };
-    incoming.begin(path, kind).await?;
+    if Incoming::is_archive(&name) {
+        incoming.begin_archive(&name).await?;
+    } else if let Some((path, kind)) = Incoming::accepts(&name) {
+        incoming.begin(path, kind).await?;
+    } else {
+        return drain(field).await;
+    }
     while let Some(chunk) = field.chunk().await.map_err(|error| unreadable(&error))? {
         incoming.write(&chunk).await?;
     }
     incoming.end().await
 }
 
+/// The form again with why the upload was refused, at the refusal's
+/// status (a used allowance with `Retry-After`), or the 403 of a push
+/// the person has no role for; any other error is the caller's 500.
+async fn refused(
+    state: &AppState,
+    settled: Settled,
+    opened: &Opened,
+    error: Error,
+) -> Result<Response> {
+    let (status, message, retry_after) = match &error {
+        Error::Refused(refusal) => {
+            let retry_after = match refusal {
+                Refusal::RateLimited {
+                    retry_after_secs, ..
+                } => Some(*retry_after_secs),
+                _ => None,
+            };
+            (status(refusal), refusal.to_string(), retry_after)
+        }
+        Error::Forbidden { .. } => (StatusCode::FORBIDDEN, error.to_string(), None),
+        _ => return Err(error),
+    };
+    tracing::info!(%error, "upload refused");
+    // A refusal spends the allowance, save the allowance's own: being
+    // limited must not extend the limit.
+    if !matches!(error, Error::Refused(Refusal::RateLimited { .. })) {
+        rate_limit::record_refusal(&state.db, settled.account_id).await?;
+    }
+    let mut response = upload_page(state, settled, opened, status, Some(message), None).await?;
+    if let Some(seconds) = retry_after {
+        response
+            .headers_mut()
+            .insert(RETRY_AFTER, HeaderValue::from(seconds));
+    }
+    Ok(response)
+}
+
 /// `POST /upload`: the files become a revision and the browser goes to
-/// the design's page. A refusal comes back as the form with the reason.
+/// the design's page; a push with warnings (`upload::Pushed`) comes back
+/// here with them and the link instead. A refusal comes back as the form
+/// with the reason.
 pub(super) async fn upload(
     State(state): State<AppState>,
     settled: Settled,
     mut multipart: Multipart,
 ) -> Result<Response> {
+    if let Err(error) = rate_limit::check(
+        &state.db,
+        settled.account_id,
+        Limits::DEFAULT.uploads_per_hour,
+    )
+    .await
+    {
+        return refused(&state, settled, &Opened::default(), error).await;
+    }
     let mut incoming = Incoming::new(Limits::DEFAULT)?;
     let mut fields = Fields::default();
     let received = receive(&mut multipart, &mut incoming, &mut fields).await;
@@ -561,31 +637,24 @@ pub(super) async fn upload(
                 .after_push(&state.db, state.blobs.as_ref(), committed.revision)
                 .await;
             let next = history::branch_url(&owner, &committed.design, &committed.branch);
-            Ok(personal(settled.jar, Redirect::to(&next)))
-        }
-        Err(Error::Refused(refusal)) => {
-            tracing::info!(%refusal, "upload refused");
+            if committed.warnings.is_empty() {
+                return Ok(personal(settled.jar, Redirect::to(&next)));
+            }
+            let pushed = PushedNotice {
+                url: next,
+                warnings: committed.warnings,
+            };
             upload_page(
                 &state,
                 settled,
                 &fields.opened(),
-                status(&refusal),
-                Some(refusal.to_string()),
+                StatusCode::OK,
+                None,
+                Some(pushed),
             )
             .await
         }
-        Err(error @ Error::Forbidden { .. }) => {
-            tracing::info!(%error, "upload refused");
-            upload_page(
-                &state,
-                settled,
-                &fields.opened(),
-                StatusCode::FORBIDDEN,
-                Some(error.to_string()),
-            )
-            .await
-        }
-        Err(error) => Err(error),
+        Err(error) => refused(&state, settled, &fields.opened(), error).await,
     }
 }
 

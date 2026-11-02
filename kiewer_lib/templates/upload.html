@@ -7,6 +7,9 @@
 <style>
   label { display: block; margin: 0.6em 0; }
   .error { color: #a00; }
+  .notice { border: 1px solid #888; padding: 0.6em; }
+  #drop { border: 2px dashed #888; padding: 1.5em; margin: 0.6em 0; text-align: center; }
+  #drop.over { border-color: #06c; }
 </style>
 </head>
 <body>
@@ -14,6 +17,16 @@
 <h1>Upload a revision</h1>
 {% if let Some(error) = error %}
 <p class="error" role="alert">{{ error }}</p>
+{% endif %}
+{% if let Some(pushed) = pushed %}
+<div class="notice" role="status">
+  <p>Pushed: <a href="{{ pushed.url }}">{{ pushed.url }}</a>.</p>
+  <ul>
+    {% for warning in pushed.warnings %}
+    <li>{{ warning }}</li>
+    {% endfor %}
+  </ul>
+</div>
 {% endif %}
 <form method="post" action="/upload" enctype="multipart/form-data">
   <label>Design
@@ -45,11 +58,110 @@
   <label>Message
     <input name="message" maxlength="500">
   </label>
-  <label>Files
-    <input type="file" name="files" multiple required accept=".kicad_pcb,.kicad_sch,.kicad_pro">
+  <label>Files, or a zip of the project
+    <input type="file" name="files" multiple accept=".kicad_pcb,.kicad_sch,.kicad_pro,.zip">
   </label>
-  <p>Only <code>.kicad_pcb</code>, <code>.kicad_sch</code> and <code>.kicad_pro</code> files are kept, from KiCad 9 or later, up to {{ file_mb }} MB each and {{ revision_mb }} MB together. Other files are left out.</p>
+  <label>Or the project folder
+    <input type="file" name="files" multiple webkitdirectory>
+  </label>
+  <div id="drop" tabindex="0">Or drop files, a folder or a zip here</div>
+  <ul id="dropped"></ul>
+  <p>Only <code>.kicad_pcb</code>, <code>.kicad_sch</code> and <code>.kicad_pro</code> files are kept, from KiCad 9 or later, up to {{ file_mb }} MB each and {{ revision_mb }} MB together. Other files are left out, and so are backups, lock files and autosaves. The files are kept under the project folder, the one holding the <code>.kicad_pro</code>, with their paths.</p>
   <button type="submit">Upload</button>
 </form>
+<script type="module">
+// The folder picker and a dropped folder give each file its path under
+// the folder (webkitRelativePath, the entry's path): the body is built
+// here so every part carries it, and the server roots the tree.
+const form = document.querySelector("form");
+const button = form.querySelector("button");
+const drop = document.getElementById("drop");
+const droppedList = document.getElementById("dropped");
+const dropped = [];
+// A dropped folder is read a batch at a time; a submit waits for it, or the
+// revision would hold only what the walk had reached.
+let walking = Promise.resolve();
+
+function note(path) {
+  const item = document.createElement("li");
+  item.textContent = path;
+  droppedList.append(item);
+}
+
+function fileOf(entry) {
+  return new Promise((resolve, reject) => entry.file(resolve, reject));
+}
+
+function entriesOf(reader) {
+  return new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+}
+
+async function walk(entry, prefix) {
+  if (entry.isFile) {
+    const path = prefix + entry.name;
+    dropped.push({ path, file: await fileOf(entry) });
+    note(path);
+  } else if (entry.isDirectory) {
+    const reader = entry.createReader();
+    for (;;) {
+      const batch = await entriesOf(reader);
+      if (batch.length === 0) break;
+      for (const child of batch) await walk(child, prefix + entry.name + "/");
+    }
+  }
+}
+
+drop.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  drop.classList.add("over");
+});
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", async (event) => {
+  event.preventDefault();
+  drop.classList.remove("over");
+  const entries = [...event.dataTransfer.items]
+    .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
+    .filter((entry) => entry !== null);
+  if (entries.length === 0) {
+    for (const file of event.dataTransfer.files) {
+      dropped.push({ path: file.name, file });
+      note(file.name);
+    }
+    return;
+  }
+  walking = walking.then(async () => {
+    for (const entry of entries) await walk(entry, "");
+  });
+});
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  button.disabled = true;
+  try {
+    await walking;
+    const body = new FormData();
+    for (const field of form.elements) {
+      if (!field.name) continue;
+      if (field.type === "file") {
+        for (const file of field.files) body.append("files", file, file.webkitRelativePath || file.name);
+      } else {
+        body.append(field.name, field.value);
+      }
+    }
+    for (const entry of dropped) body.append("files", entry.file, entry.path);
+    const response = await fetch(form.action, { method: "POST", body, credentials: "same-origin" });
+    if (response.redirected) {
+      location.assign(response.url);
+      return;
+    }
+    const html = await response.text();
+    document.open();
+    document.write(html);
+    document.close();
+  } finally {
+    button.disabled = false;
+  }
+});
+</script>
 </body>
 </html>

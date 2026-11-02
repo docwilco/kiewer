@@ -73,6 +73,14 @@ time = { version = "0.3", default-features = false }
 # fs and io-util: the upload's parts streamed into temporary files.
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "signal", "time"] }
 tracing = "0.1"
+# The zip in an upload (upload/archive.rs): the central directory read
+# first, entries inflated one by one. Deflate alone, through the flate2
+# already in the tree; no other method, no time crate, no encryption.
+# Pinned exactly: it parses untrusted uploads and ships several releases a
+# week, so a release is taken once it has aged two weeks. 9.0.5 was the
+# newest such on 2026-11-02. Later readers are faster on a hostile zip, which
+# archive.rs's screen bounds on any version; moving up is its own issue.
+zip ={ version = "=9.0.5", default-features = false, features = ["deflate-flate2"] }
 
 [build-dependencies]
 # The static assets (docs/v1-scope.md, Caching; build.rs): the viewer's

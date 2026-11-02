@@ -14,6 +14,7 @@ pub mod error;
 pub mod fork;
 mod hex;
 pub mod listing;
+pub mod rate_limit;
 pub mod revision;
 pub mod roles;
 pub mod server;
