@@ -21,6 +21,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 
 use super::AppState;
+use super::open_graph::OpenGraph;
 use crate::cache::{Encoding, Policy};
 use crate::error::Result;
 use crate::roles::Visibility;
@@ -238,12 +239,20 @@ pub struct Page {
     pub board_url: Option<String>,
     /// The design and revision shown, or `None` for the hand-off board.
     pub design: Option<DesignView>,
+    /// The Open Graph tags in the head (`web/open_graph.rs`), or `None`
+    /// for the hand-off board, which nobody links.
+    pub og: Option<OpenGraph>,
 }
 
 impl Page {
     /// A page for `title` with the viewer's build state filled in.
     #[must_use]
-    pub fn new(title: String, board_url: Option<String>, design: Option<DesignView>) -> Self {
+    pub fn new(
+        title: String,
+        board_url: Option<String>,
+        design: Option<DesignView>,
+        og: Option<OpenGraph>,
+    ) -> Self {
         Self {
             build: crate::build::line(),
             embedded: embedded(),
@@ -252,12 +261,18 @@ impl Page {
             title,
             board_url,
             design,
+            og,
         }
     }
 }
 
 async fn page() -> Result<Html<String>> {
-    let page = Page::new("midi8knob".to_owned(), Some(BOARD_PATH.to_owned()), None);
+    let page = Page::new(
+        "midi8knob".to_owned(),
+        Some(BOARD_PATH.to_owned()),
+        None,
+        None,
+    );
     Ok(Html(page.render()?))
 }
 

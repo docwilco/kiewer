@@ -20,7 +20,7 @@ use kicad_core::model::Point;
 use crate::camera::{Camera, Size};
 use crate::error::{Error, Result};
 use crate::render::offscreen::{Image, Offscreen};
-use crate::render::{Backend, Draw, MSAA_SAMPLES, Renderer, device_descriptor};
+use crate::render::{Backend, Draw, MSAA_SAMPLES, Renderer, Vertex, device_descriptor};
 use crate::scene::{Scene, clear_color};
 use crate::view::ViewState;
 
@@ -55,6 +55,15 @@ impl Frame {
             mirrored: false,
         }
     }
+}
+
+/// Triangles to draw, as a board scene and a sheet scene both hold
+/// them: positions relative to `origin`, three indices per triangle.
+#[derive(Debug, Clone, Copy)]
+pub struct Mesh<'a> {
+    pub origin: Point,
+    pub vertices: &'a [Vertex],
+    pub indices: &'a [u32],
 }
 
 /// A device without a surface, and the renderer on it.
@@ -155,6 +164,29 @@ impl Headless {
     /// [`Error::FrameTooLarge`] for a frame wider or taller than the
     /// adapter's textures go; the readback's ([`Offscreen::read`]).
     pub fn render_draws(&mut self, scene: &Scene, draws: &[Draw], frame: &Frame) -> Result<Image> {
+        let mesh = Mesh {
+            origin: scene.origin,
+            vertices: &scene.vertices,
+            indices: &scene.indices,
+        };
+        self.render_mesh(mesh, clear_color(Offscreen::FORMAT), draws, frame)
+    }
+
+    /// Draw `mesh` as `draws` say over `clear` into `frame` and read it
+    /// back: a board scene's triangles with its draw list, or a sheet
+    /// scene's (`crate::schematic::SheetScene`) with its own draws and
+    /// paper colour, which is how a thumbnail of a schematic is drawn.
+    ///
+    /// # Errors
+    ///
+    /// As [`Headless::render_draws`].
+    pub fn render_mesh(
+        &mut self,
+        mesh: Mesh<'_>,
+        clear: wgpu::Color,
+        draws: &[Draw],
+        frame: &Frame,
+    ) -> Result<Image> {
         let limit = self.device.limits().max_texture_dimension_2d;
         if frame.width > limit || frame.height > limit {
             return Err(Error::FrameTooLarge {
@@ -164,7 +196,7 @@ impl Headless {
             });
         }
         self.renderer
-            .upload(&self.device, &scene.vertices, &scene.indices);
+            .upload(&self.device, mesh.vertices, mesh.indices);
         let mut camera = Camera::new(Size {
             width: f64::from(frame.width.max(1)),
             height: f64::from(frame.height.max(1)),
@@ -175,8 +207,8 @@ impl Headless {
         self.renderer.render(
             &self.device,
             &self.queue,
-            &offscreen.target(clear_color(Offscreen::FORMAT)),
-            camera.view(scene.origin),
+            &offscreen.target(clear),
+            camera.view(mesh.origin),
             draws,
             false,
         );

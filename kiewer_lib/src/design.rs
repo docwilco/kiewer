@@ -684,49 +684,17 @@ pub struct DesignHead {
 }
 
 impl DesignHead {
-    /// The board the viewer loads: the shallowest `.kicad_pcb`, first by
-    /// name among equals, or `None` for a revision without one.
+    /// The board the viewer loads ([`board_in`] over the files).
     #[must_use]
     pub fn board(&self) -> Option<&TreeEntry> {
-        self.shallowest("kicad_pcb")
+        board_in(&self.files)
     }
 
-    /// The files with `extension`, in path order.
-    fn with_extension<'a>(&'a self, extension: &'a str) -> impl Iterator<Item = &'a TreeEntry> {
-        self.files
-            .iter()
-            .filter(move |entry| entry.path.extension().as_deref() == Some(extension))
-    }
-
-    /// The shallowest file with `extension`, first by name among equals.
-    fn shallowest<'a>(&'a self, extension: &'a str) -> Option<&'a TreeEntry> {
-        self.with_extension(extension)
-            .min_by_key(|entry| (entry.path.depth(), &entry.path))
-    }
-
-    /// The root sheet the schematic page loads: the `.kicad_sch` named
-    /// like the project file (KiCad names the root sheet after the
-    /// project), else like the board, else the shallowest, first by name
-    /// among equals; `None` for a revision without one.
+    /// The root sheet the schematic page loads ([`schematic_in`] over
+    /// the files).
     #[must_use]
     pub fn schematic(&self) -> Option<&TreeEntry> {
-        let stem = |entry: &TreeEntry| {
-            entry
-                .path
-                .file_name()
-                .rsplit_once('.')
-                .map(|(stem, _)| stem.to_owned())
-        };
-        let named_like = |extension: &str| {
-            let anchor = self.shallowest(extension)?;
-            let wanted = stem(anchor)?;
-            self.with_extension("kicad_sch")
-                .filter(|entry| entry.path.depth() == anchor.path.depth())
-                .find(|entry| stem(entry).as_deref() == Some(wanted.as_str()))
-        };
-        named_like("kicad_pro")
-            .or_else(|| named_like("kicad_pcb"))
-            .or_else(|| self.shallowest("kicad_sch"))
+        schematic_in(&self.files)
     }
 
     /// Whether the revision opens on its schematic: it has no board for
@@ -738,6 +706,56 @@ impl DesignHead {
     pub fn opens_on_schematic(&self) -> bool {
         self.board().is_none() && self.schematic().is_some()
     }
+}
+
+/// The files with `extension`, in path order.
+fn with_extension<'a>(
+    files: &'a [TreeEntry],
+    extension: &str,
+) -> impl Iterator<Item = &'a TreeEntry> + 'a {
+    let extension = extension.to_owned();
+    files
+        .iter()
+        .filter(move |entry| entry.path.extension() == Some(extension.clone()))
+}
+
+/// The shallowest file with `extension`, first by name among equals.
+fn shallowest<'a>(files: &'a [TreeEntry], extension: &str) -> Option<&'a TreeEntry> {
+    with_extension(files, extension).min_by_key(|entry| (entry.path.depth(), &entry.path))
+}
+
+/// The board the viewer loads and the thumbnail draws: the shallowest
+/// `.kicad_pcb` of `files`, first by name among equals, or `None` for a
+/// revision without one.
+#[must_use]
+pub fn board_in(files: &[TreeEntry]) -> Option<&TreeEntry> {
+    shallowest(files, "kicad_pcb")
+}
+
+/// The root sheet the schematic page loads and a thumbnail without a
+/// board draws: the `.kicad_sch` of `files` named like the project file
+/// (KiCad names the root sheet after the project), else like the board,
+/// else the shallowest, first by name among equals; `None` for a
+/// revision without one.
+#[must_use]
+pub fn schematic_in(files: &[TreeEntry]) -> Option<&TreeEntry> {
+    let stem = |entry: &TreeEntry| {
+        entry
+            .path
+            .file_name()
+            .rsplit_once('.')
+            .map(|(stem, _)| stem.to_owned())
+    };
+    let named_like = |extension: &str| {
+        let anchor = shallowest(files, extension)?;
+        let wanted = stem(anchor)?;
+        with_extension(files, "kicad_sch")
+            .filter(|entry| entry.path.depth() == anchor.path.depth())
+            .find(|entry| stem(entry).as_deref() == Some(wanted.as_str()))
+    };
+    named_like("kicad_pro")
+        .or_else(|| named_like("kicad_pcb"))
+        .or_else(|| shallowest(files, "kicad_sch"))
 }
 
 /// The design at `/{handle}/{slug}` with the head of its default branch,

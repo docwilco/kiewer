@@ -7,7 +7,9 @@
 //! in `web/schematic.rs`; the branch, revision and history pages in
 //! `web/history.rs`; the people page in `web/people.rs`; a person's page
 //! in `web/person.rs`; the design settings form in
-//! `web/design_settings.rs`; the fork form in `web/fork.rs`.
+//! `web/design_settings.rs`; the fork form in `web/fork.rs`; the
+//! thumbnail route and the render retry in `web/thumbnail.rs`; the
+//! Open Graph tags in `web/open_graph.rs`.
 
 mod about;
 mod auth;
@@ -17,10 +19,12 @@ mod design;
 pub mod design_settings;
 pub mod fork;
 pub mod history;
+pub mod open_graph;
 mod people;
 mod person;
 pub mod schematic;
 mod settings;
+pub mod thumbnail;
 pub mod viewer;
 
 use std::future::Future;
@@ -38,6 +42,7 @@ use tokio::net::TcpListener;
 
 use crate::blob::BlobStore;
 use crate::error::{Error, Result};
+use crate::thumbnail::Thumbnails;
 
 /// What every handler can reach.
 #[derive(Clone)]
@@ -45,6 +50,29 @@ pub struct AppState {
     pub db: PgPool,
     pub blobs: Arc<dyn BlobStore>,
     pub auth: Arc<crate::auth::Auth>,
+    /// The thumbnail service: the renderer, its budget and the retry
+    /// queue (ADR 0004).
+    pub thumbnails: Arc<Thumbnails>,
+}
+
+impl AppState {
+    /// The state over its parts. The one constructor, so a new part is
+    /// added here and in `kiewer_test_support::http::state`, not in
+    /// every test.
+    #[must_use]
+    pub fn new(
+        db: PgPool,
+        blobs: Arc<dyn BlobStore>,
+        auth: Arc<crate::auth::Auth>,
+        thumbnails: Arc<Thumbnails>,
+    ) -> Self {
+        Self {
+            db,
+            blobs,
+            auth,
+            thumbnails,
+        }
+    }
 }
 
 /// The routes over `state`.
@@ -72,6 +100,7 @@ pub fn router(state: AppState) -> Router {
         .merge(people::routes())
         .merge(design_settings::routes())
         .merge(fork::routes())
+        .merge(thumbnail::routes())
         // The upload's body may hold a revision's worth of files; every
         // other route keeps axum's default limit. Static routes above win
         // over the design page's two segments (axum 0.8 matches the most

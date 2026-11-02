@@ -5,10 +5,44 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
+use kiewer_lib::auth::Auth;
+use kiewer_lib::blob::BlobStore;
+use kiewer_lib::thumbnail::{NoTasks, Thumbnails};
 use kiewer_lib::web::{AppState, serve};
+use sqlx::PgPool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+
+/// The server's state for a test: `db`, `blobs`, no sign-in provider
+/// (a public URL nothing listens on) and no task queue, so a thumbnail
+/// past its budget is logged and left. The one place a new part of
+/// `AppState` is filled for every test; a test that needs a part of its
+/// own calls `AppState::new`.
+///
+/// # Panics
+///
+/// Never: an `Auth` with no apps always builds.
+#[must_use]
+pub fn state(db: PgPool, blobs: Arc<dyn BlobStore>) -> AppState {
+    state_with_auth(
+        db,
+        blobs,
+        Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth"),
+    )
+}
+
+/// The same with `auth`, for a test that registers a provider app.
+#[must_use]
+pub fn state_with_auth(db: PgPool, blobs: Arc<dyn BlobStore>, auth: Auth) -> AppState {
+    AppState::new(
+        db,
+        blobs,
+        Arc::new(auth),
+        Arc::new(Thumbnails::new(Arc::new(NoTasks))),
+    )
+}
 
 /// A loopback listener on a port the OS picks, and its address: for a
 /// test that needs the address before it builds the state (the public

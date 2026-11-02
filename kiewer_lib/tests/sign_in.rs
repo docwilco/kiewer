@@ -209,11 +209,11 @@ async fn server_with(
         .iter()
         .map(|(provider, fake)| fake_app(*provider, *fake))
         .collect();
-    let state = AppState {
+    let state = http::state_with_auth(
         db,
-        blobs: Arc::new(FsBlobStore::new(dir.path())),
-        auth: Arc::new(Auth::new(apps, format!("{scheme}://{addr}")).expect("an auth")),
-    };
+        Arc::new(FsBlobStore::new(dir.path())),
+        Auth::new(apps, format!("{scheme}://{addr}")).expect("an auth"),
+    );
     http::serve_listener(listener, state);
     (http::Browser::new(addr), dir)
 }
@@ -1030,11 +1030,10 @@ async fn cookies_on_an_http_dev_box_are_not_marked_secure() {
 /// A state with no provider registered and a pool that never connects.
 fn anonymous_state() -> (AppState, TempDir) {
     let dir = scratch_dir!();
-    let state = AppState {
-        db: kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
-        blobs: Arc::new(FsBlobStore::new(dir.path())),
-        auth: Arc::new(Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth")),
-    };
+    let state = http::state(
+        kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
+        Arc::new(FsBlobStore::new(dir.path())),
+    );
     (state, dir)
 }
 

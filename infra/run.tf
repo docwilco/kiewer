@@ -91,10 +91,13 @@ locals {
   run_env = {
     for env, e in local.environments : env => merge(
       {
-        PUBLIC_URL        = "https://${e.hostname}"
-        BLOB_BUCKET       = google_storage_bucket.blobs[env].name
-        THUMBNAIL_QUEUE   = google_cloud_tasks_queue.thumbnails[env].id
-        FASTLY_SERVICE_ID = fastly_service_vcl.kiewer.id
+        PUBLIC_URL      = "https://${e.hostname}"
+        BLOB_BUCKET     = google_storage_bucket.blobs[env].name
+        THUMBNAIL_QUEUE = google_cloud_tasks_queue.thumbnails[env].id
+        # The queue's tasks carry an OIDC token minted as this account,
+        # and the server checks the token names it.
+        THUMBNAIL_TASK_ACCOUNT = google_service_account.run[env].email
+        FASTLY_SERVICE_ID      = fastly_service_vcl.kiewer.id
       },
       {
         for provider in local.oauth_registered[env] :

@@ -9,10 +9,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use kiewer_lib::account::{self, AccountId, Handle};
-use kiewer_lib::auth::{Auth, Provider, ProviderUser};
+use kiewer_lib::auth::{Provider, ProviderUser};
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::session;
-use kiewer_lib::web::AppState;
 use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
@@ -22,11 +21,7 @@ use sqlx::PgPool;
 /// scratch directory and no sign-in provider.
 async fn server(db: PgPool) -> (SocketAddr, TempDir) {
     let dir = scratch_dir!();
-    let state = AppState {
-        db,
-        blobs: Arc::new(FsBlobStore::new(dir.path())),
-        auth: Arc::new(Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth")),
-    };
+    let state = http::state(db, Arc::new(FsBlobStore::new(dir.path())));
     (http::serve_on_free_port(state).await, dir)
 }
 
@@ -179,7 +174,7 @@ async fn three_uploads_to_main_make_a_chain_the_history_page_lists_as_rev_1_to_3
     );
     assert!(body.contains(handle.as_str()), "the author: {body}");
     assert!(
-        body.contains(r#"class="thumb""#),
+        body.contains(r#"class="thumb placeholder""#),
         "a thumbnail's place: {body}"
     );
     assert!(body.contains("<time datetime="), "the time: {body}");

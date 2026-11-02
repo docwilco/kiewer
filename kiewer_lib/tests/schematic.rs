@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use kiewer_lib::account::{self, AccountId, Handle};
-use kiewer_lib::auth::{Auth, Provider, ProviderUser};
+use kiewer_lib::auth::{Provider, ProviderUser};
 use kiewer_lib::blob::BlobHash;
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::design;
@@ -36,11 +36,7 @@ const POWER: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/sheet_tree/
 const IO: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/sheet_tree/sub/io.kicad_sch");
 
 fn state(db: PgPool, dir: &TempDir) -> AppState {
-    AppState {
-        db,
-        blobs: Arc::new(FsBlobStore::new(dir.path())),
-        auth: Arc::new(Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth")),
-    }
+    http::state(db, Arc::new(FsBlobStore::new(dir.path())))
 }
 
 async fn start() -> (SocketAddr, TempDir) {

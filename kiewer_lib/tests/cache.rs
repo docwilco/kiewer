@@ -13,11 +13,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 use axum::routing::post;
 use kiewer_lib::account::{self, AccountId, Handle};
-use kiewer_lib::auth::{Auth, Provider, ProviderUser};
+use kiewer_lib::auth::{Provider, ProviderUser};
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::cache::{Fastly, Key, Purge};
 use kiewer_lib::session;
-use kiewer_lib::web::AppState;
 use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
@@ -114,11 +113,7 @@ async fn the_fastly_client_purges_by_key_with_the_token_and_reports_a_refusal() 
 /// scratch directory and no sign-in provider.
 async fn server(db: PgPool) -> (SocketAddr, TempDir) {
     let dir = scratch_dir!();
-    let state = AppState {
-        db,
-        blobs: Arc::new(FsBlobStore::new(dir.path())),
-        auth: Arc::new(Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth")),
-    };
+    let state = http::state(db, Arc::new(FsBlobStore::new(dir.path())));
     (http::serve_on_free_port(state).await, dir)
 }
 

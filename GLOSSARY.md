@@ -57,8 +57,19 @@ A blob hash the operator has refused site-wide: not accepted, not served, not re
 _Avoid_: banned file, takedown entry
 
 **Collector**:
-The nightly job that removes revisions no branch reaches, then trees and blobs no revision names.
+The nightly job that removes revisions no branch reaches, then trees and blobs no revision names, as a file or as a thumbnail.
 _Avoid_: garbage collector, GC, cleanup
+
+**Thumbnail**:
+The two pictures of a revision the server draws, its board's front view or its root sheet when it has no board, fit into 1200 by 630 for a link unfurl and 400 by 400 for a list.
+_Avoid_: preview, screenshot, og image
+
+**Render budget**:
+How long an upload waits for its revision's thumbnail before saving the revision without one and leaving the thumbnail to a retry.
+_Avoid_: timeout, deadline
+
+**Placeholder**:
+The box a page shows where a revision's thumbnail goes until it is drawn.
 
 ### People
 

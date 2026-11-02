@@ -76,6 +76,10 @@ pub enum Error {
     /// A page template did not render.
     #[display("template: {_0}")]
     Template(askama::Error),
+    /// The thumbnail renderer: no Vulkan driver, a file that will not
+    /// draw, or a frame that would not read back (ADR 0004).
+    #[display("thumbnail: {_0}")]
+    Render(kiewer_viewer::error::Error),
     /// Another account already has this handle.
     #[display("handle {_0} is taken")]
     #[from(ignore)]
@@ -258,7 +262,8 @@ impl Error {
             Error::Failed { .. }
             | Error::HandleTaken(_)
             | Error::Refused(_)
-            | Error::Forbidden { .. } => Exit::Failed,
+            | Error::Forbidden { .. }
+            | Error::Render(_) => Exit::Failed,
             Error::OAuth { .. } | Error::Http(_) => Exit::Upstream,
         }
     }

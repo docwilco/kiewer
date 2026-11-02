@@ -18,12 +18,14 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use serde::Deserialize;
 
+use super::open_graph::{OpenGraph, metadata_line};
 use super::viewer::BranchView;
 use super::{AppState, design};
 use crate::account::Handle;
 use crate::design::{self as designs, At, BranchName, Design, Slug};
 use crate::error::Result;
-use crate::revision::{Metadata, RevisionHash};
+use crate::revision::RevisionHash;
+use crate::thumbnail::{self, Size};
 
 /// The branch and revision routes, merged into the server's router.
 pub fn routes() -> Router<AppState> {
@@ -127,6 +129,9 @@ async fn at_revision(
 
 /// One row of the history page.
 struct Row {
+    /// The small thumbnail's URL once it is rendered (ADR 0004); the
+    /// placeholder until then.
+    thumbnail: Option<String>,
     ordinal: u32,
     short: String,
     url: String,
@@ -152,6 +157,9 @@ struct HistoryPage {
     branches: Vec<BranchView>,
     /// Newest first.
     rows: Vec<Row>,
+    /// The tags in the head: the branch's history, with the head's
+    /// thumbnail once rendered.
+    og: OpenGraph,
 }
 
 /// `GET /{handle}/{slug}/b/{branch}/history`: the branch's revisions,
@@ -176,6 +184,18 @@ async fn history(
         return Ok(not_found("branch"));
     }
     let entries = designs::history(&state.db, design.id, &branch, None).await?;
+    let hashes: Vec<RevisionHash> = entries.iter().map(|entry| entry.revision.hash).collect();
+    let rendered = thumbnail::rendered(&state.db, &hashes).await?;
+    let public_url = state.auth.public_url();
+    let mut og = OpenGraph::new(
+        public_url,
+        &history_url(&owner, &design.slug, &branch),
+        format!("{}: history of {branch}", design.name),
+        format!("{} revisions of {} on {branch}", entries.len(), design.name),
+    );
+    if let Some(head) = hashes.first().filter(|hash| rendered.contains(hash)) {
+        og = og.with_thumbnail(public_url, *head);
+    }
     let page = HistoryPage {
         build: crate::build::line(),
         handle: owner.to_string(),
@@ -192,6 +212,9 @@ async fn history(
         rows: entries
             .into_iter()
             .map(|entry| Row {
+                thumbnail: rendered
+                    .contains(&entry.revision.hash)
+                    .then(|| thumbnail::url(entry.revision.hash, Size::Small)),
                 ordinal: entry.ordinal,
                 short: entry.revision.hash.short(),
                 url: revision_url(&owner, &design, entry.revision.hash, &branch),
@@ -207,17 +230,7 @@ async fn history(
             })
             .collect(),
         branch: branch.to_string(),
+        og,
     };
     Ok(Html(page.render()?).into_response())
-}
-
-/// The metadata as one line: its pairs joined, `Layers 26 (4 copper),
-/// Nets 75, ...`.
-fn metadata_line(metadata: &Metadata) -> String {
-    metadata
-        .details()
-        .into_iter()
-        .map(|(label, value)| format!("{label} {value}"))
-        .collect::<Vec<_>>()
-        .join(", ")
 }

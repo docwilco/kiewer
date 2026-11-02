@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kiewer</title>
+<style>
+  /* The head's small thumbnail (ADR 0004), or the placeholder box the
+     same size until it is rendered. */
+  .thumb { display: inline-block; width: 64px; height: 64px; background: #2b2b2b; border-radius: 2px; vertical-align: middle; margin-right: 0.5em; }
+</style>
 </head>
 <body>
 <nav id="account" hidden>
@@ -22,7 +27,7 @@
 {% else %}
 <ul id="recent">
 {% for design in recent %}
-  <li><a href="{{ design.url() }}">{{ design.name }}</a> by <a href="/{{ design.handle }}">{{ design.handle }}</a>, <time datetime="{{ design.updated_at }}">{{ design.updated_at }}</time></li>
+  <li>{% if let Some(url) = design.thumbnail_url() %}<img class="thumb" src="{{ url }}" width="64" height="64" alt="" loading="lazy">{% else %}<span class="thumb placeholder" aria-hidden="true"></span>{% endif %}<a href="{{ design.url() }}">{{ design.name }}</a> by <a href="/{{ design.handle }}">{{ design.handle }}</a>, <time datetime="{{ design.updated_at }}">{{ design.updated_at }}</time></li>
 {% endfor %}
 </ul>
 {% endif %}

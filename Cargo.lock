@@ -2073,6 +2073,7 @@ dependencies = [
  "google-cloud-storage",
  "kicad_core",
  "kiewer_test_support",
+ "kiewer_viewer",
  "oauth2",
  "rand 0.8.8",
  "reqwest 0.12.28",

@@ -5,7 +5,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use kiewer_lib::auth::Auth;
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::web::{AppState, serve};
 use kiewer_test_support::{TempDir, http, scratch_dir};
@@ -15,11 +14,10 @@ use tokio::net::TcpListener;
 /// instead of hanging, with the blob store under cargo's scratch directory.
 fn state() -> (AppState, TempDir) {
     let dir = scratch_dir!();
-    let state = AppState {
-        db: kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
-        blobs: Arc::new(FsBlobStore::new(dir.path())),
-        auth: Arc::new(Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth")),
-    };
+    let state = http::state(
+        kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
+        Arc::new(FsBlobStore::new(dir.path())),
+    );
     (state, dir)
 }
 

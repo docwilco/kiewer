@@ -16,6 +16,7 @@ use serde::Deserialize;
 use super::AppState;
 use super::auth::{Settled, personal};
 use super::design::design_page;
+use super::open_graph::{self, OpenGraph};
 use crate::account::Handle;
 use crate::description::{self, Description};
 use crate::design::{self, Design, DesignHead, ForkSource, Slug};
@@ -73,14 +74,21 @@ pub struct SettingsForm {
     description: String,
 }
 
+/// The design page a refused save shows again, but for its settings
+/// block.
+struct Shown<'a> {
+    head: &'a DesignHead,
+    description: &'a Description,
+    forked_from: Option<&'a ForkSource>,
+    og: OpenGraph,
+}
+
 /// The page again with the block open on `reason`, as the person's own
 /// response with `status`.
 fn refused(
     settled: Settled,
     status: StatusCode,
-    shown: &DesignHead,
-    description: &Description,
-    forked_from: Option<&ForkSource>,
+    shown: Shown<'_>,
     attempt: SettingsView,
     reason: String,
 ) -> Result<Response> {
@@ -88,7 +96,13 @@ fn refused(
         error: Some(reason),
         ..attempt
     };
-    let page = design_page(shown, description, settings, forked_from)?;
+    let page = design_page(
+        shown.head,
+        shown.description,
+        settings,
+        shown.forked_from,
+        shown.og,
+    )?;
     Ok(personal(settled.jar, (status, Html(page))))
 }
 
@@ -134,6 +148,16 @@ pub(super) async fn save(
         }
         Err(error) => Err(error),
     };
+    // The page shown again on a refusal is the design's own, so its
+    // tags name that page.
+    let og =
+        open_graph::for_design(&state, &shown, &description, &format!("/{handle}/{slug}")).await?;
+    let page = Shown {
+        head: &shown,
+        description: &description,
+        forked_from: forked_from.as_ref(),
+        og,
+    };
     match outcome {
         Ok(slug) => Ok(personal(
             settled.jar,
@@ -149,9 +173,7 @@ pub(super) async fn save(
         Err(Error::Malformed(reason)) => refused(
             settled,
             StatusCode::UNPROCESSABLE_ENTITY,
-            &shown,
-            &description,
-            forked_from.as_ref(),
+            page,
             attempt,
             reason,
         ),
@@ -160,9 +182,7 @@ pub(super) async fn save(
             refused(
                 settled,
                 StatusCode::CONFLICT,
-                &shown,
-                &description,
-                forked_from.as_ref(),
+                page,
                 attempt,
                 refusal.to_string(),
             )

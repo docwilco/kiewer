@@ -9,6 +9,8 @@ use sqlx::PgPool;
 
 use crate::account::AccountId;
 use crate::error::Result;
+use crate::revision::RevisionHash;
+use crate::thumbnail::{self, Size};
 
 /// How many designs the home page lists.
 pub const RECENT: i64 = 20;
@@ -23,6 +25,11 @@ pub struct Listed {
     /// When the default branch's head last moved, UTC, ISO 8601 to the
     /// second.
     pub updated_at: String,
+    /// The head's hash, 64 hex characters: what its thumbnail's URL is
+    /// under.
+    pub head: String,
+    /// Whether the head's thumbnail is rendered (ADR 0004).
+    pub thumbnail: bool,
 }
 
 impl Listed {
@@ -31,12 +38,26 @@ impl Listed {
     pub fn url(&self) -> String {
         format!("/{}/{}", self.handle, self.slug)
     }
+
+    /// The head's small thumbnail, once it is rendered; the placeholder
+    /// until then.
+    #[must_use]
+    pub fn thumbnail_url(&self) -> Option<String> {
+        if !self.thumbnail {
+            return None;
+        }
+        let hash: RevisionHash = self.head.parse().ok()?;
+        Some(thumbnail::url(hash, Size::Small))
+    }
 }
 
 /// The columns a listing selects, under [`Listed`]'s names, from a
-/// `design d`, its owner `a` and its default branch `b`.
+/// `design d`, its owner `a` and its default branch `b`; the thumbnail
+/// flag is one probe of `thumbnail` by its key per row.
 const LISTED_COLUMNS: &str = r#"a.handle, d.slug, d.name,
-    to_char(b.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at"#;
+    to_char(b.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
+    encode(b.head_hash, 'hex') AS head,
+    EXISTS (SELECT 1 FROM thumbnail t WHERE t.revision_hash = b.head_hash) AS thumbnail"#;
 
 /// The public designs whose default branch moved most recently, newest
 /// first, at most [`RECENT`].

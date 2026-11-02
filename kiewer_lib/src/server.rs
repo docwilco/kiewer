@@ -11,6 +11,7 @@ use crate::blob::fs::FsBlobStore;
 use crate::blob::gcs::GcsBlobStore;
 use crate::config::{BlobStoreConfig, Config};
 use crate::error::Result;
+use crate::thumbnail::{CloudTasks, NoTasks, TaskAuth, Thumbnails};
 use crate::web::{AppState, serve, shutdown_signal};
 
 /// The sign-in flow from the configuration: one app per provider whose
@@ -34,6 +35,28 @@ fn auth(config: &Config) -> Result<Auth> {
     Ok(auth)
 }
 
+/// The thumbnail service from the configuration (ADR 0004): retries on
+/// the Cloud Tasks queue with the retry path behind the queue's token
+/// when the pair is set; else no queue and an open path, which the log
+/// says once.
+///
+/// # Errors
+///
+/// When the process has no credentials to call Cloud Tasks with.
+fn thumbnails(config: &Config) -> Result<Thumbnails> {
+    Ok(if let Some(tasks) = &config.thumbnail_tasks {
+        tracing::info!(queue = %tasks.queue, account = %tasks.account, "thumbnail retries on Cloud Tasks");
+        let queue = CloudTasks::new(&tasks.queue, &config.public_url, &tasks.account)?;
+        Thumbnails::new(Arc::new(queue))
+            .with_auth(TaskAuth::oidc(&tasks.account, &config.public_url))
+    } else {
+        tracing::warn!(
+            "thumbnail retries are off: no task queue is configured (THUMBNAIL_QUEUE and THUMBNAIL_TASK_ACCOUNT)"
+        );
+        Thumbnails::new(Arc::new(NoTasks))
+    })
+}
+
 /// Connect, migrate, open the blob store, listen on `config.port` and
 /// serve until SIGTERM or ctrl-c.
 ///
@@ -45,11 +68,12 @@ pub async fn run(config: Config) -> Result<()> {
     let db = crate::db::connect(&config.database_url).await?;
     tracing::info!("database connected and migrated");
     let blobs = blob_store(&config.blobs).await?;
-    let state = AppState {
+    let state = AppState::new(
         db,
         blobs,
-        auth: Arc::new(auth(&config)?),
-    };
+        Arc::new(auth(&config)?),
+        Arc::new(thumbnails(&config)?),
+    );
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
     tracing::info!(
         addr = %listener.local_addr()?,

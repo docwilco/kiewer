@@ -61,6 +61,19 @@ pub struct FastlyConfig {
     pub api_token: String,
 }
 
+/// The Cloud Tasks queue thumbnail retries go on (ADR 0004) and the
+/// service account its tasks call back as: `THUMBNAIL_QUEUE` and
+/// `THUMBNAIL_TASK_ACCOUNT`, the variables the Terraform in `infra/`
+/// gives the Cloud Run services.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskConfig {
+    /// The queue, `projects/…/locations/…/queues/…`.
+    pub queue: String,
+    /// The runtime service account's email: what the task's OIDC token
+    /// is minted as and the retry path checks for.
+    pub account: String,
+}
+
 /// The server's configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -90,6 +103,11 @@ pub struct Config {
     /// deployment has before its token is given, means no purges, never
     /// an error; a token without the service id is an error naming it.
     pub fastly: Option<FastlyConfig>,
+    /// `THUMBNAIL_QUEUE` and `THUMBNAIL_TASK_ACCOUNT`: where a thumbnail
+    /// render past its budget is retried from, both or neither. Neither
+    /// means no retries (a dev box), which the log says once; one alone
+    /// is an error.
+    pub thumbnail_tasks: Option<TaskConfig>,
 }
 
 /// The Fastly pair: both, the service id alone (no purges), or neither.
@@ -195,6 +213,23 @@ impl Config {
                 oauth.insert(provider, credentials);
             }
         }
+        let thumbnail_tasks = match (set("THUMBNAIL_QUEUE"), set("THUMBNAIL_TASK_ACCOUNT")) {
+            (None, None) => None,
+            (Some(queue), Some(account)) => Some(TaskConfig { queue, account }),
+            (Some(_), None) => {
+                return Err(Error::Env {
+                    name: "THUMBNAIL_TASK_ACCOUNT",
+                    reason: "is not set while THUMBNAIL_QUEUE is; see infra/README.md".to_owned(),
+                });
+            }
+            (None, Some(_)) => {
+                return Err(Error::Env {
+                    name: "THUMBNAIL_QUEUE",
+                    reason: "is not set while THUMBNAIL_TASK_ACCOUNT is; see infra/README.md"
+                        .to_owned(),
+                });
+            }
+        };
         Ok(Self {
             port,
             database_url,
@@ -202,6 +237,7 @@ impl Config {
             public_url,
             oauth,
             fastly: fastly(&var)?,
+            thumbnail_tasks,
         })
     }
 }
@@ -302,6 +338,7 @@ mod tests {
         assert_eq!(config.public_url, "http://localhost:8090");
         assert!(config.oauth.is_empty(), "sign-in is off without an app");
         assert_eq!(config.fastly, None, "no edge to purge without the pair");
+        assert_eq!(config.thumbnail_tasks, None, "no retries without a queue");
     }
 
     #[test]
@@ -335,6 +372,59 @@ mod tests {
                 err,
                 Error::Env {
                     name: "FASTLY_SERVICE_ID",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_task_queue_is_both_variables_or_neither() {
+        let config = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("THUMBNAIL_QUEUE", "projects/p/locations/l/queues/q"),
+            (
+                "THUMBNAIL_TASK_ACCOUNT",
+                "kiewer-run@p.iam.gserviceaccount.com",
+            ),
+        ]))
+        .expect("valid");
+        assert_eq!(
+            config.thumbnail_tasks,
+            Some(TaskConfig {
+                queue: "projects/p/locations/l/queues/q".to_owned(),
+                account: "kiewer-run@p.iam.gserviceaccount.com".to_owned(),
+            })
+        );
+        let err = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("THUMBNAIL_QUEUE", "projects/p/locations/l/queues/q"),
+        ]))
+        .expect_err("half a pair");
+        assert!(
+            matches!(
+                err,
+                Error::Env {
+                    name: "THUMBNAIL_TASK_ACCOUNT",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        let err = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            (
+                "THUMBNAIL_TASK_ACCOUNT",
+                "kiewer-run@p.iam.gserviceaccount.com",
+            ),
+        ]))
+        .expect_err("half a pair");
+        assert!(
+            matches!(
+                err,
+                Error::Env {
+                    name: "THUMBNAIL_QUEUE",
                     ..
                 }
             ),

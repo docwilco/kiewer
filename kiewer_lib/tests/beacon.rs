@@ -9,9 +9,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use kiewer_lib::auth::Auth;
 use kiewer_lib::blob::fs::FsBlobStore;
-use kiewer_lib::web::AppState;
 use kiewer_lib::web::beacon::{BEACON_PATH, LIMIT_PER_MINUTE, MAX_BODY, MAX_REASON, MAX_VENDOR};
 use kiewer_test_support::db::fresh;
 use kiewer_test_support::{TempDir, http, scratch_dir};
@@ -75,11 +73,10 @@ fn log_lines_with(marker: &str) -> Vec<serde_json::Value> {
 async fn start() -> (SocketAddr, TempDir) {
     let _ = log();
     let dir = scratch_dir!();
-    let state = AppState {
-        db: kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
-        blobs: Arc::new(FsBlobStore::new(dir.path())),
-        auth: Arc::new(Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth")),
-    };
+    let state = http::state(
+        kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
+        Arc::new(FsBlobStore::new(dir.path())),
+    );
     (http::serve_on_free_port(state).await, dir)
 }
 

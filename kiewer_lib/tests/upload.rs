@@ -10,13 +10,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kiewer_lib::account::{self, AccountId, Handle};
-use kiewer_lib::auth::{Auth, Provider, ProviderUser};
+use kiewer_lib::auth::{Provider, ProviderUser};
 use kiewer_lib::blob::BlobHash;
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::error::Refusal;
 use kiewer_lib::session;
 use kiewer_lib::upload::{self, Author, Incoming, Limits, Target};
-use kiewer_lib::web::AppState;
 use kiewer_lib::web::blob::IMMUTABLE;
 use kiewer_lib::{Error, Result};
 use kiewer_test_support::db::{fresh, pool_from_env};
@@ -32,11 +31,7 @@ const PROJECT: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_p
 /// scratch directory and no sign-in provider.
 async fn server(db: PgPool) -> (SocketAddr, TempDir) {
     let dir = scratch_dir!();
-    let state = AppState {
-        db,
-        blobs: Arc::new(FsBlobStore::new(dir.path())),
-        auth: Arc::new(Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth")),
-    };
+    let state = http::state(db, Arc::new(FsBlobStore::new(dir.path())));
     (http::serve_on_free_port(state).await, dir)
 }
 
@@ -534,11 +529,10 @@ async fn the_account_cap_and_the_parse_timeout_refuse_through_commit() {
 #[tokio::test]
 async fn static_routes_keep_priority_over_the_design_page() {
     let dir = scratch_dir!();
-    let state = AppState {
-        db: kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
-        blobs: Arc::new(FsBlobStore::new(dir.path())),
-        auth: Arc::new(Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth")),
-    };
+    let state = http::state(
+        kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
+        Arc::new(FsBlobStore::new(dir.path())),
+    );
     let addr = http::serve_on_free_port(state).await;
     let sessions = http::request(addr, "GET", "/settings/sessions", &[], "").await;
     assert_eq!(

@@ -65,6 +65,7 @@ What `run.tf` gives each service, the names `kiewer_lib::config` reads. Secret-b
 | `DATABASE_URL` | secret: `postgres://<role>:<password>@/<database>?host=/cloudsql/<connection name>` |
 | `BLOB_BUCKET` | the environment's blob bucket, which makes the GCS store the blob store; objects at `<first two hex>/<hash>.gz` |
 | `THUMBNAIL_QUEUE` | the environment's Cloud Tasks queue, as `projects/…/locations/…/queues/…` |
+| `THUMBNAIL_TASK_ACCOUNT` | the runtime service account's email: the queue's tasks carry an OIDC token minted as it, which the server's retry path checks |
 | `FASTLY_SERVICE_ID` | the service to purge on |
 | `FASTLY_API_TOKEN` | secret: the token to purge with; only once given |
 | `OAUTH_<GITHUB,DISCORD,GOOGLE>_CLIENT_ID` | the registration's client id; only once registered |

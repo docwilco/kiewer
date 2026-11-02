@@ -235,6 +235,13 @@ impl Auth {
             .find(|registered| registered.app.provider == provider)
     }
 
+    /// The origin browsers reach the server at, no trailing slash: what
+    /// an absolute URL on a page (an Open Graph tag) starts with.
+    #[must_use]
+    pub fn public_url(&self) -> &str {
+        &self.public_url
+    }
+
     /// Where the provider sends the browser back to.
     #[must_use]
     pub fn callback_url(&self, provider: Provider) -> String {

@@ -17,6 +17,7 @@ use serde::Deserialize;
 use super::auth::{Settled, personal};
 use super::design_settings::SettingsView;
 use super::fork::{ForkView, ForkedFromView};
+use super::open_graph::{self, OpenGraph};
 use super::viewer::{BranchView, DesignView, FileView, Page, RecentView};
 use super::{AppState, blob, history, schematic};
 use crate::account::Handle;
@@ -56,15 +57,17 @@ pub(super) fn people_url(handle: &Handle, slug: &Slug) -> String {
 
 /// The design page for `shown`: the viewer at the revision shown, in the
 /// context of its branch, with the revision's details, the design's
-/// `description`, `settings` as its settings block, and `forked_from`
-/// as its forked-from line when the design is a fork. Rendered here for
-/// the page, the branch and revision routes (`web/history.rs`) and the
-/// settings form's refusal, which shows the page again with the reason.
+/// `description`, `settings` as its settings block, `forked_from` as
+/// its forked-from line when the design is a fork, and `og` as its
+/// Open Graph tags (`web/open_graph.rs`). Rendered here for the page,
+/// the branch and revision routes (`web/history.rs`) and the settings
+/// form's refusal, which shows the page again with the reason.
 pub(super) fn design_page(
     shown: &DesignHead,
     description: &Description,
     settings: SettingsView,
     forked_from: Option<&ForkSource>,
+    og: OpenGraph,
 ) -> Result<String> {
     let board_url = shown.board().map(|entry| blob::url(&entry.blob));
     let schematic_url = shown
@@ -141,8 +144,24 @@ pub(super) fn design_page(
         fork: ForkView::of(&shown.owner, &shown.design, shown.branches.len()),
         forked_from: forked_from.map(ForkedFromView::of),
     };
-    let page = Page::new(shown.design.name.clone(), board_url, Some(view));
+    let page = Page::new(shown.design.name.clone(), board_url, Some(view), Some(og));
     Ok(page.render()?)
+}
+
+/// The settled URL of the page `at` shows (docs/v1-scope.md, URLs), the
+/// one its Open Graph tags name: the design's page for the default
+/// head, the branch URL for a branch head, the revision URL otherwise.
+fn canonical_path(shown: &DesignHead, at: At<'_>) -> String {
+    match at {
+        At::Default => design_url(&shown.owner, &shown.design.slug),
+        At::Branch(_) => history::branch_url(&shown.owner, &shown.design, &shown.branch),
+        At::Revision { .. } => history::revision_url(
+            &shown.owner,
+            &shown.design,
+            shown.revision.hash,
+            &shown.branch,
+        ),
+    }
 }
 
 /// `GET /{handle}/{slug}`: the viewer at the head of the default branch
@@ -208,11 +227,14 @@ pub(super) async fn show(
     let description = description::of(&state.db, shown.design.id).await?;
     let settings = SettingsView::of(&handle, &shown.design, &description);
     let forked_from = design::fork_source(&state.db, shown.design.id).await?;
+    let og =
+        open_graph::for_design(state, &shown, &description, &canonical_path(&shown, at)).await?;
     Ok(Html(design_page(
         &shown,
         &description,
         settings,
         forked_from.as_ref(),
+        og,
     )?)
     .into_response())
 }
@@ -527,6 +549,12 @@ pub(super) async fn upload(
     };
     match committed {
         Ok(committed) => {
+            // The thumbnail (ADR 0004): drawn within the render budget,
+            // else queued for a retry; never fails the upload.
+            state
+                .thumbnails
+                .after_push(&state.db, state.blobs.as_ref(), committed.revision)
+                .await;
             let next = history::branch_url(&owner, &committed.design, &committed.branch);
             Ok(personal(settled.jar, Redirect::to(&next)))
         }

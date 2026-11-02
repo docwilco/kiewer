@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use kiewer_lib::blob::fs::FsBlobStore;
-use kiewer_lib::web::AppState;
 use kiewer_test_support::db::pool_from_env;
 use kiewer_test_support::{http, scratch_dir};
 
@@ -36,13 +35,7 @@ async fn health_is_ok_with_a_database() {
         return;
     };
     let dir = scratch_dir!();
-    let state = AppState {
-        db,
-        blobs: Arc::new(FsBlobStore::new(dir.path())),
-        auth: Arc::new(
-            kiewer_lib::auth::Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth"),
-        ),
-    };
+    let state = http::state(db, Arc::new(FsBlobStore::new(dir.path())));
     let addr = http::serve_on_free_port(state).await;
     let (status, body) = http::get(addr, "/healthz").await;
     assert_eq!(status, 200, "{body}");

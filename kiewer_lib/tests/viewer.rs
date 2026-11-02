@@ -9,10 +9,8 @@ use std::io::Read as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use kiewer_lib::auth::Auth;
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::cache::Policy;
-use kiewer_lib::web::AppState;
 use kiewer_lib::web::viewer::{BOARD_PATH, NOT_BUILT, embedded, script_url, wasm_url};
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use test_case::test_case;
@@ -24,11 +22,10 @@ const BOARD_FILE: &str = concat!(
 
 async fn start() -> (SocketAddr, TempDir) {
     let dir = scratch_dir!();
-    let state = AppState {
-        db: kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
-        blobs: Arc::new(FsBlobStore::new(dir.path())),
-        auth: Arc::new(Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth")),
-    };
+    let state = http::state(
+        kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
+        Arc::new(FsBlobStore::new(dir.path())),
+    );
     (http::serve_on_free_port(state).await, dir)
 }
 

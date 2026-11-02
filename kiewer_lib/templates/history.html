@@ -4,13 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ name }} history - kiewer</title>
+{% include "open_graph.html" %}
 <style>
   body { font: 14px system-ui, sans-serif; margin: 1em; }
   table { border-collapse: collapse; }
   td, th { text-align: left; vertical-align: top; padding: 0.3em 0.8em 0.3em 0; }
-  /* The thumbnail's place until thumbnails exist (#25): a box the size
-     one will take, so the rows keep their height when they arrive. */
-  .thumb { display: inline-block; width: 64px; height: 48px; background: #ddd; border-radius: 2px; }
+  /* The small thumbnail (ADR 0004), or the placeholder box the same
+     size until it is rendered, so the rows keep their height. */
+  .thumb { display: inline-block; width: 64px; height: 64px; background: #2b2b2b; border-radius: 2px; vertical-align: middle; }
   .hash { font-family: monospace; }
   .metadata { opacity: 0.7; }
 </style>
@@ -29,7 +30,7 @@
   <tbody>
   {% for row in rows %}
   <tr>
-    <td><span class="thumb" aria-hidden="true"></span></td>
+    <td>{% if let Some(url) = row.thumbnail %}<img class="thumb" src="{{ url }}" width="64" height="64" alt="" loading="lazy">{% else %}<span class="thumb placeholder" aria-hidden="true"></span>{% endif %}</td>
     <td>rev {{ row.ordinal }}</td>
     <td><a class="hash" href="{{ row.url }}">{{ row.short }}</a></td>
     <td>{{ row.author }}</td>
