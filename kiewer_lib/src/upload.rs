@@ -8,6 +8,13 @@
 //! that transaction: the parsing and the blob writes are done before it
 //! opens, and a blob a refused upload leaves behind is the collector's.
 //!
+//! The head an upload is built on is the one its form saw, or else the
+//! one [`push`] reads before the slow part; the transaction holds the
+//! branch's row and compares. A head that moved in between makes no
+//! revision: the upload is held for its uploader to choose
+//! (`crate::pending`), since it would otherwise land on files they never
+//! saw.
+//!
 //! What is kept: `.kicad_pcb`, `.kicad_sch` and `.kicad_pro`; anything
 //! else is dropped with a line in the log, and so is what the skip list
 //! names ([`skipped`]: `-backups` folders, lock files, autosaves and save
@@ -38,10 +45,11 @@ use tokio::time::Instant;
 
 use crate::account::{AccountId, Handle};
 use crate::blob::{BlobHash, BlobStore};
-use crate::design::{self, BranchName, Design, Slug};
+use crate::design::{self, BranchName, Design, DesignId, Slug};
 use crate::error::{Error, Refusal, Result};
+use crate::pending::{self, Held, PendingId};
 use crate::rate_limit;
-use crate::revision::{Metadata, RevisionDraft, RevisionHash, TreeEntry, TreePath};
+use crate::revision::{Metadata, RevisionDraft, RevisionHash, TreeEntry, TreeHash, TreePath};
 use crate::roles::{self, Role};
 
 /// The caps an upload is measured against.
@@ -482,9 +490,18 @@ pub enum BranchTarget {
     /// names no branch means, and where a new design's first revision
     /// goes.
     Default,
-    /// Onto the head of this branch: the parent is the head at write
-    /// time, moved by compare-and-set.
+    /// Onto the head of this branch as the upload finds it: the head
+    /// read before the slow part, moved by compare-and-set.
     Head(BranchName),
+    /// Onto the head of this branch, which the form the upload came from
+    /// saw at `head`: a revision on the branch, the one the page showed.
+    /// A head that has moved past it holds the upload
+    /// (`crate::pending`). A `head` that is not on the branch says
+    /// nothing about it, and this is [`BranchTarget::Head`].
+    Seen {
+        name: BranchName,
+        head: RevisionHash,
+    },
     /// A new branch named `name` at `from` (a revision the design
     /// reaches: the one the page the form was opened from showed), with
     /// this revision on top (docs/v1-scope.md, Push: a new branch starts
@@ -493,6 +510,16 @@ pub enum BranchTarget {
         name: BranchName,
         from: RevisionHash,
     },
+}
+
+/// What came of a push.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// The revision landed.
+    Pushed(Pushed),
+    /// The branch's head moved: nothing landed, and the uploader chooses
+    /// what becomes of the upload (`crate::pending`).
+    Pending { design: Design, id: PendingId },
 }
 
 /// What a push made.
@@ -625,7 +652,8 @@ fn parse(kind: FileKind, path: &TreePath, bytes: &[u8]) -> Result<Option<Metadat
 
 /// The files of `incoming` as a revision of the author's design at
 /// `target`, with `message`: rooted, parsed, stored, and the rows written
-/// in one transaction.
+/// in one transaction; or, when the branch's head moved on the way,
+/// held for the uploader's choice ([`Outcome::Pending`]).
 ///
 /// # Errors
 ///
@@ -641,7 +669,7 @@ pub async fn push(
     target: Target,
     message: Option<&str>,
     incoming: Incoming,
-) -> Result<Pushed> {
+) -> Result<Outcome> {
     if incoming.is_empty() {
         return Err(Refusal::NoKicadFile.into());
     }
@@ -649,6 +677,7 @@ pub async fn push(
     // on the pool, a statement of its own: the count is a bound on bursts,
     // not a ledger, and the window moves with the clock.
     rate_limit::check(db, author.account_id, limits.uploads_per_hour).await?;
+    let base = built_on(db, &target).await?;
     let Incoming { dir, files, .. } = incoming;
     let Rooted {
         stem,
@@ -668,14 +697,42 @@ pub async fn push(
     let rows = Rows {
         author,
         target,
+        base,
         stem,
         message,
         entries: &entries,
         metadata: metadata.as_ref(),
+        warnings,
     };
-    let mut pushed = write_rows(db, limits, rows).await?;
-    pushed.warnings = warnings;
-    Ok(pushed)
+    write_rows(db, limits, rows).await
+}
+
+/// The head the upload at `target` is built on: the one its form saw, or
+/// the one there now, read before the parse and the blob writes so an
+/// upload that lands meanwhile is one this upload did not build on. `None`
+/// for a new design, a new branch, or a design or branch that is not
+/// there, which the transaction refuses or makes. One read on the pool:
+/// it decides nothing until the transaction compares it.
+async fn built_on(db: &PgPool, target: &Target) -> Result<Option<RevisionHash>> {
+    let Target::Existing {
+        owner,
+        slug,
+        branch,
+    } = target
+    else {
+        return Ok(None);
+    };
+    let name = match branch {
+        BranchTarget::Seen { head, .. } => return Ok(Some(*head)),
+        BranchTarget::New { .. } => return Ok(None),
+        BranchTarget::Head(name) => Some(name.as_str()),
+        BranchTarget::Default => None,
+    };
+    let Some(design) = design::find_at(db, owner, slug).await? else {
+        return Ok(None);
+    };
+    let name = name.unwrap_or(&design.default_branch);
+    design::head(&mut *db.acquire().await?, design.id, name).await
 }
 
 /// Each rooted file read, parsed under what is left of the timeout,
@@ -737,26 +794,33 @@ async fn parse_and_store(
 struct Rows<'a> {
     author: &'a Author,
     target: Target,
+    /// The head the upload was built on ([`built_on`]).
+    base: Option<RevisionHash>,
     /// The project folder's file name without its extension: a new
     /// design's name when none was given.
     stem: String,
     message: Option<&'a str>,
     entries: &'a [TreeEntry],
     metadata: Option<&'a Metadata>,
+    warnings: Vec<String>,
 }
 
 /// The rows of the revision, as one outcome: the blobs' sizes, the design
-/// (found, or made), the quota against them, the tree, the revision on
-/// the branch's head, the head moved by compare-and-set, and the design's
-/// index of its revisions.
-async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Pushed> {
+/// (held, or made), the quota against them, the tree, then either the
+/// revision on the branch's head with the head moved by compare-and-set
+/// and the design's index of its revisions, or, when the head is no
+/// longer the one the upload was built on, the pending row in their
+/// place.
+async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Outcome> {
     let Rows {
         author,
         target,
+        base,
         stem,
         message,
         entries,
         metadata,
+        warnings,
     } = rows;
     let mut tx = db.begin().await?;
     for entry in entries {
@@ -768,7 +832,7 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Push
             slug,
             branch,
         } => {
-            let design = design::find_at(&mut *tx, &owner, &slug)
+            let design = design::lock_at(&mut tx, &owner, &slug)
                 .await?
                 .ok_or_else(|| {
                     Error::Refused(Refusal::NoSuchDesign {
@@ -791,26 +855,46 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Push
         }
     };
     let hashes: Vec<BlobHash> = entries.iter().map(|entry| entry.blob).collect();
-    let (used, added) = design::account_bytes(&mut tx, author.account_id, &hashes).await?;
-    if used + added > limits.account_bytes {
-        return Err(Refusal::AccountFull {
-            limit_gb: limits.account_gb(),
-        }
-        .into());
-    }
+    check_account_cap(&mut tx, limits, author.account_id, &hashes).await?;
     let tree = design::record_tree(&mut tx, entries).await?;
-    let (branch, parent, expected) = resolve_branch(&mut tx, &design, branch).await?;
-    let time = design::now_text(&mut tx).await?;
-    let draft = RevisionDraft {
-        tree,
-        parent,
-        author: &author.handle,
-        time: &time,
-        message: message.map(str::trim).filter(|message| !message.is_empty()),
+    let message = message.map(str::trim).filter(|message| !message.is_empty());
+    let (branch, parent, expected) = match resolve_branch(&mut tx, &design, branch, base).await? {
+        Resolved::Land {
+            branch,
+            parent,
+            expected,
+        } => (branch, parent, expected),
+        Resolved::Hold { branch, base } => {
+            let held = Held {
+                design: design.id,
+                branch: &branch,
+                author: author.account_id,
+                base,
+                tree,
+                message,
+                metadata,
+                warnings: &warnings,
+            };
+            let id = pending::hold(&mut tx, &held).await?;
+            tx.commit().await?;
+            tracing::info!(design = %design.slug, %branch, %id, "upload held: the head moved");
+            return Ok(Outcome::Pending { design, id });
+        }
     };
-    let revision = design::record_revision(&mut tx, &draft, author.account_id, metadata).await?;
-    design::set_head(&mut tx, design.id, branch.as_str(), expected, revision).await?;
-    design::record_design_revision(&mut tx, design.id, revision).await?;
+    let revision = land(
+        &mut tx,
+        &Landing {
+            design: design.id,
+            branch: branch.as_str(),
+            parent,
+            expected,
+            tree,
+            author,
+            message,
+            metadata,
+        },
+    )
+    .await?;
     tx.commit().await?;
     tracing::info!(
         design = %design.slug,
@@ -820,31 +904,111 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Push
         created,
         "revision pushed"
     );
-    Ok(Pushed {
+    Ok(Outcome::Pushed(Pushed {
         design,
         branch,
         revision,
         created,
-        warnings: Vec::new(),
-    })
+        warnings,
+    }))
+}
+
+/// Refused when `blobs` would take `account` over its cap, within the
+/// transaction that will name them, after [`design::record_blob`].
+pub(crate) async fn check_account_cap(
+    tx: &mut PgConnection,
+    limits: &Limits,
+    account: AccountId,
+    blobs: &[BlobHash],
+) -> Result<()> {
+    let (used, added) = design::account_bytes(tx, account, blobs).await?;
+    if used + added > limits.account_bytes {
+        return Err(Refusal::AccountFull {
+            limit_gb: limits.account_gb(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// A revision going onto a branch.
+pub(crate) struct Landing<'a> {
+    pub design: DesignId,
+    pub branch: &'a str,
+    pub parent: Option<RevisionHash>,
+    /// What the compare-and-set expects the head to be; `None` makes the
+    /// branch.
+    pub expected: Option<RevisionHash>,
+    pub tree: TreeHash,
+    pub author: &'a Author,
+    pub message: Option<&'a str>,
+    pub metadata: Option<&'a Metadata>,
+}
+
+/// The revision's row, stamped now, its branch's head moved to it, and
+/// the design's index of its revisions, within the caller's transaction:
+/// what a push and a pending revision's decision both end in.
+pub(crate) async fn land(tx: &mut PgConnection, landing: &Landing<'_>) -> Result<RevisionHash> {
+    let author = landing.author;
+    let time = design::now_text(tx).await?;
+    let draft = RevisionDraft {
+        tree: landing.tree,
+        parent: landing.parent,
+        author: &author.handle,
+        time: &time,
+        message: landing.message,
+    };
+    let revision = design::record_revision(tx, &draft, author.account_id, landing.metadata).await?;
+    design::set_head(
+        tx,
+        landing.design,
+        landing.branch,
+        landing.expected,
+        revision,
+        author.account_id,
+    )
+    .await?;
+    design::record_design_revision(tx, landing.design, revision).await?;
+    Ok(revision)
+}
+
+/// Where a push goes, as its transaction finds things.
+enum Resolved {
+    /// Onto `branch`, with `parent` as the new revision's, the
+    /// compare-and-set expecting `expected`.
+    Land {
+        branch: BranchName,
+        parent: Option<RevisionHash>,
+        expected: Option<RevisionHash>,
+    },
+    /// Nowhere yet: `branch` has moved on from `base`.
+    Hold {
+        branch: BranchName,
+        base: RevisionHash,
+    },
 }
 
 /// The branch a push lands on, the new revision's parent, and what the
-/// compare-and-set expects the head to be: the head read now for a push
-/// onto a branch, nothing for a branch being made (whose first revision's
-/// parent is where it starts). Within the upload's transaction.
+/// compare-and-set expects the head to be: the head for a push onto a
+/// branch, its row held so nothing moves it now, nothing for a branch
+/// being made (whose first revision's parent is where it starts). Or,
+/// for a push built on `base` when the head has moved on from it, the
+/// upload is held. A `base` not on the branch is no evidence of anything
+/// (a form opened on another branch, a branch deleted and made again).
+/// Within the upload's transaction, after the design is held.
 async fn resolve_branch(
     tx: &mut PgConnection,
     design: &Design,
     branch: BranchTarget,
-) -> Result<(BranchName, Option<RevisionHash>, Option<RevisionHash>)> {
+    base: Option<RevisionHash>,
+) -> Result<Resolved> {
     match branch {
-        BranchTarget::Default | BranchTarget::Head(_) => {
+        BranchTarget::Default | BranchTarget::Head(_) | BranchTarget::Seen { .. } => {
             let name = match branch {
-                BranchTarget::Head(name) => name,
+                BranchTarget::Head(name) | BranchTarget::Seen { name, .. } => name,
                 _ => BranchName::from_row(design.default_branch.clone()),
             };
-            let head = design::head(tx, design.id, name.as_str()).await?;
+            let head = design::lock_head(tx, design.id, name.as_str()).await?;
             // The default branch of a design with no revision yet (a new
             // design, or one whose first push was refused after the row)
             // is made by this push.
@@ -854,7 +1018,17 @@ async fn resolve_branch(
                 }
                 .into());
             }
-            Ok((name, head, head))
+            if let (Some(base), Some(_)) = (base, head)
+                && Some(base) != head
+                && design::on_branch(tx, design.id, name.as_str(), base).await?
+            {
+                return Ok(Resolved::Hold { branch: name, base });
+            }
+            Ok(Resolved::Land {
+                branch: name,
+                parent: head,
+                expected: head,
+            })
         }
         BranchTarget::New { name, from } => {
             if !design::reaches(&mut *tx, design.id, from).await? {
@@ -863,7 +1037,11 @@ async fn resolve_branch(
                 }
                 .into());
             }
-            Ok((name, Some(from), None))
+            Ok(Resolved::Land {
+                branch: name,
+                parent: Some(from),
+                expected: None,
+            })
         }
     }
 }

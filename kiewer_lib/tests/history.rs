@@ -187,7 +187,8 @@ async fn three_uploads_to_main_make_a_chain_the_history_page_lists_as_rev_1_to_3
 }
 
 /// Every link into the design on `body` has one of the settled shapes
-/// (docs/v1-scope.md, URLs): the page, its people page, `/b/{branch}`, `/b/{branch}/history`
+/// (docs/v1-scope.md, URLs): the page, its people and branches pages (the latter opened at
+/// a revision by `?from={hash}`), `/b/{branch}`, `/b/{branch}/history`
 /// `/r/{hash}` or `/r/{hash}/f/{path}` with at most a `?b={branch}` hint; so no ordinal is in
 /// any URL.
 fn assert_design_links(body: &str, handle: &Handle, slug: &str) {
@@ -200,14 +201,15 @@ fn assert_design_links(body: &str, handle: &Handle, slug: &str) {
         let (path, query) = path.split_once('?').unwrap_or((path, ""));
         let segments: Vec<&str> = path.split('/').skip(1).collect();
         let settled = match segments.as_slice() {
-            [] | ["schematic" | "people"] => true,
+            [] | ["schematic" | "people" | "branches"] => true,
             ["b", name] | ["b", name, "history"] => is_name(name),
             ["r", hash] | ["r", hash, "f", _, ..] => is_hash(hash),
             _ => false,
         };
         assert!(settled, "an unsettled URL shape: {path}");
+        let at_revision = path == "/branches" && query.strip_prefix("from=").is_some_and(is_hash);
         assert!(
-            query.is_empty() || query.strip_prefix("b=").is_some_and(is_name),
+            query.is_empty() || query.strip_prefix("b=").is_some_and(is_name) || at_revision,
             "a query that is not the branch hint: {path}?{query}"
         );
     }
@@ -250,9 +252,7 @@ async fn the_branch_and_revision_urls_resolve_and_an_unreached_revision_is_404()
         "the banner links the head: {body}"
     );
     assert!(
-        body.contains(&format!(
-            "/upload?design={handle}/urls&#38;branch=&#38;from={first}"
-        )),
+        body.contains(&format!(r#"href="/{handle}/urls/branches?from={first}""#)),
         "the banner links a new branch here: {body}"
     );
     assert!(

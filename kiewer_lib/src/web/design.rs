@@ -2,7 +2,8 @@
 //! the design's default branch in the viewer with the revision's details
 //! (`web/viewer.rs`'s page); `/upload` is the form and its POST for a
 //! signed-in person with a handle, streamed part by part into
-//! `upload::Incoming` and committed by `upload::push`. A part named
+//! `upload::Incoming` and committed by `upload::push`; an upload whose
+//! branch moved on goes to its choice (`web/pending.rs`). A part named
 //! `.zip` is expanded there; a part's file name may be a relative path,
 //! as the folder picker and a dropped folder send (the page's script
 //! builds the body with `webkitRelativePath` and the dropped entries'
@@ -24,7 +25,7 @@ use super::design_settings::SettingsView;
 use super::fork::{ForkView, ForkedFromView};
 use super::open_graph::{self, OpenGraph};
 use super::viewer::{BranchView, DesignView, FileView, Page, RecentView};
-use super::{AppState, blob, files, history, schematic};
+use super::{AppState, blob, branches, files, history, pending, schematic};
 use crate::account::Handle;
 use crate::cache::{self, Key};
 use crate::description::{self, Description};
@@ -34,27 +35,19 @@ use crate::rate_limit;
 use crate::revision::RevisionHash;
 use crate::roles::{self, Membership};
 use crate::slug;
-use crate::upload::{self, Author, BranchTarget, Incoming, Limits, Target};
+use crate::upload::{self, Author, BranchTarget, Incoming, Limits, Outcome, Target};
 
 /// The URL of a design's page.
 pub(super) fn design_url(handle: &Handle, slug: &Slug) -> String {
     format!("/{handle}/{slug}")
 }
 
-/// The upload form opened from a design page: for `branch` (`None` for a
-/// new branch) from `revision`, the one the page showed, which a new
-/// branch starts from. The handle, the slug and the branch name are their
-/// own characters; the hash is hex.
-fn upload_url(
-    handle: &Handle,
-    slug: &Slug,
-    branch: Option<&BranchName>,
-    revision: RevisionHash,
-) -> String {
-    format!(
-        "/upload?design={handle}/{slug}&branch={}&from={revision}",
-        branch.map(BranchName::as_str).unwrap_or_default()
-    )
+/// The upload form opened from a design page: for `branch` from
+/// `revision`, the one the page showed, which the upload is then built
+/// on and a new branch starts from. The handle, the slug and the branch
+/// name are their own characters; the hash is hex.
+fn upload_url(handle: &Handle, slug: &Slug, branch: &BranchName, revision: RevisionHash) -> String {
+    format!("/upload?design={handle}/{slug}&branch={branch}&from={revision}")
 }
 
 /// The URL of a design's people page.
@@ -117,10 +110,15 @@ pub(super) fn design_page(
         upload_url: upload_url(
             &shown.owner,
             &shown.design.slug,
-            Some(&shown.branch),
+            &shown.branch,
             shown.revision.hash,
         ),
-        new_branch_url: upload_url(&shown.owner, &shown.design.slug, None, shown.revision.hash),
+        new_branch_url: branches::new_branch_url(
+            &shown.owner,
+            &shown.design.slug,
+            shown.revision.hash,
+        ),
+        branches_url: branches::url(&shown.owner, &shown.design.slug),
         branch: shown.branch.to_string(),
         revision: shown.revision.hash.to_string(),
         short: shown.revision.hash.short(),
@@ -270,6 +268,11 @@ pub(super) struct Opened {
     branch: Option<String>,
     #[serde(default)]
     from: String,
+    /// The branch `from` was seen on, once a form has carried it: a later
+    /// choice in the selector must not claim to have seen a head the form
+    /// never showed. Absent, it is the branch preselected.
+    #[serde(default)]
+    from_branch: Option<String>,
 }
 
 #[derive(Template)]
@@ -286,8 +289,11 @@ struct UploadPage {
     branches: Vec<String>,
     /// The branch to preselect, or empty for a new branch.
     branch: String,
-    /// The revision a new branch starts from, or empty.
+    /// The revision a new branch starts from and an upload is built on,
+    /// or empty.
     from: String,
+    /// The branch `from` was seen on.
+    from_branch: String,
     /// Why the last attempt was refused, or none.
     error: Option<String>,
     /// What the last attempt made, when it came back here with warnings
@@ -334,6 +340,7 @@ async fn upload_page(
     let page = UploadPage {
         design: selected.map(Membership::path).unwrap_or_default(),
         designs,
+        from_branch: opened.from_branch.clone().unwrap_or_else(|| branch.clone()),
         branches,
         branch,
         from: opened.from.clone(),
@@ -360,7 +367,7 @@ pub(super) async fn upload_form(
 /// server will not take is 422, a conflict with what exists is 409, a
 /// design that does not exist is 404, a body that is not multipart is
 /// 400, the hourly allowance used is 429.
-fn status(refusal: &Refusal) -> StatusCode {
+pub(super) fn status(refusal: &Refusal) -> StatusCode {
     match refusal {
         Refusal::FileTooLarge { .. }
         | Refusal::RevisionTooLarge { .. }
@@ -375,6 +382,7 @@ fn status(refusal: &Refusal) -> StatusCode {
         Refusal::SlugTaken { .. }
         | Refusal::SlugMoved { .. }
         | Refusal::HeadMoved { .. }
+        | Refusal::DefaultBranch { .. }
         | Refusal::BranchTaken { .. } => StatusCode::CONFLICT,
         Refusal::NoSuchDesign { .. }
         | Refusal::NoSuchBranch { .. }
@@ -411,8 +419,10 @@ struct Fields {
     branch: Option<String>,
     /// The new branch's name.
     new_branch: Option<String>,
-    /// The revision a new branch starts from.
+    /// The revision a new branch starts from and an upload is built on.
     from: Option<String>,
+    /// The branch `from` was seen on.
+    from_branch: Option<String>,
     message: Option<String>,
 }
 
@@ -420,8 +430,9 @@ impl Fields {
     /// Where the upload goes, as the fields say: a new design without a
     /// path; else the design at the path (`handle/slug`, as the options
     /// carry it), on the branch selected (the default branch when the
-    /// form names none), or, with the empty option, on a new branch named
-    /// in `new_branch` starting from `from`.
+    /// form names none), built on `from` when that was seen on this very
+    /// branch; or, with the empty option, on a new branch named in
+    /// `new_branch` starting from `from`.
     fn target(&self) -> Result<Target> {
         let (owner, slug) = match self.design.as_deref().map(str::trim) {
             Some(path) if !path.is_empty() => design_path(path).ok_or_else(|| {
@@ -438,27 +449,23 @@ impl Fields {
         let branch = match self.branch.as_deref().map(str::trim) {
             None => BranchTarget::Default,
             Some(name) if !name.is_empty() => {
-                BranchTarget::Head(name.parse::<BranchName>().map_err(|_| {
+                let name = name.parse::<BranchName>().map_err(|_| {
                     Error::Refused(Refusal::NoSuchBranch {
                         branch: name.to_owned(),
                     })
-                })?)
+                })?;
+                let seen = self.from.as_deref().map(str::trim).unwrap_or_default();
+                let seen = seen
+                    .parse::<RevisionHash>()
+                    .ok()
+                    .filter(|_| self.from_branch.as_deref().map(str::trim) == Some(name.as_str()));
+                match seen {
+                    Some(head) => BranchTarget::Seen { name, head },
+                    None => BranchTarget::Head(name),
+                }
             }
             Some(_) => {
-                let name = self
-                    .new_branch
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or_default();
-                let name = name.parse::<BranchName>().map_err(|error| {
-                    Error::Refused(Refusal::BadBranchName {
-                        reason: if name.is_empty() {
-                            "a new branch needs a name".to_owned()
-                        } else {
-                            error.to_string()
-                        },
-                    })
-                })?;
+                let name = new_branch_name(self.new_branch.as_deref().unwrap_or_default())?;
                 let from = self.from.as_deref().map(str::trim).unwrap_or_default();
                 let from = from.parse::<RevisionHash>().map_err(|_| {
                     Error::Refused(if from.is_empty() {
@@ -487,8 +494,24 @@ impl Fields {
             design: self.design.clone().unwrap_or_default(),
             branch: self.branch.clone(),
             from: self.from.clone().unwrap_or_default(),
+            from_branch: self.from_branch.clone(),
         }
     }
+}
+
+/// The name a form gave a new branch, or the refusal that says what is
+/// wrong with it.
+pub(super) fn new_branch_name(text: &str) -> Result<BranchName> {
+    let text = text.trim();
+    text.parse().map_err(|error: Error| {
+        Error::Refused(Refusal::BadBranchName {
+            reason: if text.is_empty() {
+                "a new branch needs a name".to_owned()
+            } else {
+                error.to_string()
+            },
+        })
+    })
 }
 
 /// Read every part into `incoming` and `fields`; a refusal is the
@@ -510,6 +533,7 @@ async fn receive(
             Some("branch") => fields.branch = Some(text(field).await?),
             Some("new_branch") => fields.new_branch = Some(text(field).await?),
             Some("from") => fields.from = Some(text(field).await?),
+            Some("from_branch") => fields.from_branch = Some(text(field).await?),
             Some("message") => fields.message = Some(text(field).await?),
             Some("files") => receive_file(field, incoming).await?,
             _ => drain(field).await?,
@@ -588,10 +612,31 @@ async fn refused(
     Ok(response)
 }
 
+/// What follows a revision landing, a push's or a held upload's: the
+/// thumbnail (ADR 0004), drawn within the render budget, else queued for
+/// a retry, which never fails the upload; then the purge of `keys`, so it
+/// covers a thumbnail drawn within the budget. A task of their own: a
+/// browser that gives up during the render drops the handler, and a
+/// purge lost with it would leave the pages stale for the hour.
+pub(super) async fn after_landing(state: &AppState, revision: RevisionHash, keys: Vec<Key>) {
+    let after = state.clone();
+    let settled = tokio::spawn(async move {
+        after
+            .thumbnails
+            .after_push(&after.db, after.blobs.as_ref(), revision)
+            .await;
+        cache::after_write(after.purge.as_ref(), &keys).await;
+    });
+    if let Err(error) = settled.await {
+        tracing::warn!(%error, "the render and purge after a push did not finish");
+    }
+}
+
 /// `POST /upload`: the files become a revision and the browser goes to
 /// the design's page; a push with warnings (`upload::Pushed`) comes back
-/// here with them and the link instead. A refusal comes back as the form
-/// with the reason.
+/// here with them and the link instead; an upload whose branch moved on
+/// goes to its choice, with nothing to purge until that is made. A
+/// refusal comes back as the form with the reason.
 pub(super) async fn upload(
     State(state): State<AppState>,
     settled: Settled,
@@ -637,26 +682,13 @@ pub(super) async fn upload(
         Err(error) => Err(error),
     };
     match committed {
-        Ok(committed) => {
-            // The thumbnail (ADR 0004): drawn within the render budget,
-            // else queued for a retry; never fails the upload.
-            // The render and then the purge, so it covers a thumbnail
-            // drawn within the budget. A task of their own: a browser
-            // that gives up during the render drops this handler, and a
-            // purge lost with it would leave the pages stale for the hour.
+        Ok(Outcome::Pending { design, id }) => {
+            let choice = pending::url(&owner, &design.slug, id);
+            Ok(personal(settled.jar, Redirect::to(&choice)))
+        }
+        Ok(Outcome::Pushed(committed)) => {
             let keys = cache::of_design(committed.design.id, &owner, committed.design.visibility);
-            let revision = committed.revision;
-            let after = state.clone();
-            let settled_push = tokio::spawn(async move {
-                after
-                    .thumbnails
-                    .after_push(&after.db, after.blobs.as_ref(), revision)
-                    .await;
-                cache::after_write(after.purge.as_ref(), &keys).await;
-            });
-            if let Err(error) = settled_push.await {
-                tracing::warn!(%error, "the render and purge after a push did not finish");
-            }
+            after_landing(&state, committed.revision, keys).await;
             let next = history::branch_url(&owner, &committed.design, &committed.branch);
             if committed.warnings.is_empty() {
                 return Ok(personal(settled.jar, Redirect::to(&next)));
@@ -665,15 +697,14 @@ pub(super) async fn upload(
                 url: next,
                 warnings: committed.warnings,
             };
-            upload_page(
-                &state,
-                settled,
-                &fields.opened(),
-                StatusCode::OK,
-                None,
-                Some(pushed),
-            )
-            .await
+            // The form again, now having seen the revision just made: the
+            // next upload from it is built on that.
+            let opened = Opened {
+                from: committed.revision.to_string(),
+                from_branch: Some(committed.branch.to_string()),
+                ..fields.opened()
+            };
+            upload_page(&state, settled, &opened, StatusCode::OK, None, Some(pushed)).await
         }
         Err(error) => refused(&state, settled, &fields.opened(), error).await,
     }

@@ -8,7 +8,8 @@
 use std::fmt;
 use std::str::FromStr;
 
-use sqlx::{PgConnection, PgExecutor, PgPool};
+use sqlx::postgres::PgArguments;
+use sqlx::{PgConnection, PgExecutor, PgPool, Postgres};
 
 use crate::account::{AccountId, Handle};
 use crate::blob::BlobHash;
@@ -168,9 +169,8 @@ pub async fn by_owner(db: &PgPool, owner: AccountId) -> Result<Vec<Design>> {
 }
 
 /// `owner`'s design at `slug`, within the upload's transaction. Not
-/// locked: the head is read next and moved by compare-and-set
-/// ([`set_head`]), so of two pushes at once the second is refused rather
-/// than silently appended onto a head its uploader never saw.
+/// locked: a head only moves by compare-and-set ([`set_head`]), so a push
+/// is never silently appended onto a head its uploader never saw.
 ///
 /// # Errors
 ///
@@ -192,9 +192,9 @@ pub async fn find_owned(
 }
 
 /// The design at `/{owner}/{slug}`: the one a push names, whoever pushes
-/// (`roles::require` says whether they may), within the upload's
-/// transaction; on the pool for a page about the design. Not locked, for
-/// the reason [`find_owned`] gives.
+/// (`roles::require` says whether they may), on the pool for a page about
+/// the design or a push's first look. Not locked, for the reason
+/// [`find_owned`] gives; [`lock_at`] is the read a push writes under.
 ///
 /// # Errors
 ///
@@ -331,8 +331,7 @@ pub async fn record_revision(
     metadata: Option<&Metadata>,
 ) -> Result<RevisionHash> {
     let hash = revision_hash(draft);
-    let count = |n: u32| i32::try_from(n).unwrap_or(i32::MAX);
-    sqlx::query(
+    let query = sqlx::query(
         "INSERT INTO revision (hash, tree_hash, parent_hash, author_id, author_handle,
              created_at, message, format_version, layer_count, copper_layer_count,
              board_width_mm, board_height_mm, fonts, net_count, footprint_count)
@@ -345,22 +344,29 @@ pub async fn record_revision(
     .bind(author)
     .bind(draft.author.as_str())
     .bind(draft.time)
-    .bind(draft.message)
-    .bind(metadata.map(|m| count(m.format_version)))
-    .bind(metadata.map(|m| count(m.layer_count)))
-    .bind(metadata.map(|m| count(m.copper_layer_count)))
-    .bind(metadata.and_then(|m| m.board_size).map(|(width, _)| width))
-    .bind(
-        metadata
-            .and_then(|m| m.board_size)
-            .map(|(_, height)| height),
-    )
-    .bind(metadata.map(|m| m.fonts.clone()))
-    .bind(metadata.map(|m| count(m.net_count)))
-    .bind(metadata.map(|m| count(m.footprint_count)))
-    .execute(tx)
-    .await?;
+    .bind(draft.message);
+    bind_metadata(query, metadata).execute(tx).await?;
     Ok(hash)
+}
+
+/// The eight metadata columns `revision` and `pending_revision` share,
+/// bound in their order: format version, layers, copper layers, width,
+/// height, fonts, nets, footprints.
+pub(crate) fn bind_metadata<'q>(
+    query: sqlx::query::Query<'q, Postgres, PgArguments>,
+    metadata: Option<&Metadata>,
+) -> sqlx::query::Query<'q, Postgres, PgArguments> {
+    let count = |n: u32| i32::try_from(n).unwrap_or(i32::MAX);
+    let size = metadata.and_then(|m| m.board_size);
+    query
+        .bind(metadata.map(|m| count(m.format_version)))
+        .bind(metadata.map(|m| count(m.layer_count)))
+        .bind(metadata.map(|m| count(m.copper_layer_count)))
+        .bind(size.map(|(width, _)| width))
+        .bind(size.map(|(_, height)| height))
+        .bind(metadata.map(|m| m.fonts.clone()))
+        .bind(metadata.map(|m| count(m.net_count)))
+        .bind(metadata.map(|m| count(m.footprint_count)))
 }
 
 /// The head of `branch` on `design`, or `None` for a branch that does not
@@ -384,9 +390,57 @@ pub async fn head(
     row.as_deref().map(RevisionHash::from_bytes).transpose()
 }
 
+/// The head of `branch` on `design` as [`head`] reads it, with the
+/// branch's row held until the transaction ends: of two pushes at once
+/// the second waits here and then sees the first one's head, so whether
+/// its own head moved is settled before it writes anything.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when the row's
+/// hash is not 32 bytes, which the schema forbids.
+pub async fn lock_head(
+    tx: &mut PgConnection,
+    design: DesignId,
+    branch: &str,
+) -> Result<Option<RevisionHash>> {
+    let row: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT head_hash FROM branch WHERE design_id = $1 AND name = $2 FOR UPDATE",
+    )
+    .bind(design)
+    .bind(branch)
+    .fetch_optional(tx)
+    .await?;
+    row.as_deref().map(RevisionHash::from_bytes).transpose()
+}
+
+/// Whether `revision` is on the chain of `branch` of `design`: the
+/// branch's own walk rather than the design-wide index, for a push
+/// checking the head it was built on, in its transaction.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses.
+pub async fn on_branch(
+    tx: &mut PgConnection,
+    design: DesignId,
+    branch: &str,
+    revision: RevisionHash,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(&format!(
+        "WITH RECURSIVE {CHAIN} SELECT EXISTS (SELECT 1 FROM chain WHERE hash = $3)"
+    ))
+    .bind(design)
+    .bind(branch)
+    .bind(revision.as_bytes())
+    .fetch_one(tx)
+    .await?)
+}
+
 /// Move `branch` on `design` from `expected` (its head when the upload
-/// read it; `None` makes the branch) to `new`, by compare-and-set: the
-/// read that decided the write is the write's own condition.
+/// read it; `None` makes the branch, as `creator`'s) to `new`, by
+/// compare-and-set: the read that decided the write is the write's own
+/// condition.
 ///
 /// # Errors
 ///
@@ -399,16 +453,19 @@ pub async fn set_head(
     branch: &str,
     expected: Option<RevisionHash>,
     new: RevisionHash,
+    creator: AccountId,
 ) -> Result<()> {
     let (moved, refusal) = match expected {
         None => (
             sqlx::query(
-                "INSERT INTO branch (design_id, name, head_hash) VALUES ($1, $2, $3)
+                "INSERT INTO branch (design_id, name, head_hash, created_by)
+                 VALUES ($1, $2, $3, $4)
                  ON CONFLICT (design_id, name) DO NOTHING",
             )
             .bind(design)
             .bind(branch)
             .bind(new.as_bytes())
+            .bind(creator)
             .execute(tx)
             .await?,
             Refusal::BranchTaken {
@@ -596,6 +653,14 @@ struct RevisionRow {
     /// Formatted by Postgres: UTC, ISO 8601 to the second.
     created_at: String,
     message: Option<String>,
+    #[sqlx(flatten)]
+    metadata: MetadataRow,
+}
+
+/// The metadata columns `revision` and `pending_revision` share, read by
+/// column name.
+#[derive(sqlx::FromRow)]
+pub(crate) struct MetadataRow {
     format_version: Option<i32>,
     layer_count: Option<i32>,
     copper_layer_count: Option<i32>,
@@ -604,6 +669,22 @@ struct RevisionRow {
     fonts: Option<Vec<String>>,
     net_count: Option<i32>,
     footprint_count: Option<i32>,
+}
+
+impl MetadataRow {
+    /// What the board said, or `None` for a revision without one.
+    pub(crate) fn into_metadata(self) -> Option<Metadata> {
+        let count = |n: Option<i32>| n.and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+        self.format_version.map(|version| Metadata {
+            format_version: u32::try_from(version).unwrap_or(0),
+            layer_count: count(self.layer_count),
+            copper_layer_count: count(self.copper_layer_count),
+            board_size: self.board_width_mm.zip(self.board_height_mm),
+            fonts: self.fonts.unwrap_or_default(),
+            net_count: count(self.net_count),
+            footprint_count: count(self.footprint_count),
+        })
+    }
 }
 
 /// The columns every read of a revision selects, under [`RevisionRow`]'s
@@ -617,16 +698,6 @@ impl TryFrom<RevisionRow> for Revision {
     type Error = Error;
 
     fn try_from(row: RevisionRow) -> Result<Self> {
-        let count = |n: Option<i32>| n.and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
-        let metadata = row.format_version.map(|version| Metadata {
-            format_version: u32::try_from(version).unwrap_or(0),
-            layer_count: count(row.layer_count),
-            copper_layer_count: count(row.copper_layer_count),
-            board_size: row.board_width_mm.zip(row.board_height_mm),
-            fonts: row.fonts.unwrap_or_default(),
-            net_count: count(row.net_count),
-            footprint_count: count(row.footprint_count),
-        });
         Ok(Revision {
             hash: RevisionHash::from_bytes(&row.hash)?,
             tree: TreeHash::from_bytes(&row.tree_hash)?,
@@ -638,7 +709,7 @@ impl TryFrom<RevisionRow> for Revision {
             author: row.author_handle,
             created_at: row.created_at,
             message: row.message,
-            metadata,
+            metadata: row.metadata.into_metadata(),
         })
     }
 }
@@ -937,7 +1008,7 @@ struct Position {
 /// is a primary-key probe of `revision`, so the walk costs the chains'
 /// length, never a scan; a chain cannot loop, since a revision's hash
 /// covers its parent's.
-const CHAIN: &str = "chain AS (
+pub(crate) const CHAIN: &str = "chain AS (
     SELECT b.name, b.head_hash AS hash, 0 AS behind
     FROM branch b WHERE b.design_id = $1 AND ($2::text IS NULL OR b.name = $2)
     UNION ALL
@@ -1088,6 +1159,74 @@ pub async fn lock_at(tx: &mut PgConnection, owner: &Handle, slug: &Slug) -> Resu
     .fetch_optional(tx)
     .await?;
     row.map(Design::try_from).transpose()
+}
+
+/// How a transaction holds a design's row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hold {
+    /// Against a branch rename, a delete, a change of the default branch:
+    /// what a push and anything that adds a branch at a revision takes,
+    /// so the revision it checked stays the design's. Shared with other
+    /// pushes and with a fork.
+    Shared,
+    /// Against every push and every other branch change, for those.
+    Exclusive,
+}
+
+/// The design `id` within a transaction, held as `hold` says, or `None`
+/// without one. Taken before any branch row, the order every writer
+/// keeps (`crate::pending`).
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when the
+/// row's visibility is not one, which the schema forbids.
+pub(crate) async fn lock(
+    tx: &mut PgConnection,
+    id: DesignId,
+    hold: Hold,
+) -> Result<Option<Design>> {
+    let lock = match hold {
+        Hold::Shared => "FOR SHARE",
+        Hold::Exclusive => "FOR UPDATE",
+    };
+    let row: Option<DesignRow> = sqlx::query_as(&format!(
+        "SELECT {DESIGN_COLUMNS} FROM design d WHERE d.id = $1 {lock}"
+    ))
+    .bind(id)
+    .fetch_optional(tx)
+    .await?;
+    row.map(Design::try_from).transpose()
+}
+
+/// The handle `design`'s owner goes by, within a transaction that holds
+/// the design.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses.
+pub(crate) async fn owner_handle(tx: &mut PgConnection, design: &Design) -> Result<Handle> {
+    let handle: String = sqlx::query_scalar("SELECT handle FROM account WHERE id = $1")
+        .bind(design.owner_id)
+        .fetch_one(tx)
+        .await?;
+    Ok(Handle::from_row(handle))
+}
+
+/// The blobs `tree` names, distinct: what its revision would add to an
+/// account.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
+/// holds a hash that is not 32 bytes, which the schema forbids.
+pub(crate) async fn tree_blobs(tx: &mut PgConnection, tree: TreeHash) -> Result<Vec<BlobHash>> {
+    let rows: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT DISTINCT blob_hash FROM tree_entry WHERE tree_hash = $1")
+            .bind(tree.as_bytes())
+            .fetch_all(tx)
+            .await?;
+    rows.iter().map(|hash| BlobHash::from_bytes(hash)).collect()
 }
 
 /// Every branch of `design` with its head, by name, within a fork's

@@ -365,6 +365,7 @@ fn caching(response: &http::Response) -> (Option<&str>, Option<&str>) {
 #[test_case("/settings/sessions", 200, Policy::Personal, None; "the sessions page")]
 #[test_case("/api/me", 200, Policy::Personal, None; "who is signed in")]
 #[test_case("{path}/people", 200, Policy::Personal, None; "the people page")]
+#[test_case("{path}/branches", 200, Policy::Personal, None; "the branches page")]
 #[test_case("/healthz", 200, Policy::Personal, None; "the health route")]
 #[tokio::test]
 async fn a_route_names_its_policy_and_its_keys(
@@ -572,6 +573,90 @@ async fn the_settings_form_purges_the_design_and_its_listings() {
         purge.calls(),
         [vec![Key::Design(design.id), Key::Handle(handle), Key::Home]]
     );
+}
+
+#[tokio::test]
+async fn every_branch_change_purges_the_design_and_its_listings_and_a_refused_one_nothing() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, purge, _dir) = recording_server(db.clone()).await;
+    let (mut owner, owner_id, handle) = signed_in(&db, addr).await;
+    let path = uploaded(&mut owner).await;
+    let design = only_design(&db, owner_id).await;
+    let head = kiewer_lib::branch::list(&db, design.id).await.unwrap()[0].head;
+    let new_branch = format!("name=side&from={head}");
+    let posted = [
+        (format!("{path}/branches"), new_branch.as_str()),
+        (format!("{path}/b/side/rename"), "name=other"),
+        (format!("{path}/b/other/default"), ""),
+        (format!("{path}/b/main/delete"), ""),
+    ];
+    let keys = vec![
+        Key::Design(design.id),
+        Key::Handle(handle.clone()),
+        Key::Home,
+    ];
+    for (url, body) in posted {
+        purge.clear();
+        let answer = owner.post_form(&url, body).await;
+        assert_eq!(answer.status, 303, "{url}: {}", answer.body);
+        assert_eq!(
+            answer.header("cache-control"),
+            Some(Policy::Personal.value())
+        );
+        assert_eq!(purge.calls(), std::slice::from_ref(&keys), "{url}");
+    }
+    purge.clear();
+    let refused = owner.post_form(&format!("{path}/b/other/delete"), "").await;
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(
+        refused.header("cache-control"),
+        Some(Policy::Personal.value())
+    );
+    assert!(purge.calls().is_empty(), "a refused change changes nothing");
+}
+
+#[tokio::test]
+async fn a_held_upload_purges_nothing_and_its_decision_purges_what_a_push_does() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, purge, _dir) = recording_server(db.clone()).await;
+    let (mut owner, owner_id, handle) = signed_in(&db, addr).await;
+    let path = uploaded(&mut owner).await;
+    let design = only_design(&db, owner_id).await;
+    let base = kiewer_lib::branch::list(&db, design.id).await.unwrap()[0]
+        .head
+        .to_string();
+    let design_path = path.trim_start_matches('/');
+    let fields = [
+        Part::text("design", design_path),
+        Part::text("branch", "main"),
+        Part::text("from", &base),
+        Part::text("from_branch", "main"),
+        Part::file("midi8knob.kicad_pcb", BOARD),
+    ];
+    let landed = owner.post_multipart("/upload", &fields).await;
+    assert_eq!(landed.status, 303, "{}", landed.body);
+    purge.clear();
+    let held = owner.post_multipart("/upload", &fields).await;
+    assert_eq!(held.status, 303, "{}", held.body);
+    assert_eq!(held.header("cache-control"), Some(Policy::Personal.value()));
+    assert!(purge.calls().is_empty(), "no page shows a held upload");
+    let choice = held.header("location").expect("the choice").to_owned();
+    let page = owner.get(&choice).await;
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert_eq!(caching(&page), (Some(Policy::Personal.value()), None));
+    let decided = owner.post_form(&format!("{choice}/reappend"), "").await;
+    assert_eq!(decided.status, 303, "{}", decided.body);
+    assert_eq!(
+        purge.calls(),
+        [vec![Key::Design(design.id), Key::Handle(handle), Key::Home]]
+    );
+    let gone = owner.get(&choice).await;
+    assert_eq!(gone.status, 404);
+    assert_eq!(caching(&gone), (Some(Policy::Personal.value()), None));
 }
 
 #[test_case("unlisted"; "to unlisted")]

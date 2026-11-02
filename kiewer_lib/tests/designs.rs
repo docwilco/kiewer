@@ -300,7 +300,15 @@ async fn write(db: &PgPool, author: (AccountId, &Handle), push: Push<'_>) -> Res
         message: push.message,
     };
     let hash = design::record_revision(&mut tx, &draft, author.0, push.metadata).await?;
-    design::set_head(&mut tx, push.design.id, push.branch, push.expected, hash).await?;
+    design::set_head(
+        &mut tx,
+        push.design.id,
+        push.branch,
+        push.expected,
+        hash,
+        author.0,
+    )
+    .await?;
     design::record_design_revision(&mut tx, push.design.id, hash).await?;
     tx.commit().await?;
     Ok(hash)
@@ -713,7 +721,7 @@ async fn a_new_branch_starts_at_a_revision_and_a_taken_name_is_refused() {
 
     // The name is taken: the compare-and-set that makes a branch fails.
     let mut tx = db.begin().await.unwrap();
-    let taken = design::set_head(&mut tx, design.id, "experiment", None, second)
+    let taken = design::set_head(&mut tx, design.id, "experiment", None, second, owner)
         .await
         .expect_err("the branch exists");
     assert!(
@@ -787,7 +795,7 @@ async fn a_push_whose_head_moved_under_it_is_refused_at_the_compare_and_set() {
     let stale = design::record_revision(&mut slow, &draft, owner, None)
         .await
         .unwrap();
-    let moved = design::set_head(&mut slow, design.id, DEFAULT_BRANCH, seen, stale)
+    let moved = design::set_head(&mut slow, design.id, DEFAULT_BRANCH, seen, stale, owner)
         .await
         .expect_err("the head moved");
     assert!(

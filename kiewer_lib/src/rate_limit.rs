@@ -4,11 +4,14 @@
 //! revision or was refused, because a refusal costs the server the work
 //! of reading it and a hostile upload would otherwise repeat freely.
 //! Counted from the revision rows the account authored (`revision.author_id`,
-//! `created_at`, through the index `revision_author_id`) and the
-//! `upload_refusal` rows: a revision a branch no longer reaches still
-//! counts until the collector takes it, which is after the hour. The
-//! count is a bound on bursts, not a ledger: two uploads in flight at
-//! once may both pass as the thirtieth.
+//! `created_at`, through the index `revision_author_id`), the
+//! `upload_refusal` rows and the `pending_revision` rows: a revision a
+//! branch no longer reaches still counts until the collector takes it,
+//! which is after the hour. A held upload counts once: its row while it
+//! waits, then the revision in its place, or nothing once its hour is up,
+//! which is when the row would leave the window anyway. The count is a
+//! bound on bursts, not a ledger: two uploads in flight at once may both
+//! pass as the thirtieth.
 
 use std::time::Duration;
 
@@ -45,6 +48,9 @@ pub async fn check<'c>(db: impl PgExecutor<'c>, account: AccountId, per_hour: u3
              UNION ALL
              SELECT refused_at FROM upload_refusal
              WHERE account_id = $1 AND refused_at > now() - make_interval(secs => $3)
+             UNION ALL
+             SELECT created_at FROM pending_revision
+             WHERE author_id = $1 AND created_at > now() - make_interval(secs => $3)
          ) uploads
          ORDER BY at DESC
          OFFSET $2 LIMIT 1",

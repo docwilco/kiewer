@@ -158,11 +158,15 @@ pub enum Refusal {
     /// A new branch's name is missing or breaks the rules.
     #[display("{reason}")]
     BadBranchName { reason: String },
-    /// The branch's head moved while the upload was in flight. Pending
-    /// revisions (docs/v1-scope.md, Push) are not built yet, so the upload
-    /// is retried.
+    /// A compare-and-set found the branch's head moved
+    /// (`design::set_head`). A push holds the branch's row and turns a
+    /// moved head into a pending revision before it gets that far, so
+    /// this is the guard under that, not a thing an uploader meets.
     #[display("the branch {branch} moved while this upload was in flight; upload again")]
     HeadMoved { branch: String },
+    /// The default branch cannot go while it is the default.
+    #[display("{branch} is the default branch; make another branch the default first")]
+    DefaultBranch { branch: String },
     /// The multipart body itself could not be read.
     #[display("the upload could not be read: {reason}")]
     Unreadable { reason: String },

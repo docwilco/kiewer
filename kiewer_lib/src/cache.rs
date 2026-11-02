@@ -78,9 +78,12 @@ impl Policy {
 /// key drops every page that carried it. A page carries the key of each
 /// thing it shows, and a write purges the keys of what it changed:
 ///
-/// - a push, a fork, or the settings form (name, slug, description):
-///   [`of_design`], the design, the owner's handle, and the home page
-///   when the design is public; a fork's source's pages do not change;
+/// - a push, a fork, the settings form (name, slug, description), a
+///   change to a branch (new, renamed, deleted, made the default) or the
+///   decision on a held upload: [`of_design`], the design, the owner's
+///   handle, and the home page when the design is public; a fork's
+///   source's pages do not change; a held upload purges nothing until
+///   it is decided, since no page shows it;
 /// - a visibility change: the design, the owner's handle and the home
 ///   page, whichever way it went;
 /// - a transfer: the design, both handles and the home page;

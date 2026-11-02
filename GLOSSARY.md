@@ -22,7 +22,7 @@ _Avoid_: commit, version, snapshot, upload
 A named pointer to the latest revision in one line of work. A branch is always a linear chain. Named with ASCII letters, digits, hyphens, underscores and dots, up to 64 characters, not starting with a hyphen or a dot: one URL segment.
 
 **Default branch**:
-The branch a bare design URL shows. Named `main` unless renamed.
+The branch a bare design URL shows. Named `main` unless renamed. Cannot be deleted while it is the default.
 
 **Head**:
 The revision a branch currently points at.
@@ -35,7 +35,7 @@ A new design made by a signed-in person from another design they can open, under
 _Avoid_: copy, clone, duplicate
 
 **Pending revision**:
-An upload whose files are stored but whose branch head moved during the upload, waiting for the uploader to choose re-append or branch. Expires after an hour.
+An upload whose files are stored but which is no revision yet, because the head of its branch moved on from the one it was built on. Waits for its uploader to choose re-append (the new head becomes its parent) or branch (a new branch at the old head, with the revision on top). Expires after an hour.
 
 **Forked from**:
 The source design and revision a fork started at: the head of the source's default branch when the fork was made. Shown on the fork's page; once the source is deleted, the line keeps naming it by the handle and slug it had, and says it is gone.
@@ -88,7 +88,7 @@ The one person a design belongs to. Alone may delete, transfer and change visibi
 A person who may push to any branch of a design, manage people, and edit name and description.
 
 **Collaborator**:
-A person who may push revisions to a design and manage their own branches.
+A person who may push revisions to a design and manage their own branches: the ones they made.
 _Avoid_: contributor, member, editor
 
 **Account**:

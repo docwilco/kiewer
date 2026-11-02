@@ -3,6 +3,7 @@
 pub mod account;
 pub mod auth;
 pub mod blob;
+pub mod branch;
 pub mod build;
 pub mod cache;
 pub mod config;
@@ -14,6 +15,7 @@ pub mod error;
 pub mod fork;
 mod hex;
 pub mod listing;
+pub mod pending;
 pub mod rate_limit;
 pub mod revision;
 pub mod roles;

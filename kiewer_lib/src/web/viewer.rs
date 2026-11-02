@@ -193,8 +193,10 @@ pub struct DesignView {
     pub history_url: String,
     /// The upload form, opened for this branch at this revision.
     pub upload_url: String,
-    /// The upload form, opened for a new branch at this revision.
+    /// The branches page, opened for a new branch at this revision.
     pub new_branch_url: String,
+    /// The branches page.
+    pub branches_url: String,
     /// The revision's hash, 64 hex characters.
     pub revision: String,
     /// Its short form, the first 8.

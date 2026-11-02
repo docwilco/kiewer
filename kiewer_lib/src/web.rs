@@ -10,18 +10,21 @@
 //! `web/design_settings.rs`; the fork form in `web/fork.rs`; the
 //! thumbnail route and the render retry in `web/thumbnail.rs`; the
 //! Open Graph tags in `web/open_graph.rs`; a file's download in
-//! `web/files.rs`.
+//! `web/files.rs`; the branches page in `web/branches.rs`; the choice a
+//! held upload waits for in `web/pending.rs`.
 
 mod about;
 mod auth;
 pub mod beacon;
 pub mod blob;
+pub mod branches;
 mod design;
 pub mod design_settings;
 pub mod files;
 pub mod fork;
 pub mod history;
 pub mod open_graph;
+pub mod pending;
 mod people;
 mod person;
 pub mod schematic;
@@ -109,6 +112,8 @@ pub fn router(state: AppState) -> Router {
         .merge(people::routes())
         .merge(design_settings::routes())
         .merge(fork::routes())
+        .merge(branches::routes())
+        .merge(pending::routes())
         .merge(thumbnail::routes())
         // The upload's body may hold a revision's worth of files; every
         // other route keeps axum's default limit. Static routes above win

@@ -593,7 +593,7 @@ async fn visibility_and_transfer_are_the_owners(granted: Option<Role>, status: u
     let expected = if status == 303 { "unlisted" } else { "public" };
     assert!(
         page.body.contains(&format!(
-            r#"<p id="people">{expected} · <a href="{url}">people</a></p>"#
+            r#"<p id="people">{expected} · <a href="{design_path}/branches">branches</a> · <a href="{url}">people</a></p>"#
         )),
         "the design page says {expected} and links the people page: {}",
         page.body

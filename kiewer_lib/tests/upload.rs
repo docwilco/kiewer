@@ -19,7 +19,7 @@ use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::cache::Policy;
 use kiewer_lib::error::Refusal;
 use kiewer_lib::session;
-use kiewer_lib::upload::{self, Author, Incoming, Limits, Target};
+use kiewer_lib::upload::{self, Author, Incoming, Limits, Outcome, Target};
 use kiewer_lib::{Error, Result};
 use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
@@ -1082,6 +1082,9 @@ async fn the_hourly_allowance_refuses_the_push_over_it_through_the_library() {
     )
     .await
     .expect("the first push of the hour");
+    let Outcome::Pushed(first) = first else {
+        panic!("a new design has no head to have moved");
+    };
     assert!(first.warnings.is_empty());
 
     let mut incoming = Incoming::new(one_an_hour).unwrap();
