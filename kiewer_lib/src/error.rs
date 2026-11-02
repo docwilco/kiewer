@@ -158,11 +158,11 @@ pub enum Refusal {
     /// A new branch's name is missing or breaks the rules.
     #[display("{reason}")]
     BadBranchName { reason: String },
-    /// A compare-and-set found the branch's head moved
-    /// (`design::set_head`). A push holds the branch's row and turns a
-    /// moved head into a pending revision before it gets that far, so
-    /// this is the guard under that, not a thing an uploader meets.
-    #[display("the branch {branch} moved while this upload was in flight; upload again")]
+    /// The branch's head is not the one this write was built on: a
+    /// re-append whose page showed an older head (`crate::pending`), or
+    /// the compare-and-set under a push (`design::set_head`), which turns
+    /// a moved head into a pending revision before it gets that far.
+    #[display("the branch {branch} has moved again; look at where it is now and choose")]
     HeadMoved { branch: String },
     /// The default branch cannot go while it is the default.
     #[display("{branch} is the default branch; make another branch the default first")]

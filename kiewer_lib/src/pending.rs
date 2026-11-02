@@ -14,14 +14,14 @@
 //! still there keeps its tree). The upload counted against the hourly
 //! allowance when it arrived, and a decision is that same upload, not
 //! another: `rate_limit` counts the row while it waits, and the revision
-//! row in its place afterwards. A decision meets the account cap again,
-//! since the bytes join the account only then.
+//! row in its place afterwards; a branch delete that takes the row hands
+//! its count to `upload_refusal` (`spend`). A decision meets the account
+//! cap and the block list again, since the bytes join the account and a
+//! revision only then.
 //!
-//! Locks, in the order every writer here and in `branch` and `upload`
-//! takes them: the design row, then the branch row, then this table's.
-//! The rename and the delete that hold the design row exclusively reach
-//! this table through its foreign key, so [`decide`] takes the design
-//! before it touches its row.
+//! A branch rename or delete reaches this table through its foreign key
+//! with the design's row locked exclusively, so [`decide`] locks the
+//! design before it touches its row (`crate::branch`, on the locks).
 
 use std::fmt;
 use std::str::FromStr;
@@ -29,7 +29,7 @@ use std::str::FromStr;
 use sqlx::{PgConnection, PgPool, Row as _};
 
 use crate::account::{AccountId, Handle};
-use crate::design::{self, BranchName, Design, DesignId, Hold, MetadataRow, bind_metadata};
+use crate::design::{self, BranchName, Design, DesignId, Lock, MetadataRow, bind_metadata};
 use crate::error::{Error, Refusal, Result};
 use crate::revision::{Metadata, RevisionHash, TreeHash};
 use crate::roles::{self, Role};
@@ -92,9 +92,10 @@ pub(crate) async fn hold(tx: &mut PgConnection, held: &Held<'_>) -> Result<Pendi
     Ok(row.try_get("id")?)
 }
 
-/// One end of the gap the choice page shows.
+/// A revision along the branch: one end of the gap the choice page
+/// shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Point {
+pub struct AlongBranch {
     pub hash: RevisionHash,
     /// Its ordinal along the branch.
     pub ordinal: u32,
@@ -111,9 +112,9 @@ pub struct Pending {
     pub owner: Handle,
     pub branch: BranchName,
     /// The head the upload was built on.
-    pub base: Point,
+    pub base: AlongBranch,
     /// The branch's head now.
-    pub head: Point,
+    pub head: AlongBranch,
     pub message: Option<String>,
     pub warnings: Vec<String>,
     /// Whole minutes of its hour left, at least one.
@@ -167,7 +168,7 @@ pub async fn find(db: &PgPool, id: PendingId, account: AccountId) -> Result<Opti
         entries
             .iter()
             .find(|entry| entry.revision.hash == hash)
-            .map(|entry| Point {
+            .map(|entry| AlongBranch {
                 hash,
                 ordinal: entry.ordinal,
                 author: entry.revision.author.clone(),
@@ -198,8 +199,10 @@ pub async fn find(db: &PgPool, id: PendingId, account: AccountId) -> Result<Opti
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Choice {
     /// Onto the branch's new head: the parent rewritten, the hash
-    /// recomputed.
-    Reappend,
+    /// recomputed. `onto` is the head the page showed: a head that has
+    /// moved again is refused, or these files would land on a revision
+    /// their uploader never saw, which is what holding them prevents.
+    Reappend { onto: RevisionHash },
     /// A new branch at the old head, with the revision on top.
     Branch(BranchName),
 }
@@ -224,8 +227,9 @@ pub struct Decided {
 ///
 /// [`Error::Refused`] for what the uploader can act on, with the upload
 /// still pending: [`Refusal::BranchTaken`] for a
-/// new branch's name, `AccountFull` for the cap, `Blocked` for a file
-/// taken down in the meantime. [`Error::Forbidden`] when their role is
+/// new branch's name, [`Refusal::HeadMoved`] for a head past `onto`,
+/// `AccountFull` for the cap, `Blocked` for a file taken down in the
+/// meantime. [`Error::Forbidden`] when their role is
 /// gone. [`Error::Db`] when Postgres refuses.
 pub async fn decide(
     db: &PgPool,
@@ -243,20 +247,21 @@ pub async fn decide(
         #[sqlx(flatten)]
         metadata: MetadataRow,
     }
-    let mut tx = db.begin().await?;
-    // Unlocked, for the design to lock: see the module's lock order.
+    // On the pool, before the transaction: it only says which design to
+    // lock first, and the claim below decides.
     let design_id: Option<DesignId> = sqlx::query_scalar(
         "SELECT design_id FROM pending_revision
          WHERE id = $1 AND author_id = $2 AND expires_at > now()",
     )
     .bind(id)
     .bind(author.account_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(db)
     .await?;
     let Some(design_id) = design_id else {
         return Ok(None);
     };
-    let Some(design) = design::lock(&mut tx, design_id, Hold::Shared).await? else {
+    let mut tx = db.begin().await?;
+    let Some(design) = design::lock(&mut tx, design_id, Lock::Shared).await? else {
         return Ok(None);
     };
     roles::require(&mut *tx, design.id, author.account_id, Role::Collaborator).await?;
@@ -290,7 +295,7 @@ pub async fn decide(
     let hashes = design::tree_blobs(&mut tx, tree).await?;
     upload::check_account_cap(&mut tx, limits, author.account_id, &hashes).await?;
     let (branch, parent, expected) = match choice {
-        Choice::Reappend => {
+        Choice::Reappend { onto } => {
             let branch = BranchName::from_row(row.branch);
             // The foreign key kept the branch while the row lived, and the
             // design held keeps it now.
@@ -301,6 +306,12 @@ pub async fn decide(
                         branch: branch.to_string(),
                     })
                 })?;
+            if head != onto {
+                return Err(Refusal::HeadMoved {
+                    branch: branch.to_string(),
+                }
+                .into());
+            }
             (branch, Some(head), Some(head))
         }
         Choice::Branch(name) => (name, Some(base), None),
@@ -309,7 +320,7 @@ pub async fn decide(
         &mut tx,
         &Landing {
             design: design.id,
-            branch: branch.as_str(),
+            branch: &branch,
             parent,
             expected,
             tree,
@@ -327,6 +338,28 @@ pub async fn decide(
         branch,
         revision,
     }))
+}
+
+/// The pending revisions aimed at `branch` keep counting against their
+/// uploaders' allowance once a delete takes them: a revision a branch no
+/// longer reaches still counts, and a delete must not be how an upload
+/// stops counting. Each becomes the `upload_refusal` row of its time,
+/// before the delete in the same transaction.
+pub(crate) async fn spend(
+    tx: &mut PgConnection,
+    design: DesignId,
+    branch: &BranchName,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO upload_refusal (account_id, refused_at)
+         SELECT author_id, created_at FROM pending_revision
+         WHERE design_id = $1 AND branch = $2",
+    )
+    .bind(design)
+    .bind(branch.as_str())
+    .execute(tx)
+    .await?;
+    Ok(())
 }
 
 /// Every pending revision past its hour goes, and how many did: what the

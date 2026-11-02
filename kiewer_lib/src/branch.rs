@@ -11,17 +11,23 @@
 //! default, whoever asks. A new branch at a revision takes the
 //! collaborator role and writes one branch row: no revision.
 //!
-//! Each of the three changes holds the design's row exclusively before
-//! it reads anything, which waits out every push and every new branch
-//! (they hold it shared, `design::Hold`): so the default branch cannot
-//! move onto a branch being deleted, and a new branch cannot start at a
-//! revision a delete is taking out of the index.
+//! Each of the three changes locks the design's row exclusively before
+//! it reads anything, which waits out every push, every decision and
+//! every new branch (they lock it shared, `design::Lock`): so the default
+//! branch cannot move onto a branch being deleted, and a new branch
+//! cannot start at a revision a delete is taking out of the index. The
+//! design's row comes first in every one of these transactions and in a
+//! fork's, and under the shared lock a transaction takes one branch row
+//! to write (a fork takes many, shared, and writes none of them), so no
+//! two can wait on each other.
 
+use serde::Serialize;
 use sqlx::{PgConnection, PgPool};
 
 use crate::account::AccountId;
-use crate::design::{self, BranchName, CHAIN, DesignId, Hold};
+use crate::design::{self, BranchName, CHAIN, DesignId, Lock};
 use crate::error::{Error, Refusal, Result};
+use crate::pending;
 use crate::revision::RevisionHash;
 use crate::roles::{self, Role};
 
@@ -32,39 +38,17 @@ pub struct Listed {
     pub head: RevisionHash,
     /// The head's ordinal: how many revisions long the branch is.
     pub ordinal: u32,
-    /// How long ago the head was pushed, in seconds.
-    pub age_secs: u64,
+    /// When the head was pushed, UTC, ISO 8601 to the second.
+    pub pushed_at: String,
     /// Who pushed the head.
     pub author: String,
     /// Who made the branch, when it is known.
     pub created_by: Option<AccountId>,
 }
 
-impl Listed {
-    /// The head's age in the largest whole unit, for the page.
-    #[must_use]
-    pub fn age(&self) -> String {
-        age_in_words(self.age_secs)
-    }
-}
-
-/// `seconds` in the largest whole unit (`3 days ago`, `1 hour ago`), or
-/// `just now` under a minute.
-fn age_in_words(seconds: u64) -> String {
-    const UNITS: [(u64, &str); 3] = [(86_400, "day"), (3_600, "hour"), (60, "minute")];
-    for (size, unit) in UNITS {
-        let count = seconds / size;
-        if count > 0 {
-            let plural = if count == 1 { "" } else { "s" };
-            return format!("{count} {unit}{plural} ago");
-        }
-    }
-    "just now".to_owned()
-}
-
 /// What a person may do to one branch, as the page offers it and each
-/// write checks it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// write checks it. The wire names are `data-offer` in the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Allowed {
     pub rename: bool,
     pub delete: bool,
@@ -72,18 +56,25 @@ pub struct Allowed {
 }
 
 impl Allowed {
+    /// Nothing: what the page everyone gets opens.
+    pub const NOTHING: Self = Self {
+        rename: false,
+        delete: false,
+        set_default: false,
+    };
+
     /// What `role` may do to a branch that is `mine` or not and the
-    /// design's default or not. Delete and set-default are false on the
-    /// default branch for everyone: there is nothing to do, or the
-    /// default-branch refusal says why not.
+    /// design's default or not. Delete stays the role's answer on the
+    /// default branch: the default-branch refusal is for everyone, and
+    /// says why.
     #[must_use]
     pub fn of(role: Option<Role>, mine: bool, is_default: bool) -> Self {
         let admin = role.is_some_and(|role| role >= Role::Admin);
-        let collaborator = role.is_some();
+        let own = role.is_some() && mine;
         Self {
-            rename: admin || (collaborator && mine && !is_default),
-            delete: !is_default && (admin || (collaborator && mine)),
-            set_default: admin && !is_default,
+            rename: admin || (own && !is_default),
+            delete: admin || own,
+            set_default: admin,
         }
     }
 }
@@ -101,21 +92,21 @@ pub async fn list(db: &PgPool, design: DesignId) -> Result<Vec<Listed>> {
         name: String,
         head_hash: Vec<u8>,
         length: i64,
-        age_secs: i64,
+        pushed_at: String,
         author_handle: String,
         created_by: Option<AccountId>,
     }
     // One walk over the design's chains, whose cost is their length
     // (`design::CHAIN`); the heads join revision by its key.
     let rows: Vec<Row> = sqlx::query_as(&format!(
-        "WITH RECURSIVE {CHAIN}
+        r#"WITH RECURSIVE {CHAIN}
          SELECT b.name, b.head_hash, l.length, r.author_handle, b.created_by,
-                EXTRACT(EPOCH FROM now() - r.created_at)::bigint AS age_secs
+                to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS pushed_at
          FROM branch b
          JOIN revision r ON r.hash = b.head_hash
          JOIN (SELECT name, count(*) AS length FROM chain GROUP BY name) l ON l.name = b.name
          WHERE b.design_id = $1
-         ORDER BY b.name"
+         ORDER BY b.name"#
     ))
     .bind(design)
     .bind(None::<&str>)
@@ -127,7 +118,7 @@ pub async fn list(db: &PgPool, design: DesignId) -> Result<Vec<Listed>> {
                 name: BranchName::from_row(row.name),
                 head: RevisionHash::from_bytes(&row.head_hash)?,
                 ordinal: u32::try_from(row.length).unwrap_or(u32::MAX),
-                age_secs: u64::try_from(row.age_secs).unwrap_or(0),
+                pushed_at: row.pushed_at,
                 author: row.author_handle,
                 created_by: row.created_by,
             })
@@ -137,7 +128,6 @@ pub async fn list(db: &PgPool, design: DesignId) -> Result<Vec<Listed>> {
 
 /// What a change found, with the design held and the branch's row held.
 struct Found {
-    role: Role,
     is_default: bool,
     allowed: Allowed,
 }
@@ -156,7 +146,7 @@ async fn find(
             branch: name.to_string(),
         })
     };
-    let design = design::lock(tx, design, Hold::Exclusive)
+    let design = design::lock(tx, design, Lock::Exclusive)
         .await?
         .ok_or_else(no_branch)?;
     let role = roles::require(&mut *tx, design.id, account, Role::Collaborator).await?;
@@ -171,7 +161,6 @@ async fn find(
     let is_default = name.as_str() == design.default_branch;
     let allowed = Allowed::of(Some(role), creator == Some(account), is_default);
     Ok(Found {
-        role,
         is_default,
         allowed,
     })
@@ -187,7 +176,7 @@ fn forbidden() -> Error {
 
 /// `from` on `design` becomes `to`, the design's default branch with it
 /// when it is that; every URL of the branch moves with the name, and a
-/// held upload aimed at it follows through its foreign key.
+/// pending revision aimed at it follows through its foreign key.
 ///
 /// # Errors
 ///
@@ -245,7 +234,8 @@ async fn write_default(tx: &mut PgConnection, design: DesignId, name: &BranchNam
 /// `name` on `design` goes, and with it the index rows of revisions no
 /// other branch of the design reaches (ADR 0002): those stop being the
 /// design's at once, and the collector takes the rows themselves later.
-/// A held upload aimed at the branch goes through its foreign key.
+/// A pending revision aimed at the branch goes through its foreign key,
+/// and still spends its uploader's allowance (`pending::spend`).
 ///
 /// # Errors
 ///
@@ -270,6 +260,7 @@ pub async fn delete(
     if !found.allowed.delete {
         return Err(forbidden());
     }
+    pending::spend(&mut tx, design, name).await?;
     sqlx::query("DELETE FROM branch WHERE design_id = $1 AND name = $2")
         .bind(design)
         .bind(name.as_str())
@@ -305,7 +296,7 @@ pub async fn set_default(
 ) -> Result<()> {
     let mut tx = db.begin().await?;
     let found = find(&mut tx, design, account, name).await?;
-    if found.role < Role::Admin {
+    if !found.allowed.set_default {
         return Err(forbidden());
     }
     if !found.is_default {
@@ -333,7 +324,7 @@ pub async fn create_at(
     at: RevisionHash,
 ) -> Result<()> {
     let mut tx = db.begin().await?;
-    design::lock(&mut tx, design, Hold::Shared).await?;
+    design::lock(&mut tx, design, Lock::Shared).await?;
     roles::require(&mut *tx, design, account, Role::Collaborator).await?;
     if !design::reaches(&mut *tx, design, at).await? {
         return Err(Refusal::NoSuchRevision {
@@ -377,24 +368,14 @@ mod tests {
         }
     }
 
-    #[test_case(0, "just now")]
-    #[test_case(59, "just now")]
-    #[test_case(60, "1 minute ago")]
-    #[test_case(7_200, "2 hours ago")]
-    #[test_case(86_400, "1 day ago")]
-    #[test_case(864_000, "10 days ago")]
-    fn an_age_is_said_in_its_largest_unit(seconds: u64, words: &str) {
-        assert_eq!(age_in_words(seconds), words);
-    }
-
     #[test_case(None, true, false, allowed(false, false, false); "no role, even on a branch they made")]
     #[test_case(Some(Role::Collaborator), false, false, allowed(false, false, false); "a collaborator on another's branch")]
     #[test_case(Some(Role::Collaborator), true, false, allowed(true, true, false); "a collaborator on their own")]
-    #[test_case(Some(Role::Collaborator), true, true, allowed(false, false, false); "a collaborator on their own default")]
+    #[test_case(Some(Role::Collaborator), true, true, allowed(false, true, false); "a collaborator on their own default")]
     #[test_case(Some(Role::Admin), false, false, allowed(true, true, true); "an admin on any branch")]
-    #[test_case(Some(Role::Admin), false, true, allowed(true, false, false); "an admin on the default")]
+    #[test_case(Some(Role::Admin), false, true, allowed(true, true, true); "an admin on the default")]
     #[test_case(Some(Role::Owner), false, false, allowed(true, true, true); "the owner on any branch")]
-    #[test_case(Some(Role::Owner), false, true, allowed(true, false, false); "the owner on the default")]
+    #[test_case(Some(Role::Owner), false, true, allowed(true, true, true); "the owner on the default")]
     fn the_role_decides_what_is_offered(
         role: Option<Role>,
         mine: bool,

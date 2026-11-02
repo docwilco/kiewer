@@ -80,9 +80,9 @@ impl Policy {
 ///
 /// - a push, a fork, the settings form (name, slug, description), a
 ///   change to a branch (new, renamed, deleted, made the default) or the
-///   decision on a held upload: [`of_design`], the design, the owner's
+///   decision on a pending revision: [`of_design`], the design, the owner's
 ///   handle, and the home page when the design is public; a fork's
-///   source's pages do not change; a held upload purges nothing until
+///   source's pages do not change; a pending revision purges nothing until
 ///   it is decided, since no page shows it;
 /// - a visibility change: the design, the owner's handle and the home
 ///   page, whichever way it went;

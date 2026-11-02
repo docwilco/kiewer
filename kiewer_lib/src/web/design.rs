@@ -268,11 +268,12 @@ pub(super) struct Opened {
     branch: Option<String>,
     #[serde(default)]
     from: String,
-    /// The branch `from` was seen on, once a form has carried it: a later
-    /// choice in the selector must not claim to have seen a head the form
-    /// never showed. Absent, it is the branch preselected.
+    /// Where `from` was seen, `handle/slug/branch`, once a form has
+    /// carried it: a later choice in the selectors must not claim to have
+    /// seen a head the form never showed. Absent, it is what is
+    /// preselected.
     #[serde(default)]
-    from_branch: Option<String>,
+    seen_on: Option<String>,
 }
 
 #[derive(Template)]
@@ -292,8 +293,8 @@ struct UploadPage {
     /// The revision a new branch starts from and an upload is built on,
     /// or empty.
     from: String,
-    /// The branch `from` was seen on.
-    from_branch: String,
+    /// Where `from` was seen: `handle/slug/branch`.
+    seen_on: String,
     /// Why the last attempt was refused, or none.
     error: Option<String>,
     /// What the last attempt made, when it came back here with warnings
@@ -337,10 +338,14 @@ async fn upload_page(
             .filter(|default| branches.contains(default))
             .unwrap_or_else(|| branches[0].clone()),
     };
+    let design = selected.map(Membership::path).unwrap_or_default();
     let page = UploadPage {
-        design: selected.map(Membership::path).unwrap_or_default(),
+        seen_on: opened
+            .seen_on
+            .clone()
+            .unwrap_or_else(|| format!("{design}/{branch}")),
+        design,
         designs,
-        from_branch: opened.from_branch.clone().unwrap_or_else(|| branch.clone()),
         branches,
         branch,
         from: opened.from.clone(),
@@ -421,8 +426,8 @@ struct Fields {
     new_branch: Option<String>,
     /// The revision a new branch starts from and an upload is built on.
     from: Option<String>,
-    /// The branch `from` was seen on.
-    from_branch: Option<String>,
+    /// Where `from` was seen: `handle/slug/branch`.
+    seen_on: Option<String>,
     message: Option<String>,
 }
 
@@ -431,7 +436,7 @@ impl Fields {
     /// path; else the design at the path (`handle/slug`, as the options
     /// carry it), on the branch selected (the default branch when the
     /// form names none), built on `from` when that was seen on this very
-    /// branch; or, with the empty option, on a new branch named in
+    /// design and branch; or, with the empty option, on a new branch named in
     /// `new_branch` starting from `from`.
     fn target(&self) -> Result<Target> {
         let (owner, slug) = match self.design.as_deref().map(str::trim) {
@@ -455,10 +460,10 @@ impl Fields {
                     })
                 })?;
                 let seen = self.from.as_deref().map(str::trim).unwrap_or_default();
-                let seen = seen
-                    .parse::<RevisionHash>()
-                    .ok()
-                    .filter(|_| self.from_branch.as_deref().map(str::trim) == Some(name.as_str()));
+                let seen = seen.parse::<RevisionHash>().ok().filter(|_| {
+                    self.seen_on.as_deref().map(str::trim)
+                        == Some(format!("{owner}/{slug}/{name}").as_str())
+                });
                 match seen {
                     Some(head) => BranchTarget::Seen { name, head },
                     None => BranchTarget::Head(name),
@@ -494,7 +499,7 @@ impl Fields {
             design: self.design.clone().unwrap_or_default(),
             branch: self.branch.clone(),
             from: self.from.clone().unwrap_or_default(),
-            from_branch: self.from_branch.clone(),
+            seen_on: self.seen_on.clone(),
         }
     }
 }
@@ -533,7 +538,7 @@ async fn receive(
             Some("branch") => fields.branch = Some(text(field).await?),
             Some("new_branch") => fields.new_branch = Some(text(field).await?),
             Some("from") => fields.from = Some(text(field).await?),
-            Some("from_branch") => fields.from_branch = Some(text(field).await?),
+            Some("seen_on") => fields.seen_on = Some(text(field).await?),
             Some("message") => fields.message = Some(text(field).await?),
             Some("files") => receive_file(field, incoming).await?,
             _ => drain(field).await?,
@@ -612,7 +617,7 @@ async fn refused(
     Ok(response)
 }
 
-/// What follows a revision landing, a push's or a held upload's: the
+/// What follows a revision landing, a push's or a pending revision's: the
 /// thumbnail (ADR 0004), drawn within the render budget, else queued for
 /// a retry, which never fails the upload; then the purge of `keys`, so it
 /// covers a thumbnail drawn within the budget. A task of their own: a
@@ -701,7 +706,10 @@ pub(super) async fn upload(
             // next upload from it is built on that.
             let opened = Opened {
                 from: committed.revision.to_string(),
-                from_branch: Some(committed.branch.to_string()),
+                seen_on: Some(format!(
+                    "{owner}/{}/{}",
+                    committed.design.slug, committed.branch
+                )),
                 ..fields.opened()
             };
             upload_page(&state, settled, &opened, StatusCode::OK, None, Some(pushed)).await

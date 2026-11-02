@@ -52,9 +52,9 @@
     <input name="new_branch" maxlength="64">
   </label>
   <input type="hidden" name="from" value="{{ from }}">
-  <input type="hidden" name="from_branch" value="{{ from_branch }}">
+  <input type="hidden" name="seen_on" value="{{ seen_on }}">
   {% if !from.is_empty() %}
-  <p>This form was opened at revision <code>{{ from }}</code>. A new branch starts there. If {{ from_branch }} has moved on from it by the time you upload, you choose where your files go.</p>
+  <p>This form was opened at revision <code>{{ from }}</code>. A new branch starts there. If the branch has moved on from it by the time you upload, you choose where your files go.</p>
   {% endif %}
   <label>Message
     <input name="message" maxlength="500">

@@ -2,29 +2,34 @@
 //! `/{handle}/{slug}/branches` lists a design's branches with head,
 //! ordinal, age and author, and offers delete, rename, set-default and
 //! a new branch according to the viewer's role (`crate::branch`, which
-//! makes the same check in each write's transaction). Anyone may read it;
-//! what it offers depends on the session, so every response here carries
-//! `private, no-store` (ADR 0003), as the people page does. `?from=`
+//! makes the same check in each write's transaction). The page renders
+//! the same for everyone (ADR 0003): every form is in it hidden, and its
+//! script asks `/branches/allowed`, the viewer's own answer, which to
+//! show, as the design page's settings block asks `/api/me`; the age
+//! comes from the head's time in that script too, since a cached page
+//! cannot say how long ago. A refused change comes back as the page with
+//! the viewer's forms open and the reason, as their own response. `?from=`
 //! opens it for a new branch at that revision: where the design page's
 //! "New branch here" goes. Every write purges what a push purges: the
-//! branch dropdown, the default head and the listings all read branches.
+//! branch dropdown, the default head and the listings all read branches,
+//! and a push changes this page too.
 
 use askama::Template;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::{Html, Redirect, Response};
+use axum::response::{Html, Json, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Form, Router};
 use axum_extra::extract::cookie::CookieJar;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::AppState;
 use super::auth::{Settled, current, personal};
 use super::design::{self as design_pages, new_branch_name};
 use super::history;
 use crate::account::{AccountId, Handle};
-use crate::branch::{self, Allowed};
-use crate::cache;
+use crate::branch::{self, Allowed, Listed};
+use crate::cache::{self, Key};
 use crate::design::{self, BranchName, Design, Slug};
 use crate::error::{Error, Refusal, Result};
 use crate::revision::RevisionHash;
@@ -34,6 +39,7 @@ use crate::roles;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/{handle}/{slug}/branches", get(page).post(create))
+        .route("/{handle}/{slug}/branches/allowed", get(allowed))
         .route("/{handle}/{slug}/b/{branch}/rename", post(rename))
         .route("/{handle}/{slug}/b/{branch}/delete", post(delete))
         .route("/{handle}/{slug}/b/{branch}/default", post(set_default))
@@ -58,11 +64,13 @@ struct Row {
     short: String,
     head_url: String,
     ordinal: u32,
-    age: String,
+    /// When the head was pushed; the page's script says how long ago.
+    pushed_at: String,
     author: String,
     is_default: bool,
     /// Where the row's forms post under: `/{handle}/{slug}/b/{branch}`.
     base: String,
+    /// Which of its forms are open: none in the page everyone gets.
     allowed: Allowed,
 }
 
@@ -76,86 +84,103 @@ struct Start {
 #[derive(Template)]
 #[template(path = "branches.html")]
 struct BranchesPage {
-    /// The signed-in person's handle, or none.
-    viewer: Option<Handle>,
     owner: Handle,
     slug: Slug,
     name: String,
     /// The page's own URL, which the new-branch form posts to.
     action: String,
+    /// Where the script asks what this viewer may do.
+    allowed_url: String,
     rows: Vec<Row>,
-    /// What a new branch may start at, or empty for someone who may not
-    /// make one.
+    /// What a new branch may start at.
     starts: Vec<Start>,
+    /// Whether the new-branch form is open: not in the page everyone
+    /// gets.
+    new_branch: bool,
     /// Why the last change was refused, or none.
     error: Option<String>,
 }
 
-/// Who is looking: their account and handle, or nobody.
-type Viewer = Option<(AccountId, Handle)>;
-
-/// The page's response for `design`, at `status`, with `error` when a
-/// change was refused and `from`, a revision the design reaches, offered
-/// first for a new branch.
-async fn render(
+/// What `account` may do on `design`, whose branches are `listed`: for
+/// each branch, and whether they may make one.
+async fn allowed_for(
     state: &AppState,
-    jar: CookieJar,
-    (design, owner): (Design, Handle),
-    viewer: Viewer,
-    from: Option<RevisionHash>,
-    (status, error): (StatusCode, Option<String>),
-) -> Result<Response> {
-    let role = match &viewer {
-        Some((account, _)) => roles::role_of(&state.db, design.id, *account).await?,
+    design: &Design,
+    account: Option<AccountId>,
+    listed: &[Listed],
+) -> Result<(Vec<Allowed>, bool)> {
+    let role = match account {
+        Some(account) => roles::role_of(&state.db, design.id, account).await?,
         None => None,
     };
-    let account = viewer.as_ref().map(|(account, _)| *account);
+    let allowed = listed
+        .iter()
+        .map(|branch| {
+            let mine = account.is_some() && branch.created_by == account;
+            let is_default = branch.name.as_str() == design.default_branch;
+            Allowed::of(role, mine, is_default)
+        })
+        .collect();
+    Ok((allowed, role.is_some()))
+}
+
+/// The page for `design`: for everyone with no `account`; with one, the
+/// page a refused change comes back as, their forms open and `error`
+/// saying why. `from`, a revision the design reaches, is offered first
+/// for a new branch.
+async fn render(
+    state: &AppState,
+    (design, owner): (Design, Handle),
+    account: Option<AccountId>,
+    from: Option<RevisionHash>,
+    error: Option<String>,
+) -> Result<String> {
     let listed = branch::list(&state.db, design.id).await?;
-    let mut starts = Vec::new();
-    if role.is_some() {
-        if let Some(hash) = from {
-            starts.push(Start {
-                hash: hash.to_string(),
-                label: format!("revision {}", hash.short()),
-                selected: true,
-            });
-        }
-        starts.extend(listed.iter().map(|branch| Start {
-            hash: branch.head.to_string(),
-            label: format!("the head of {}", branch.name),
-            selected: from.is_none() && branch.name.as_str() == design.default_branch,
-        }));
-    }
+    let (allowed, new_branch) = match account {
+        Some(_) => allowed_for(state, &design, account, &listed).await?,
+        None => (vec![Allowed::NOTHING; listed.len()], false),
+    };
+    let mut starts: Vec<Start> = from
+        .into_iter()
+        .map(|hash| Start {
+            hash: hash.to_string(),
+            label: format!("revision {}", hash.short()),
+            selected: true,
+        })
+        .collect();
+    starts.extend(listed.iter().map(|branch| Start {
+        hash: branch.head.to_string(),
+        label: format!("the head of {}", branch.name),
+        selected: from.is_none() && branch.name.as_str() == design.default_branch,
+    }));
     let rows = listed
         .into_iter()
-        .map(|branch| {
-            let is_default = branch.name.as_str() == design.default_branch;
-            let mine = account.is_some() && branch.created_by == account;
-            Row {
-                url: history::branch_url(&owner, &design, &branch.name),
-                short: branch.head.short(),
-                head_url: history::revision_url(&owner, &design, branch.head, &branch.name),
-                ordinal: branch.ordinal,
-                age: branch.age(),
-                is_default,
-                base: format!("/{owner}/{}/b/{}", design.slug, branch.name),
-                allowed: Allowed::of(role, mine, is_default),
-                author: branch.author,
-                name: branch.name,
-            }
+        .zip(allowed)
+        .map(|(branch, allowed)| Row {
+            url: history::branch_url(&owner, &design, &branch.name),
+            short: branch.head.short(),
+            head_url: history::revision_url(&owner, &design, branch.head, &branch.name),
+            ordinal: branch.ordinal,
+            pushed_at: branch.pushed_at,
+            is_default: branch.name.as_str() == design.default_branch,
+            base: format!("/{owner}/{}/b/{}", design.slug, branch.name),
+            allowed,
+            author: branch.author,
+            name: branch.name,
         })
         .collect();
     let page = BranchesPage {
-        viewer: viewer.map(|(_, handle)| handle),
         action: url(&owner, &design.slug),
+        allowed_url: format!("{}/allowed", url(&owner, &design.slug)),
         owner,
         name: design.name,
         slug: design.slug,
         rows,
         starts,
+        new_branch,
         error,
     };
-    Ok(personal(jar, (status, Html(page.render()?))))
+    Ok(page.render()?)
 }
 
 /// The design at the URL's two segments, with its owner's handle, or
@@ -167,6 +192,7 @@ async fn find(state: &AppState, handle: &str, slug: &str) -> Result<Option<(Desi
     design::find(&state.db, handle, slug).await
 }
 
+/// The 404 of a form's POST, the person's own.
 fn not_found(jar: CookieJar, what: &str) -> Response {
     personal(jar, (StatusCode::NOT_FOUND, format!("no such {what}\n")))
 }
@@ -178,37 +204,81 @@ struct Opened {
     from: String,
 }
 
-/// `GET /{handle}/{slug}/branches`: the list, for anyone; the forms, for
-/// a person with a role. A `from` that is not a revision of the design
-/// is left out.
+/// `GET /{handle}/{slug}/branches`: the list, the same for everyone. A
+/// `from` that is not a revision of the design is left out.
 async fn page(
     State(state): State<AppState>,
     Path((handle, slug)): Path<(String, String)>,
     Query(opened): Query<Opened>,
-    jar: CookieJar,
 ) -> Result<Response> {
-    let (jar, session) = current(&state, jar).await?;
     let Some((design, owner)) = find(&state, &handle, &slug).await? else {
-        return Ok(not_found(jar, "design"));
+        return Ok(cache::not_found_under(&handle, "no such design\n"));
     };
-    let viewer = session.and_then(|(_, session)| Some((session.account_id, session.handle?)));
     let mut from = opened.from.parse::<RevisionHash>().ok();
     if let Some(hash) = from
         && !design::reaches(&state.db, design.id, hash).await?
     {
         from = None;
     }
-    let shown = (StatusCode::OK, None);
-    render(&state, jar, (design, owner), viewer, from, shown).await
+    let keys = [Key::Design(design.id)];
+    let page = render(&state, (design, owner), None, from, None).await?;
+    Ok(cache::page(&keys, Html(page)))
+}
+
+/// What one branch's forms may open for the viewer.
+#[derive(Debug, Serialize)]
+struct Offer {
+    name: BranchName,
+    #[serde(flatten)]
+    allowed: Allowed,
+}
+
+/// What the viewer may do on a design.
+#[derive(Debug, Serialize)]
+struct Offers {
+    new_branch: bool,
+    branches: Vec<Offer>,
+}
+
+/// `GET /{handle}/{slug}/branches/allowed`: which forms the page's script
+/// opens for the viewer, nothing for someone signed out or without a
+/// role. The one request of the page that depends on the session.
+async fn allowed(
+    State(state): State<AppState>,
+    Path((handle, slug)): Path<(String, String)>,
+    jar: CookieJar,
+) -> Result<Response> {
+    let (jar, session) = current(&state, jar).await?;
+    let Some((design, _)) = find(&state, &handle, &slug).await? else {
+        return Ok(not_found(jar, "design"));
+    };
+    let account = session.map(|(_, session)| session.account_id);
+    let listed = branch::list(&state.db, design.id).await?;
+    let (allowed, new_branch) = allowed_for(&state, &design, account, &listed).await?;
+    let branches = listed
+        .into_iter()
+        .zip(allowed)
+        .map(|(branch, allowed)| Offer {
+            name: branch.name,
+            allowed,
+        })
+        .collect();
+    let offers = Offers {
+        new_branch,
+        branches,
+    };
+    Ok(personal(jar, Json(offers)))
 }
 
 /// What came of a change, as a response: back to the page, purged; the
 /// 403 of a role that does not reach; the page again with the reason of
-/// a refusal; any other error is the caller's 500.
+/// a refusal, still offering `from` when the form named a revision of the
+/// design; any other error is the caller's 500.
 async fn finish(
     state: &AppState,
     settled: Settled,
     (design, owner): (Design, Handle),
+    from: Option<RevisionHash>,
     outcome: Result<()>,
 ) -> Result<Response> {
     let refusal = match outcome {
@@ -236,9 +306,16 @@ async fn finish(
     let found = find(state, owner.as_str(), design.slug.as_str())
         .await?
         .unwrap_or((design, owner));
-    let viewer = Some((settled.account_id, settled.handle));
-    let shown = (design_pages::status(&refusal), Some(refusal.to_string()));
-    render(state, settled.jar, found, viewer, None, shown).await
+    let mut from = from;
+    if let Some(hash) = from
+        && !design::reaches(&state.db, found.0.id, hash).await?
+    {
+        from = None;
+    }
+    let reason = Some(refusal.to_string());
+    let page = render(state, found, Some(settled.account_id), from, reason).await?;
+    let status = design_pages::status(&refusal);
+    Ok(personal(settled.jar, (status, Html(page))))
 }
 
 /// A branch form's one field: the name to give.
@@ -265,9 +342,10 @@ async fn create(
     let Some((design, owner)) = find(&state, &handle, &slug).await? else {
         return Ok(not_found(settled.jar, "design"));
     };
+    let at = form.from.trim().parse::<RevisionHash>();
     let outcome = async {
         let name = new_branch_name(&form.name)?;
-        let at = form.from.trim().parse::<RevisionHash>().map_err(|_| {
+        let at = at.as_ref().copied().map_err(|_| {
             Error::Refused(Refusal::NoSuchRevision {
                 hash: form.from.clone(),
             })
@@ -275,7 +353,7 @@ async fn create(
         branch::create_at(&state.db, settled.account_id, design.id, &name, at).await
     }
     .await;
-    finish(&state, settled, (design, owner), outcome).await
+    finish(&state, settled, (design, owner), at.ok(), outcome).await
 }
 
 /// The design and the branch of a URL under `/b/{branch}`, or `None`.
@@ -310,7 +388,7 @@ async fn rename(
         branch::rename(&state.db, settled.account_id, design.id, &from, &to).await
     }
     .await;
-    finish(&state, settled, (design, owner), outcome).await
+    finish(&state, settled, (design, owner), None, outcome).await
 }
 
 /// `POST /{handle}/{slug}/b/{branch}/delete`: for the same people; the
@@ -324,7 +402,7 @@ async fn delete(
         return Ok(not_found(settled.jar, "branch"));
     };
     let outcome = branch::delete(&state.db, settled.account_id, design.id, &name).await;
-    finish(&state, settled, (design, owner), outcome).await
+    finish(&state, settled, (design, owner), None, outcome).await
 }
 
 /// `POST /{handle}/{slug}/b/{branch}/default`: for an admin or the owner.
@@ -337,5 +415,5 @@ async fn set_default(
         return Ok(not_found(settled.jar, "branch"));
     };
     let outcome = branch::set_default(&state.db, settled.account_id, design.id, &name).await;
-    finish(&state, settled, (design, owner), outcome).await
+    finish(&state, settled, (design, owner), None, outcome).await
 }

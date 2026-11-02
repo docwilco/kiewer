@@ -275,6 +275,7 @@ impl Site {
 #[test_case("{path}/b/main"; "a branch")]
 #[test_case("{path}/r/{revision}"; "a revision")]
 #[test_case("{path}/b/main/history"; "a history")]
+#[test_case("{path}/branches"; "the branches page")]
 #[test_case("{path}/schematic"; "a schematic")]
 #[test_case("{path}?design"; "a design asked to stay")]
 #[test_case("{path}/r/{revision}/f/midi8knob.kicad_pcb"; "a file")]
@@ -347,6 +348,8 @@ fn caching(response: &http::Response) -> (Option<&str>, Option<&str>) {
 #[test_case("{path}/b/main", 200, Policy::Page, Some("{design_key}"); "a branch")]
 #[test_case("{path}/r/{revision}", 200, Policy::Page, Some("{design_key}"); "a revision")]
 #[test_case("{path}/b/main/history", 200, Policy::Page, Some("{design_key}"); "a history")]
+#[test_case("{path}/branches", 200, Policy::Page, Some("{design_key}"); "the branches page")]
+#[test_case("/{handle}/no-such-design/branches", 404, Policy::NotFound, Some("handle-{handle}"); "no design's branches")]
 #[test_case("{path}/schematic", 200, Policy::Page, Some("{design_key}"); "a schematic")]
 #[test_case("/about", 200, Policy::Page, None; "the about page")]
 #[test_case("/viewer", 200, Policy::Page, None; "the hand-off viewer")]
@@ -365,7 +368,7 @@ fn caching(response: &http::Response) -> (Option<&str>, Option<&str>) {
 #[test_case("/settings/sessions", 200, Policy::Personal, None; "the sessions page")]
 #[test_case("/api/me", 200, Policy::Personal, None; "who is signed in")]
 #[test_case("{path}/people", 200, Policy::Personal, None; "the people page")]
-#[test_case("{path}/branches", 200, Policy::Personal, None; "the branches page")]
+#[test_case("{path}/branches/allowed", 200, Policy::Personal, None; "what the viewer may do")]
 #[test_case("/healthz", 200, Policy::Personal, None; "the health route")]
 #[tokio::test]
 async fn a_route_names_its_policy_and_its_keys(
@@ -630,11 +633,12 @@ async fn a_held_upload_purges_nothing_and_its_decision_purges_what_a_push_does()
         .head
         .to_string();
     let design_path = path.trim_start_matches('/');
+    let seen_on = format!("{design_path}/main");
     let fields = [
         Part::text("design", design_path),
         Part::text("branch", "main"),
         Part::text("from", &base),
-        Part::text("from_branch", "main"),
+        Part::text("seen_on", &seen_on),
         Part::file("midi8knob.kicad_pcb", BOARD),
     ];
     let landed = owner.post_multipart("/upload", &fields).await;
@@ -648,7 +652,10 @@ async fn a_held_upload_purges_nothing_and_its_decision_purges_what_a_push_does()
     let page = owner.get(&choice).await;
     assert_eq!(page.status, 200, "{}", page.body);
     assert_eq!(caching(&page), (Some(Policy::Personal.value()), None));
-    let decided = owner.post_form(&format!("{choice}/reappend"), "").await;
+    let new_head = kiewer_lib::branch::list(&db, design.id).await.unwrap()[0].head;
+    let decided = owner
+        .post_form(&format!("{choice}/reappend"), &format!("onto={new_head}"))
+        .await;
     assert_eq!(decided.status, 303, "{}", decided.body);
     assert_eq!(
         purge.calls(),

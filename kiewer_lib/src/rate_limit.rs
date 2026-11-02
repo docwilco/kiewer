@@ -7,9 +7,9 @@
 //! `created_at`, through the index `revision_author_id`), the
 //! `upload_refusal` rows and the `pending_revision` rows: a revision a
 //! branch no longer reaches still counts until the collector takes it,
-//! which is after the hour. A held upload counts once: its row while it
-//! waits, then the revision in its place, or nothing once its hour is up,
-//! which is when the row would leave the window anyway. The count is a
+//! which is after the hour. A pending revision counts once: its row while
+//! it waits, then the revision in its place, or nothing once its hour is
+//! up, which is when the row would leave the window anyway. The count is a
 //! bound on bursts, not a ledger: two uploads in flight at once may both
 //! pass as the thirtieth.
 

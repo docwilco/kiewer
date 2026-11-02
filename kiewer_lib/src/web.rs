@@ -11,7 +11,7 @@
 //! thumbnail route and the render retry in `web/thumbnail.rs`; the
 //! Open Graph tags in `web/open_graph.rs`; a file's download in
 //! `web/files.rs`; the branches page in `web/branches.rs`; the choice a
-//! held upload waits for in `web/pending.rs`.
+//! pending revision waits for in `web/pending.rs`.
 
 mod about;
 mod auth;

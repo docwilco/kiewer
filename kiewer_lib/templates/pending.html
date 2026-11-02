@@ -31,6 +31,7 @@
   <h2>Re-append</h2>
   <p>Your files become the next revision of {{ pending.branch }}, on top of <code>{{ head_short }}</code>. They replace what that revision holds.</p>
   <form method="post" action="{{ action }}/reappend">
+    <input type="hidden" name="onto" value="{{ pending.head.hash }}">
     <button type="submit">Re-append onto {{ pending.branch }}</button>
   </form>
 </section>

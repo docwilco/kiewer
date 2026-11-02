@@ -1,4 +1,4 @@
-//! The choice a held upload waits for (`crate::pending`):
+//! The choice a pending revision waits for (`crate::pending`):
 //! `/{handle}/{slug}/pending/{id}` shows its uploader what moved and
 //! offers re-append and branch, each a POST of its own under that URL.
 //! The upload's POST sends the browser here when its head moved. Anyone
@@ -21,8 +21,9 @@ use super::history;
 use crate::account::Handle;
 use crate::cache;
 use crate::design::Slug;
-use crate::error::{Error, Result};
+use crate::error::{Error, Refusal, Result};
 use crate::pending::{self, Choice, Pending, PendingId};
+use crate::revision::RevisionHash;
 use crate::upload::{Author, Limits};
 
 /// The choice's routes, merged into the server's router.
@@ -33,7 +34,7 @@ pub fn routes() -> Router<AppState> {
         .route("/{handle}/{slug}/pending/{id}/branch", post(branch))
 }
 
-/// The URL of the choice for the held upload `id` of a design.
+/// The URL of the choice for the pending revision `id` of a design.
 #[must_use]
 pub fn url(handle: &Handle, slug: &Slug, id: PendingId) -> String {
     format!("/{handle}/{slug}/pending/{id}")
@@ -60,7 +61,7 @@ fn gone(settled: Settled) -> Response {
         settled.jar,
         (
             StatusCode::NOT_FOUND,
-            "no such pending revision: it was decided, or its hour is up, so upload again\n",
+            "no such pending revision: it was decided, its branch was deleted, or its hour is up, so upload again\n",
         ),
     )
 }
@@ -148,16 +149,34 @@ async fn decide(
     .await
 }
 
-/// `POST /{handle}/{slug}/pending/{id}/reappend`: onto the new head.
+/// The re-append form's field: the head the page showed.
+#[derive(Debug, Deserialize)]
+struct ReappendForm {
+    onto: String,
+}
+
+/// `POST /{handle}/{slug}/pending/{id}/reappend`: onto the new head, as
+/// long as it is still the one the page showed; else the page again,
+/// showing where the branch is now.
 async fn reappend(
     State(state): State<AppState>,
     Path((_, _, id)): Path<(String, String, String)>,
     settled: Settled,
+    Form(form): Form<ReappendForm>,
 ) -> Result<Response> {
     let Ok(id) = id.parse::<PendingId>() else {
         return Ok(gone(settled));
     };
-    decide(&state, settled, id, Ok(Choice::Reappend)).await
+    let choice = form
+        .onto
+        .parse::<RevisionHash>()
+        .map(|onto| Choice::Reappend { onto })
+        .map_err(|_| {
+            Error::Refused(Refusal::NoSuchRevision {
+                hash: form.onto.clone(),
+            })
+        });
+    decide(&state, settled, id, choice).await
 }
 
 /// The branch form's field: the new branch's name.

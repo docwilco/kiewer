@@ -8,9 +8,9 @@
 //! that transaction: the parsing and the blob writes are done before it
 //! opens, and a blob a refused upload leaves behind is the collector's.
 //!
-//! The head an upload is built on is the one its form saw, or else the
-//! one [`push`] reads before the slow part; the transaction holds the
-//! branch's row and compares. A head that moved in between makes no
+//! The head an upload is built on is the one its form saw when that is
+//! on the branch, or else the one [`push`] reads before the slow part;
+//! the transaction holds the branch's row and compares. A head that moved in between makes no
 //! revision: the upload is held for its uploader to choose
 //! (`crate::pending`), since it would otherwise land on files they never
 //! saw.
@@ -677,7 +677,7 @@ pub async fn push(
     // on the pool, a statement of its own: the count is a bound on bursts,
     // not a ledger, and the window moves with the clock.
     rate_limit::check(db, author.account_id, limits.uploads_per_hour).await?;
-    let base = built_on(db, &target).await?;
+    let started_at = head_now(db, &target).await?;
     let Incoming { dir, files, .. } = incoming;
     let Rooted {
         stem,
@@ -697,7 +697,7 @@ pub async fn push(
     let rows = Rows {
         author,
         target,
-        base,
+        started_at,
         stem,
         message,
         entries: &entries,
@@ -707,13 +707,13 @@ pub async fn push(
     write_rows(db, limits, rows).await
 }
 
-/// The head the upload at `target` is built on: the one its form saw, or
-/// the one there now, read before the parse and the blob writes so an
-/// upload that lands meanwhile is one this upload did not build on. `None`
-/// for a new design, a new branch, or a design or branch that is not
-/// there, which the transaction refuses or makes. One read on the pool:
-/// it decides nothing until the transaction compares it.
-async fn built_on(db: &PgPool, target: &Target) -> Result<Option<RevisionHash>> {
+/// The head of the branch the upload at `target` goes to, read before
+/// the parse and the blob writes, so an upload that lands meanwhile is
+/// one this upload did not build on. `None` for a new design, a new
+/// branch, or a design or branch that is not there, which the transaction
+/// refuses or makes. One read on the pool: it decides nothing until the
+/// transaction compares it.
+async fn head_now(db: &PgPool, target: &Target) -> Result<Option<RevisionHash>> {
     let Target::Existing {
         owner,
         slug,
@@ -723,9 +723,8 @@ async fn built_on(db: &PgPool, target: &Target) -> Result<Option<RevisionHash>> 
         return Ok(None);
     };
     let name = match branch {
-        BranchTarget::Seen { head, .. } => return Ok(Some(*head)),
         BranchTarget::New { .. } => return Ok(None),
-        BranchTarget::Head(name) => Some(name.as_str()),
+        BranchTarget::Head(name) | BranchTarget::Seen { name, .. } => Some(name.as_str()),
         BranchTarget::Default => None,
     };
     let Some(design) = design::find_at(db, owner, slug).await? else {
@@ -794,8 +793,8 @@ async fn parse_and_store(
 struct Rows<'a> {
     author: &'a Author,
     target: Target,
-    /// The head the upload was built on ([`built_on`]).
-    base: Option<RevisionHash>,
+    /// The branch's head as the upload started ([`head_now`]).
+    started_at: Option<RevisionHash>,
     /// The project folder's file name without its extension: a new
     /// design's name when none was given.
     stem: String,
@@ -815,7 +814,7 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Outc
     let Rows {
         author,
         target,
-        base,
+        started_at,
         stem,
         message,
         entries,
@@ -858,34 +857,35 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Outc
     check_account_cap(&mut tx, limits, author.account_id, &hashes).await?;
     let tree = design::record_tree(&mut tx, entries).await?;
     let message = message.map(str::trim).filter(|message| !message.is_empty());
-    let (branch, parent, expected) = match resolve_branch(&mut tx, &design, branch, base).await? {
-        Resolved::Land {
-            branch,
-            parent,
-            expected,
-        } => (branch, parent, expected),
-        Resolved::Hold { branch, base } => {
-            let held = Held {
-                design: design.id,
-                branch: &branch,
-                author: author.account_id,
-                base,
-                tree,
-                message,
-                metadata,
-                warnings: &warnings,
-            };
-            let id = pending::hold(&mut tx, &held).await?;
-            tx.commit().await?;
-            tracing::info!(design = %design.slug, %branch, %id, "upload held: the head moved");
-            return Ok(Outcome::Pending { design, id });
-        }
-    };
+    let (branch, parent, expected) =
+        match resolve_branch(&mut tx, &design, branch, started_at).await? {
+            Resolved::Land {
+                branch,
+                parent,
+                expected,
+            } => (branch, parent, expected),
+            Resolved::Hold { branch, base } => {
+                let held = Held {
+                    design: design.id,
+                    branch: &branch,
+                    author: author.account_id,
+                    base,
+                    tree,
+                    message,
+                    metadata,
+                    warnings: &warnings,
+                };
+                let id = pending::hold(&mut tx, &held).await?;
+                tx.commit().await?;
+                tracing::info!(design = %design.slug, %branch, %id, "upload held: the head moved");
+                return Ok(Outcome::Pending { design, id });
+            }
+        };
     let revision = land(
         &mut tx,
         &Landing {
             design: design.id,
-            branch: branch.as_str(),
+            branch: &branch,
             parent,
             expected,
             tree,
@@ -934,7 +934,7 @@ pub(crate) async fn check_account_cap(
 /// A revision going onto a branch.
 pub(crate) struct Landing<'a> {
     pub design: DesignId,
-    pub branch: &'a str,
+    pub branch: &'a BranchName,
     pub parent: Option<RevisionHash>,
     /// What the compare-and-set expects the head to be; `None` makes the
     /// branch.
@@ -962,7 +962,7 @@ pub(crate) async fn land(tx: &mut PgConnection, landing: &Landing<'_>) -> Result
     design::set_head(
         tx,
         landing.design,
-        landing.branch,
+        landing.branch.as_str(),
         landing.expected,
         revision,
         author.account_id,
@@ -992,21 +992,23 @@ enum Resolved {
 /// compare-and-set expects the head to be: the head for a push onto a
 /// branch, its row held so nothing moves it now, nothing for a branch
 /// being made (whose first revision's parent is where it starts). Or,
-/// for a push built on `base` when the head has moved on from it, the
-/// upload is held. A `base` not on the branch is no evidence of anything
-/// (a form opened on another branch, a branch deleted and made again).
-/// Within the upload's transaction, after the design is held.
+/// when the head has moved on from what the push was built on, the
+/// upload is held. That is the head its form saw, else `started_at`; one
+/// not on the branch is no evidence of anything (a form opened elsewhere,
+/// a branch deleted and made again), and the next is asked. Within the
+/// upload's transaction, after the design is held.
 async fn resolve_branch(
     tx: &mut PgConnection,
     design: &Design,
     branch: BranchTarget,
-    base: Option<RevisionHash>,
+    started_at: Option<RevisionHash>,
 ) -> Result<Resolved> {
     match branch {
         BranchTarget::Default | BranchTarget::Head(_) | BranchTarget::Seen { .. } => {
-            let name = match branch {
-                BranchTarget::Head(name) | BranchTarget::Seen { name, .. } => name,
-                _ => BranchName::from_row(design.default_branch.clone()),
+            let (name, seen) = match branch {
+                BranchTarget::Head(name) => (name, None),
+                BranchTarget::Seen { name, head } => (name, Some(head)),
+                _ => (BranchName::from_row(design.default_branch.clone()), None),
             };
             let head = design::lock_head(tx, design.id, name.as_str()).await?;
             // The default branch of a design with no revision yet (a new
@@ -1018,11 +1020,13 @@ async fn resolve_branch(
                 }
                 .into());
             }
-            if let (Some(base), Some(_)) = (base, head)
-                && Some(base) != head
-                && design::on_branch(tx, design.id, name.as_str(), base).await?
-            {
-                return Ok(Resolved::Hold { branch: name, base });
+            for base in seen.into_iter().chain(started_at) {
+                if Some(base) == head {
+                    break;
+                }
+                if head.is_some() && design::on_branch(tx, design.id, name.as_str(), base).await? {
+                    return Ok(Resolved::Hold { branch: name, base });
+                }
             }
             Ok(Resolved::Land {
                 branch: name,

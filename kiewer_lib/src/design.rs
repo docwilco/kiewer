@@ -88,6 +88,16 @@ impl BranchName {
     }
 }
 
+/// As its text: what a page's script reads a branch by.
+impl serde::Serialize for BranchName {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
 impl fmt::Display for BranchName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -1138,10 +1148,12 @@ async fn entries(db: &PgPool, tree: TreeHash) -> Result<Vec<TreeEntry>> {
         .collect()
 }
 
-/// The design at `/{owner}/{slug}` within a fork's transaction, and
-/// held: a change to its name, slug, visibility or owner waits until the
-/// transaction ends, so what the fork inherits is what the row says as
-/// it commits. [`find_at`] is the same read without the lock.
+/// The design at `/{owner}/{slug}` within a fork's or a push's
+/// transaction, and held: a change to its name, slug, visibility, owner
+/// or branches waits until the transaction ends, so what the fork
+/// inherits is what the row says as it commits, and the revision a push
+/// checked stays the design's. [`find_at`] is the same read without the
+/// lock.
 ///
 /// # Errors
 ///
@@ -1161,9 +1173,9 @@ pub async fn lock_at(tx: &mut PgConnection, owner: &Handle, slug: &Slug) -> Resu
     row.map(Design::try_from).transpose()
 }
 
-/// How a transaction holds a design's row.
+/// How a transaction locks a design's row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Hold {
+pub(crate) enum Lock {
     /// Against a branch rename, a delete, a change of the default branch:
     /// what a push and anything that adds a branch at a revision takes,
     /// so the revision it checked stays the design's. Shared with other
@@ -1173,9 +1185,9 @@ pub(crate) enum Hold {
     Exclusive,
 }
 
-/// The design `id` within a transaction, held as `hold` says, or `None`
-/// without one. Taken before any branch row, the order every writer
-/// keeps (`crate::pending`).
+/// The design `id` within a transaction, locked as `lock` says, or
+/// `None` without one. The first lock of every transaction that goes on
+/// to a branch row (`crate::branch` says what that rules out).
 ///
 /// # Errors
 ///
@@ -1184,14 +1196,14 @@ pub(crate) enum Hold {
 pub(crate) async fn lock(
     tx: &mut PgConnection,
     id: DesignId,
-    hold: Hold,
+    lock: Lock,
 ) -> Result<Option<Design>> {
-    let lock = match hold {
-        Hold::Shared => "FOR SHARE",
-        Hold::Exclusive => "FOR UPDATE",
+    let clause = match lock {
+        Lock::Shared => "FOR SHARE",
+        Lock::Exclusive => "FOR UPDATE",
     };
     let row: Option<DesignRow> = sqlx::query_as(&format!(
-        "SELECT {DESIGN_COLUMNS} FROM design d WHERE d.id = $1 {lock}"
+        "SELECT {DESIGN_COLUMNS} FROM design d WHERE d.id = $1 {clause}"
     ))
     .bind(id)
     .fetch_optional(tx)

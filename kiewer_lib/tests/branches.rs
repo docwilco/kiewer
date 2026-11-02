@@ -4,6 +4,7 @@
 //! default; new-branch-here writes a branch and no revision. The Postgres
 //! tests skip without `DATABASE_URL`, like `tests/db.rs`.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -257,16 +258,43 @@ async fn each_role_on_each_branch_action(who: Who, action: Action, branch: &str,
     }
 }
 
+/// What `/branches/allowed` answers `person`: the new-branch flag, and
+/// each branch's three offers.
+async fn offers(person: &mut Person, path: &str) -> (bool, HashMap<String, (bool, bool, bool)>) {
+    let answer = person
+        .browser
+        .get(&format!("{path}/branches/allowed"))
+        .await;
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let json: serde_json::Value = serde_json::from_str(&answer.body).expect("JSON");
+    let flag = |value: &serde_json::Value, name: &str| value[name].as_bool().expect(name);
+    let branches = json["branches"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|branch| {
+            (
+                branch["name"].as_str().expect("a name").to_owned(),
+                (
+                    flag(branch, "rename"),
+                    flag(branch, "delete"),
+                    flag(branch, "set_default"),
+                ),
+            )
+        })
+        .collect();
+    (flag(&json, "new_branch"), branches)
+}
+
 #[tokio::test]
-async fn the_page_lists_each_branch_and_offers_what_the_role_allows() {
+async fn the_page_lists_each_branch_for_everyone_with_every_form_closed() {
     let Some(db) = pool_from_env().await else {
         return;
     };
     let (addr, _dir) = server(db.clone()).await;
-    let mut stage = stage(&db, addr).await;
+    let stage = stage(&db, addr).await;
     let url = format!("{}/branches", stage.path);
     let owner_handle = stage.owner.handle.to_string();
-    let path = stage.path.clone();
     let main = stage.listed(&db, "main").await.expect("main");
     assert_eq!(main.ordinal, 2);
     assert_eq!(main.author, owner_handle);
@@ -276,30 +304,92 @@ async fn the_page_lists_each_branch_and_offers_what_the_role_allows() {
     for shown in ["mine", "theirs", "(default)", "rev 2", &main.head.short()] {
         assert!(open.contains(shown), "{shown}: {open}");
     }
-    assert!(open.contains("just now"), "the age: {open}");
+    assert!(open.contains(&main.pushed_at), "the head's time: {open}");
     assert!(open.contains(&owner_handle), "the author: {open}");
-    assert!(!open.contains("<form"), "nothing to do signed out: {open}");
+    assert!(
+        open.contains(r#"<div id="new-branch" hidden>"#),
+        "the new-branch form starts closed: {open}"
+    );
+    let forms = open.matches(r#"<form class="inline""#).count();
+    let closed = open
+        .match_indices(r#"<form class="inline""#)
+        .filter(|(at, _)| {
+            let tag = &open[*at..];
+            tag[..tag.find('>').expect("the tag closes")].ends_with(" hidden")
+        })
+        .count();
+    assert_eq!(closed, forms, "every form starts closed: {open}");
+    assert_eq!(
+        open.matches(r#"data-offer="delete""#).count(),
+        2,
+        "the default branch has no delete form: {open}"
+    );
+}
 
-    let rename = |branch: &str| format!(r#"action="{path}/b/{branch}/rename""#);
-    let delete = |branch: &str| format!(r#"action="{path}/b/{branch}/delete""#);
-    let default = |branch: &str| format!(r#"action="{path}/b/{branch}/default""#);
+#[tokio::test]
+async fn what_the_page_opens_follows_the_role_and_who_made_the_branch() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let mut stage = stage(&db, addr).await;
+    let path = stage.path.clone();
+    let (new_branch, collaborator) = offers(&mut stage.collaborator, &path).await;
+    assert!(new_branch);
+    assert_eq!(collaborator["mine"], (true, true, false));
+    assert_eq!(collaborator["theirs"], (false, false, false));
+    assert_eq!(collaborator["main"], (false, false, false));
 
-    let page = stage.collaborator.browser.get(&url).await;
-    assert!(page.body.contains(&rename("mine")), "{}", page.body);
-    assert!(page.body.contains(&delete("mine")), "{}", page.body);
-    assert!(!page.body.contains(&default("mine")), "{}", page.body);
-    assert!(!page.body.contains(&rename("theirs")), "{}", page.body);
-    assert!(!page.body.contains(&rename("main")), "{}", page.body);
-    assert!(page.body.contains("New branch"), "{}", page.body);
+    let (new_branch, admin) = offers(&mut stage.admin, &path).await;
+    assert!(new_branch);
+    assert_eq!(admin["theirs"], (true, true, true));
+    assert!(admin["main"].0, "an admin renames the default");
 
-    let page = stage.admin.browser.get(&url).await;
-    assert!(page.body.contains(&rename("theirs")), "{}", page.body);
-    assert!(page.body.contains(&default("theirs")), "{}", page.body);
-    assert!(page.body.contains(&rename("main")), "{}", page.body);
-    assert!(!page.body.contains(&delete("main")), "{}", page.body);
+    let (new_branch, stranger) = offers(&mut stage.stranger, &path).await;
+    assert!(!new_branch, "no role, no new branch");
+    assert_eq!(stranger["mine"], (false, false, false));
 
-    let page = stage.stranger.browser.get(&url).await;
-    assert!(!page.body.contains("<form"), "no role: {}", page.body);
+    let (status, signed_out) = http::get(addr, &format!("{path}/branches/allowed")).await;
+    assert_eq!(status, 200);
+    assert!(signed_out.contains(r#""new_branch":false"#), "{signed_out}");
+    assert!(!signed_out.contains(":true"), "{signed_out}");
+}
+
+#[tokio::test]
+async fn a_refused_new_branch_keeps_the_revision_it_was_starting_at() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let mut stage = stage(&db, addr).await;
+    let path = stage.path.clone();
+    let name: design::BranchName = "main".parse().unwrap();
+    let old = design::history(&db, stage.design.id, &name, None)
+        .await
+        .unwrap()[1]
+        .revision
+        .hash;
+    let refused = stage
+        .collaborator
+        .browser
+        .post_form(
+            &format!("{path}/branches"),
+            &format!("name=mine&from={old}"),
+        )
+        .await;
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert!(
+        refused
+            .body
+            .contains(&format!(r#"<option value="{old}" selected>"#)),
+        "{}",
+        refused.body
+    );
+    assert!(
+        !refused.body.contains(r#"<div id="new-branch" hidden>"#),
+        "the form stays open: {}",
+        refused.body
+    );
 }
 
 #[tokio::test]

@@ -241,10 +241,16 @@ async fn re_append_rewrites_the_parent_to_the_new_head() {
     let dir = scratch_dir!();
     let owner = person(&db).await;
     let (design, base, head, id) = overlapping_uploads(&db, &dir, &owner).await;
-    let decided = pending::decide(&db, &Limits::DEFAULT, &owner, id, Choice::Reappend)
-        .await
-        .unwrap()
-        .expect("still pending");
+    let decided = pending::decide(
+        &db,
+        &Limits::DEFAULT,
+        &owner,
+        id,
+        Choice::Reappend { onto: head },
+    )
+    .await
+    .unwrap()
+    .expect("still pending");
     assert_eq!(decided.branch.as_str(), "main");
     assert_eq!(
         chain(&db, &design, "main").await,
@@ -266,9 +272,15 @@ async fn re_append_rewrites_the_parent_to_the_new_head() {
             .is_none(),
         "a decided upload is pending no more"
     );
-    let again = pending::decide(&db, &Limits::DEFAULT, &owner, id, Choice::Reappend)
-        .await
-        .unwrap();
+    let again = pending::decide(
+        &db,
+        &Limits::DEFAULT,
+        &owner,
+        id,
+        Choice::Reappend { onto: head },
+    )
+    .await
+    .unwrap();
     assert!(again.is_none(), "it is decided once");
 }
 
@@ -339,7 +351,7 @@ async fn an_upload_nobody_decides_on_expires_and_the_expiry_leaves_the_rest() {
     };
     let dir = scratch_dir!();
     let owner = person(&db).await;
-    let (_, _, _, lapsed) = overlapping_uploads(&db, &dir, &owner).await;
+    let (_, _, head, lapsed) = overlapping_uploads(&db, &dir, &owner).await;
     let (_, _, _, live) = overlapping_uploads(&db, &dir, &owner).await;
     sqlx::query(
         "UPDATE pending_revision SET expires_at = now() - interval '1 second' WHERE id = $1",
@@ -356,9 +368,15 @@ async fn an_upload_nobody_decides_on_expires_and_the_expiry_leaves_the_rest() {
             .is_none(),
         "past its hour it is gone for its uploader, swept or not"
     );
-    let late = pending::decide(&db, &Limits::DEFAULT, &owner, lapsed, Choice::Reappend)
-        .await
-        .unwrap();
+    let late = pending::decide(
+        &db,
+        &Limits::DEFAULT,
+        &owner,
+        lapsed,
+        Choice::Reappend { onto: head },
+    )
+    .await
+    .unwrap();
     assert!(late.is_none(), "too late to decide");
 
     assert!(pending::expire(&db).await.unwrap() >= 1);
@@ -379,17 +397,23 @@ async fn a_held_upload_spends_the_allowance_once_whatever_comes_of_it() {
     let dir = scratch_dir!();
     let owner = person(&db).await;
     // Three so far: the first revision, the quick push, the held one.
-    let (_, _, _, id) = overlapping_uploads(&db, &dir, &owner).await;
+    let (_, _, head, id) = overlapping_uploads(&db, &dir, &owner).await;
     rate_limit::check(&db, owner.account_id, 4)
         .await
         .expect("three of four used");
     rate_limit::check(&db, owner.account_id, 3)
         .await
         .expect_err("the held upload counts while it waits");
-    pending::decide(&db, &Limits::DEFAULT, &owner, id, Choice::Reappend)
-        .await
-        .unwrap()
-        .expect("still pending");
+    pending::decide(
+        &db,
+        &Limits::DEFAULT,
+        &owner,
+        id,
+        Choice::Reappend { onto: head },
+    )
+    .await
+    .unwrap()
+    .expect("still pending");
     rate_limit::check(&db, owner.account_id, 4)
         .await
         .expect("the decision is the same upload, not a fourth");
@@ -405,12 +429,12 @@ async fn the_decision_itself_is_not_held_back_by_the_allowance() {
     };
     let dir = scratch_dir!();
     let owner = person(&db).await;
-    let (_, _, _, id) = overlapping_uploads(&db, &dir, &owner).await;
+    let (_, _, head, id) = overlapping_uploads(&db, &dir, &owner).await;
     let used_up = Limits {
         uploads_per_hour: 1,
         ..Limits::DEFAULT
     };
-    let decided = pending::decide(&db, &used_up, &owner, id, Choice::Reappend)
+    let decided = pending::decide(&db, &used_up, &owner, id, Choice::Reappend { onto: head })
         .await
         .unwrap();
     assert!(
@@ -432,7 +456,7 @@ async fn only_the_uploader_decides_and_only_while_they_hold_a_role() {
     roles::set_role(&db, design.id, &collaborator.handle, Role::Collaborator)
         .await
         .unwrap();
-    pushed(
+    let moved = pushed(
         &db,
         &store,
         &owner,
@@ -441,6 +465,10 @@ async fn only_the_uploader_decides_and_only_while_they_hold_a_role() {
     )
     .await
     .expect("the head moves");
+    let Outcome::Pushed(moved) = moved else {
+        panic!("nothing moved before it");
+    };
+    let head = moved.revision;
     let waiting = pushed(
         &db,
         &store,
@@ -468,17 +496,29 @@ async fn only_the_uploader_decides_and_only_while_they_hold_a_role() {
             .is_none(),
         "not even the owner sees another person's upload"
     );
-    let stranger = pending::decide(&db, &Limits::DEFAULT, &owner, id, Choice::Reappend)
-        .await
-        .unwrap();
+    let stranger = pending::decide(
+        &db,
+        &Limits::DEFAULT,
+        &owner,
+        id,
+        Choice::Reappend { onto: head },
+    )
+    .await
+    .unwrap();
     assert!(stranger.is_none());
 
     roles::remove_role(&db, design.id, &collaborator.handle)
         .await
         .unwrap();
-    let removed = pending::decide(&db, &Limits::DEFAULT, &collaborator, id, Choice::Reappend)
-        .await
-        .expect_err("no role any more");
+    let removed = pending::decide(
+        &db,
+        &Limits::DEFAULT,
+        &collaborator,
+        id,
+        Choice::Reappend { onto: head },
+    )
+    .await
+    .expect_err("no role any more");
     assert!(matches!(removed, Error::Forbidden { .. }), "{removed}");
 }
 
@@ -489,12 +529,12 @@ async fn the_account_cap_is_met_again_at_the_decision() {
     };
     let dir = scratch_dir!();
     let owner = person(&db).await;
-    let (_, _, _, id) = overlapping_uploads(&db, &dir, &owner).await;
+    let (_, _, head, id) = overlapping_uploads(&db, &dir, &owner).await;
     let full = Limits {
         account_bytes: 1,
         ..Limits::DEFAULT
     };
-    let refused = pending::decide(&db, &full, &owner, id, Choice::Reappend)
+    let refused = pending::decide(&db, &full, &owner, id, Choice::Reappend { onto: head })
         .await
         .expect_err("over the cap");
     assert!(
@@ -510,7 +550,7 @@ async fn a_file_taken_down_during_the_hour_is_refused_at_the_decision() {
     };
     let dir = scratch_dir!();
     let owner = person(&db).await;
-    let (_, _, _, id) = overlapping_uploads(&db, &dir, &owner).await;
+    let (_, _, head, id) = overlapping_uploads(&db, &dir, &owner).await;
     sqlx::query(
         "INSERT INTO blocked_blob (hash, reason)
          SELECT te.blob_hash, 'a test' FROM pending_revision p
@@ -521,9 +561,15 @@ async fn a_file_taken_down_during_the_hour_is_refused_at_the_decision() {
     .execute(&db)
     .await
     .unwrap();
-    let refused = pending::decide(&db, &Limits::DEFAULT, &owner, id, Choice::Reappend)
-        .await
-        .expect_err("blocked");
+    let refused = pending::decide(
+        &db,
+        &Limits::DEFAULT,
+        &owner,
+        id,
+        Choice::Reappend { onto: head },
+    )
+    .await
+    .expect_err("blocked");
     assert!(
         matches!(refused, Error::Refused(Refusal::Blocked { ref path }) if path == "demo.kicad_sch"),
         "{refused}"
@@ -536,7 +582,7 @@ async fn posted(
     browser: &mut http::Browser,
     design: &str,
     from: &str,
-    from_branch: &str,
+    seen_on: &str,
     bytes: &[u8],
 ) -> http::Response {
     browser
@@ -546,7 +592,7 @@ async fn posted(
                 Part::text("design", design),
                 Part::text("branch", "main"),
                 Part::text("from", from),
-                Part::text("from_branch", from_branch),
+                Part::text("seen_on", seen_on),
                 Part::text("message", "from the form"),
                 Part::file("demo.kicad_sch", bytes),
             ],
@@ -567,11 +613,12 @@ async fn two_forms_open_at_one_head_second_gets_the_choice_page_and_decides_ther
     let base_text = base.to_string();
     let mut browser = browser(&db, addr, owner.account_id).await;
 
-    let first = posted(&mut browser, &path, &base_text, "main", &sheet()).await;
+    let seen_on = format!("{path}/main");
+    let first = posted(&mut browser, &path, &base_text, &seen_on, &sheet()).await;
     assert_eq!(first.status, 303, "{}", first.body);
     assert_eq!(first.header("location"), Some(format!("/{path}").as_str()));
 
-    let second = posted(&mut browser, &path, &base_text, "main", &sheet()).await;
+    let second = posted(&mut browser, &path, &base_text, &seen_on, &sheet()).await;
     assert_eq!(second.status, 303, "{}", second.body);
     let choice_url = second.header("location").expect("to the choice").to_owned();
     assert!(
@@ -648,9 +695,189 @@ async fn a_form_opened_on_another_branch_does_not_hold_the_upload() {
     .expect("the head moves");
     // The page the form was opened from showed another branch's revision;
     // the person then picked main in the selector.
-    let other = posted(&mut browser, &path, &base.to_string(), "other", &sheet()).await;
+    let seen_on = format!("{path}/other");
+    let other = posted(&mut browser, &path, &base.to_string(), &seen_on, &sheet()).await;
     assert_eq!(other.status, 303, "{}", other.body);
     assert_eq!(other.header("location"), Some(format!("/{path}").as_str()));
+}
+
+#[tokio::test]
+async fn a_form_opened_on_another_design_with_that_branch_name_does_not_hold_the_upload() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, dir) = server(db.clone()).await;
+    let store = FsBlobStore::new(dir.path());
+    let owner = person(&db).await;
+    let (design, base) = one_revision(&db, &store, &owner).await;
+    let (other, _) = one_revision(&db, &store, &owner).await;
+    let path = format!("{}/{}", owner.handle, design.slug);
+    let mut browser = browser(&db, addr, owner.account_id).await;
+    pushed(
+        &db,
+        &store,
+        &owner,
+        onto(&owner, &design, BranchTarget::Default),
+        &Limits::DEFAULT,
+    )
+    .await
+    .expect("the head moves");
+    let seen_on = format!("{}/{}/main", owner.handle, other.slug);
+    let landed = posted(&mut browser, &path, &base.to_string(), &seen_on, &sheet()).await;
+    assert_eq!(landed.status, 303, "{}", landed.body);
+    assert_eq!(landed.header("location"), Some(format!("/{path}").as_str()));
+}
+
+#[tokio::test]
+async fn a_seen_head_not_on_the_branch_still_holds_an_upload_that_overlapped_another() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let dir = scratch_dir!();
+    let store = FsBlobStore::new(dir.path());
+    let owner = person(&db).await;
+    let (design, _) = one_revision(&db, &store, &owner).await;
+    let (_, elsewhere) = one_revision(&db, &store, &owner).await;
+    let gate = Gate {
+        inner: FsBlobStore::new(dir.path()),
+        reached: Notify::new(),
+        open: Notify::new(),
+    };
+    let stale = BranchTarget::Seen {
+        name: "main".parse().unwrap(),
+        head: elsewhere,
+    };
+    let slow = pushed(
+        &db,
+        &gate,
+        &owner,
+        onto(&owner, &design, stale),
+        &Limits::DEFAULT,
+    );
+    let quick = async {
+        gate.reached.notified().await;
+        let landed = pushed(
+            &db,
+            &store,
+            &owner,
+            onto(&owner, &design, BranchTarget::Default),
+            &Limits::DEFAULT,
+        )
+        .await
+        .expect("the quick push");
+        gate.open.notify_one();
+        landed
+    };
+    let (slow, _) = tokio::join!(slow, quick);
+    assert!(
+        matches!(slow, Ok(Outcome::Pending { .. })),
+        "the head read at the start still speaks: {slow:?}"
+    );
+}
+
+#[tokio::test]
+async fn re_append_is_refused_when_the_head_moved_past_what_the_page_showed() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let dir = scratch_dir!();
+    let store = FsBlobStore::new(dir.path());
+    let owner = person(&db).await;
+    let (design, base, shown, id) = overlapping_uploads(&db, &dir, &owner).await;
+    let third = pushed(
+        &db,
+        &store,
+        &owner,
+        onto(&owner, &design, BranchTarget::Default),
+        &Limits::DEFAULT,
+    )
+    .await
+    .expect("a third push");
+    let Outcome::Pushed(third) = third else {
+        panic!("nothing moved before it");
+    };
+    let moved = pending::decide(
+        &db,
+        &Limits::DEFAULT,
+        &owner,
+        id,
+        Choice::Reappend { onto: shown },
+    )
+    .await
+    .expect_err("the page showed an older head");
+    assert!(
+        matches!(moved, Error::Refused(Refusal::HeadMoved { .. })),
+        "{moved}"
+    );
+    let waiting = pending::find(&db, id, owner.account_id)
+        .await
+        .unwrap()
+        .expect("still pending");
+    assert_eq!(waiting.head.hash, third.revision);
+    assert_eq!(waiting.base.hash, base);
+    let decided = pending::decide(
+        &db,
+        &Limits::DEFAULT,
+        &owner,
+        id,
+        Choice::Reappend {
+            onto: third.revision,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        decided.is_some(),
+        "the page shows the new head and it lands"
+    );
+}
+
+#[tokio::test]
+async fn a_branch_delete_does_not_stop_a_held_upload_counting() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let dir = scratch_dir!();
+    let store = FsBlobStore::new(dir.path());
+    let owner = person(&db).await;
+    let (design, base) = one_revision(&db, &store, &owner).await;
+    let side: BranchName = "side".parse().unwrap();
+    kiewer_lib::branch::create_at(&db, owner.account_id, design.id, &side, base)
+        .await
+        .unwrap();
+    pushed(
+        &db,
+        &store,
+        &owner,
+        onto(&owner, &design, BranchTarget::Head(side.clone())),
+        &Limits::DEFAULT,
+    )
+    .await
+    .expect("the head moves");
+    let seen = BranchTarget::Seen {
+        name: side.clone(),
+        head: base,
+    };
+    let held = pushed(
+        &db,
+        &store,
+        &owner,
+        onto(&owner, &design, seen),
+        &Limits::DEFAULT,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(held, Outcome::Pending { .. }));
+    // Three so far: the first revision, the move, the held one.
+    rate_limit::check(&db, owner.account_id, 3)
+        .await
+        .expect_err("three of three used");
+    kiewer_lib::branch::delete(&db, owner.account_id, design.id, &side)
+        .await
+        .unwrap();
+    rate_limit::check(&db, owner.account_id, 3)
+        .await
+        .expect_err("the delete gave nothing back");
 }
 
 #[tokio::test]
