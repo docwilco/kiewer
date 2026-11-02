@@ -1,8 +1,10 @@
 //! The HTTP side: the router, its handlers and the server loop. Sign-in,
 //! the welcome page, sign-out and `/api/me` are in `web/auth.rs`; the
 //! settings pages in `web/settings.rs`; the viewer page and its assets
-//! in `web/viewer.rs`; the renderer beacon in `web/beacon.rs`.
+//! in `web/viewer.rs`; the renderer beacon in `web/beacon.rs`; the about
+//! page in `web/about.rs`.
 
+mod about;
 mod auth;
 pub mod beacon;
 mod settings;
@@ -36,6 +38,7 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/about", get(about::page))
         .route("/healthz", get(healthz))
         .route("/api/me", get(auth::me))
         .route("/auth/sign-out", post(auth::sign_out))

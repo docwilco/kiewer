@@ -91,4 +91,7 @@ The rule that a net label draws only when its text height on screen reaches the 
 _Avoid_: level of detail, LOD
 
 **Stroke font**:
-Newstroke, KiCad's built-in line font, bundled in kiewer and used for every text item that names no face.
+Newstroke, KiCad's built-in line font, bundled in kiewer and used for every text item that names no face. Its glyph table is regenerated from the font's CC0 sources by `newstroke_dev`.
+
+**Knockout**:
+A text item drawn inverted: a filled box around the text with the glyphs cut out of it, as KiCad's `knockout` flag on a text's layer asks.

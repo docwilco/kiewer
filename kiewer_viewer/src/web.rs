@@ -280,9 +280,9 @@ impl Viewer {
         self.renderer.sample_count()
     }
 
-    /// Parse a `.kicad_pcb` text, tessellate its outline and front
-    /// copper, upload them and fit the view to the board. A parse error
-    /// is the error's message with its line.
+    /// Parse a `.kicad_pcb` text, tessellate its outline, front copper
+    /// and front silkscreen, upload them and fit the view to the board. A
+    /// parse error is the error's message with its line.
     pub fn load_board(&mut self, text: &str) -> core::result::Result<(), JsError> {
         let board = kicad_core::parse_board(text).map_err(Error::from)?;
         let scene = Scene::build(&board, self.config.format).ok_or(Error::NothingToDraw)?;

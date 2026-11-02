@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>About · kiewer</title>
+</head>
+<body>
+<nav><a href="/">kiewer</a></nav>
+<h1>About kiewer</h1>
+<p>kiewer is a site for uploading and sharing KiCad designs, rendered in the browser. The server keeps the files; your browser parses the board and draws it.</p>
+<h2>Credits</h2>
+<p><strong>KiCad</strong> is the open-source electronics design suite whose files kiewer reads. kiewer is not affiliated with the KiCad project; it reads the published file format and follows KiCad's rules for drawing text so a board looks here as it does there.</p>
+<p><strong>Newstroke</strong>, the stroke font every text item without a named face is drawn in, is the work of Vladimir Uryvaev and is KiCad's default font. Its author released the sources under the <a href="https://creativecommons.org/publicdomain/zero/1.0/">Creative Commons CC0 1.0 Universal</a> public domain dedication; kiewer regenerates its glyph table from that release with a converter of its own. The glyph table covers the Latin, Greek, Cyrillic, Armenian, Hebrew, Arabic, kana and symbol ranges of that release; the CJK ideographs KiCad added later from Adobe's Source Han Sans (SIL Open Font License) are not included, so a design whose text uses them shows a question mark in their place.</p>
+<p><small>{{ build }}</small></p>
+</body>
+</html>

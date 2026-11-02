@@ -1,6 +1,6 @@
-//! A board as the renderer draws it: the outline and the front copper
-//! tessellated and coloured, positions relative to the board's centre so
-//! the GPU's f32 holds them to a few nanometres.
+//! A board as the renderer draws it: the outline, the front copper and
+//! the front silkscreen tessellated and coloured, positions relative to
+//! the board's centre so the GPU's f32 holds them to a few nanometres.
 
 use kicad_core::geometry::Bounds;
 use kicad_core::model::{Board, Point};
@@ -23,10 +23,17 @@ pub mod palette {
     pub const OUTLINE: Rgb = Rgb(0xd0, 0xd2, 0xcd);
     /// The front copper, KiCad's default theme.
     pub const F_CU: Rgb = Rgb(0xc8, 0x34, 0x34);
+    /// The front silkscreen, KiCad's default theme.
+    pub const F_SILKS: Rgb = Rgb(0xf2, 0xed, 0xa1);
 }
 
 /// The one copper layer the tracer shows.
 pub const COPPER_LAYER: &str = "F.Cu";
+
+/// The silkscreen drawn over it: its graphics and its text in Newstroke
+/// (every text item, a named face included, until the font picker of the
+/// scope's Fonts decision exists).
+pub const SILK_LAYER: &str = "F.SilkS";
 
 /// Triangles ready for upload, with where they came from.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,9 +50,9 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// The outline, the front copper and the holes through it of `board`,
-    /// coloured for a target of `format`; `None` for a board with neither
-    /// outline nor copper.
+    /// The outline, the front copper, the holes through it and the front
+    /// silkscreen of `board`, coloured for a target of `format`; `None`
+    /// for a board with neither outline nor copper.
     #[must_use]
     pub fn build(board: &Board, format: wgpu::TextureFormat) -> Option<Self> {
         let tessellator = Tessellator::new(TOLERANCE);
@@ -70,9 +77,15 @@ impl Scene {
         };
         scene.add(&outline, palette::OUTLINE.for_format(format));
         scene.add(&copper, palette::F_CU.for_format(format));
-        // Last, in the page colour: a track ending in a via covers the
-        // hole the via's ring left open, and the hole must win.
+        // After the copper, in the page colour: a track ending in a via
+        // covers the hole the via's ring left open, and the hole must win.
         scene.add(&holes, palette::PAGE.for_format(format));
+        // The silkscreen is printed over everything.
+        if let Some(silk) = board.layer_named(SILK_LAYER) {
+            let color = palette::F_SILKS.for_format(format);
+            scene.add(&tessellator.graphics(board, silk), color);
+            scene.add(&tessellator.text(board, silk), color);
+        }
         Some(scene)
     }
 
@@ -143,11 +156,14 @@ mod tests {
         }
         let max_index = scene.indices.iter().max().copied().unwrap_or(0);
         assert!(usize::try_from(max_index).expect("fits") < scene.vertices.len());
-        // Both colours are present: the outline's and the copper's.
+        // All three colours are present: the outline's, the copper's and
+        // the silkscreen's.
         let outline = palette::OUTLINE.for_format(wgpu::TextureFormat::Bgra8UnormSrgb);
         let copper = palette::F_CU.for_format(wgpu::TextureFormat::Bgra8UnormSrgb);
+        let silk = palette::F_SILKS.for_format(wgpu::TextureFormat::Bgra8UnormSrgb);
         assert!(scene.vertices.iter().any(|v| v.color == outline));
         assert!(scene.vertices.iter().any(|v| v.color == copper));
+        assert!(scene.vertices.iter().any(|v| v.color == silk));
     }
 
     #[test]
