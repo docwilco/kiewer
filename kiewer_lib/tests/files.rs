@@ -13,12 +13,14 @@ use kiewer_lib::account::{self, Handle};
 use kiewer_lib::auth::{Provider, ProviderUser};
 use kiewer_lib::blob::BlobHash;
 use kiewer_lib::blob::fs::FsBlobStore;
+use kiewer_lib::cache::Policy;
 use kiewer_lib::session;
 use kiewer_lib::web::blob::IMMUTABLE;
 use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
 use sqlx::PgPool;
+use test_case::test_case;
 
 const BOARD: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pcb");
 
@@ -138,6 +140,7 @@ async fn a_nested_path_of_a_multi_file_tree_downloads_under_its_file_name() {
     let (mut browser, handle) = signed_in(&db, addr).await;
     let root = sheet("root");
     let nested = sheet("nested");
+    let odd = sheet("odd");
     let page = upload(
         &mut browser,
         "nested",
@@ -145,6 +148,7 @@ async fn a_nested_path_of_a_multi_file_tree_downloads_under_its_file_name() {
             ("nested.kicad_pcb", BARE_BOARD),
             ("nested.kicad_sch", &root),
             ("sub/dir/power supply.kicad_sch", &nested),
+            ("sub/50% ü.kicad_sch", &odd),
         ],
     )
     .await;
@@ -170,10 +174,38 @@ async fn a_nested_path_of_a_multi_file_tree_downloads_under_its_file_name() {
     )
     .await;
     assert_eq!(top.body.as_bytes(), root);
+
+    // A percent sign and a non-ASCII letter round-trip through the URL,
+    // and the name goes out as a filename star.
+    let escaped = format!("/{handle}/nested/r/{revision}/f/sub/50%25%20%C3%BC.kicad_sch");
+    assert!(
+        page.contains(&format!(r#"href="{escaped}""#)),
+        "the design page links the escaped path: {page}"
+    );
+    let odd_file = get(addr, &escaped, &[]).await;
+    assert_eq!(odd_file.status, 200, "{}", odd_file.body);
+    assert_eq!(
+        odd_file.header("content-disposition"),
+        Some(
+            r#"attachment; filename="50_ _.kicad_sch"; filename*=UTF-8''50%25%20%C3%BC.kicad_sch"#
+        )
+    );
+    assert_eq!(odd_file.body.as_bytes(), odd);
 }
 
+#[test_case("/{mine}/four/r/{revision}/f/nothing.kicad_sch"; "a path the tree does not hold")]
+#[test_case("/{mine}/four/r/{revision}/f/sub/four.kicad_sch"; "a folder the tree does not hold")]
+#[test_case("/{mine}/four/r/{revision}/f/../four.kicad_sch"; "a parent segment")]
+#[test_case("/{mine}/four/r/{revision}/f/%FF.kicad_pcb"; "a path that is not UTF-8")]
+#[test_case("/{mine}/four/r/{foreign}/f/four.kicad_sch"; "another design's revision")]
+#[test_case("/{mine}/four/r/{zeros}/f/four.kicad_sch"; "a revision nothing holds")]
+#[test_case("/{mine}/four/r/not-a-hash/f/four.kicad_sch"; "text that is not a hash")]
+#[test_case("/{mine}/nothing/r/{revision}/f/four.kicad_sch"; "a design that does not exist")]
+#[test_case("/{theirs}/four/r/{revision}/f/four.kicad_sch"; "this revision under another design")]
+#[test_case("/%00/four/r/{revision}/f/four.kicad_sch"; "a NUL in the handle")]
+#[test_case("/{mine}/%00/r/{revision}/f/four.kicad_sch"; "a NUL in the slug")]
 #[tokio::test]
-async fn a_path_outside_the_tree_or_a_revision_the_design_does_not_reach_is_404() {
+async fn a_download_nothing_answers_for_is_404(template: &str) {
     let Some(db) = pool_from_env().await else {
         return;
     };
@@ -201,21 +233,6 @@ async fn a_path_outside_the_tree_or_a_revision_the_design_does_not_reach_is_404(
     .await;
     let foreign = shown_revision(&foreign);
     assert_ne!(revision, foreign);
-
-    for path in [
-        format!("/{handle}/four/r/{revision}/f/nothing.kicad_sch"),
-        format!("/{handle}/four/r/{revision}/f/sub/four.kicad_sch"),
-        format!("/{handle}/four/r/{revision}/f/../four.kicad_sch"),
-        format!("/{handle}/four/r/{foreign}/f/four.kicad_sch"),
-        format!("/{handle}/four/r/{}/f/four.kicad_sch", "0".repeat(64)),
-        format!("/{handle}/four/r/not-a-hash/f/four.kicad_sch"),
-        format!("/{handle}/nothing/r/{revision}/f/four.kicad_sch"),
-        format!("/{other_handle}/four/r/{revision}/f/four.kicad_sch"),
-    ] {
-        let answer = get(addr, &path, &[]).await;
-        assert_eq!(answer.status, 404, "{path}: {}", answer.body);
-        assert_eq!(answer.header("content-disposition"), None, "{path}");
-    }
     let own = get(
         addr,
         &format!("/{other_handle}/four/r/{foreign}/f/four.kicad_sch"),
@@ -223,6 +240,21 @@ async fn a_path_outside_the_tree_or_a_revision_the_design_does_not_reach_is_404(
     )
     .await;
     assert_eq!(own.status, 200, "but its own design reaches it");
+
+    let path = template
+        .replace("{mine}", handle.as_str())
+        .replace("{theirs}", other_handle.as_str())
+        .replace("{revision}", &revision)
+        .replace("{foreign}", &foreign)
+        .replace("{zeros}", &"0".repeat(64));
+    let answer = get(addr, &path, &[]).await;
+    assert_eq!(answer.status, 404, "{path}: {}", answer.body);
+    assert_eq!(answer.header("content-disposition"), None, "{path}");
+    assert_eq!(
+        answer.header("cache-control"),
+        Some(Policy::NotFound.value()),
+        "{path}"
+    );
 }
 
 #[tokio::test]
@@ -253,9 +285,9 @@ async fn a_blocked_blob_is_gone() {
     let gone = get(addr, &route, &[]).await;
     assert_eq!(gone.status, 410, "{}", gone.body);
     assert_eq!(gone.header("content-disposition"), None);
-    assert_ne!(
+    assert_eq!(
         gone.header("cache-control"),
-        Some(IMMUTABLE),
+        Some(Policy::NotFound.value()),
         "a takedown is not cached for a year"
     );
 }

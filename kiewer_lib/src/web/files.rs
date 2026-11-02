@@ -10,13 +10,13 @@
 //! (ADR 0002): a revision the design does not reach is 404, as is a path
 //! its tree does not hold or text that is not a path. A blob the
 //! operator has blocked is 410: the file existed and was taken down.
+//! Neither answer is kept for long ([`Policy::NotFound`]), since a
+//! takedown can be lifted.
 
 use axum::Router;
+use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
-use axum::http::header::{
-    CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_TYPE, VARY,
-    X_CONTENT_TYPE_OPTIONS,
-};
+use axum::http::header::CONTENT_DISPOSITION;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -24,7 +24,7 @@ use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 use super::{AppState, blob};
 use crate::account::Handle;
-use crate::blob::{blocking, gunzip, verified};
+use crate::blob::object_name;
 use crate::cache::Policy;
 use crate::design::{self, Slug};
 use crate::error::{Error, Result};
@@ -84,7 +84,7 @@ const IN_EXT_VALUE: &AsciiSet = &CONTROLS
 
 /// The URL `path` of revision `hash` of `/{handle}/{slug}` downloads
 /// at. The handle, the slug and the hash are their own characters; the
-/// path is percent-encoded segment by segment.
+/// path is percent-encoded, its slashes kept.
 #[must_use]
 pub fn url(handle: &Handle, slug: &Slug, hash: RevisionHash, path: &TreePath) -> String {
     format!(
@@ -95,22 +95,23 @@ pub fn url(handle: &Handle, slug: &Slug, hash: RevisionHash, path: &TreePath) ->
 
 /// The `Content-Disposition` that saves the file as `name`: an
 /// attachment with the name as a quoted string (RFC 6266), `"` and `\`
-/// escaped. A name with a character outside printable ASCII cannot go
-/// in a quoted string, so it goes as the `filename*` of RFC 8187, UTF-8
-/// percent-encoded, with those characters replaced by `_` in the plain
-/// `filename` for a client that reads only that.
-#[must_use]
-pub fn content_disposition(name: &str) -> String {
+/// escaped. A character outside printable ASCII cannot go in a quoted
+/// string, and a `%` must not (some clients decode a `%XX` there, RFC
+/// 6266 Appendix D), so a name holding either goes as the `filename*`
+/// of RFC 8187 too, UTF-8 percent-encoded, with those characters
+/// replaced by `_` in the `filename` for a client that reads only that.
+fn content_disposition(name: &str) -> String {
+    let portable = |c: char| matches!(c, ' '..='~') && c != '%';
     let plain: String = name
         .chars()
         .map(|c| match c {
             '"' | '\\' => format!("\\{c}"),
-            ' '..='~' => c.to_string(),
+            c if portable(c) => c.to_string(),
             _ => "_".to_owned(),
         })
         .collect();
     let mut value = format!("attachment; filename=\"{plain}\"");
-    if !name.is_ascii() || name.chars().any(char::is_control) {
+    if !name.chars().all(portable) {
         value.push_str("; filename*=UTF-8''");
         value.push_str(&utf8_percent_encode(name, IN_EXT_VALUE).to_string());
     }
@@ -118,73 +119,72 @@ pub fn content_disposition(name: &str) -> String {
 }
 
 fn not_found() -> Response {
-    (StatusCode::NOT_FOUND, "no such file\n").into_response()
+    (
+        StatusCode::NOT_FOUND,
+        [Policy::NotFound.header()],
+        "no such file\n",
+    )
+        .into_response()
 }
 
 /// `GET /{handle}/{slug}/r/{hash}/f/{path}`: the file at `path` in the
-/// revision, as an attachment named after it.
+/// revision, as an attachment named after it. A URL that does not decode
+/// to UTF-8 names nothing a tree holds, so it is a 404 like any other,
+/// and a handle or slug that is not one stops before any lookup.
 ///
 /// # Errors
 ///
-/// The database's, the store's, or [`Error::CorruptBlob`] when the
+/// The database's, the store's, [`Error::ReadBlob`] when the tree names
+/// a blob the store does not hold (the tree is the record, so that is
+/// lost data, not a missing file), or [`Error::CorruptBlob`] when the
 /// stored bytes do not hash to their name: a 500 with the cause in the
 /// log.
 async fn serve(
     State(state): State<AppState>,
-    Path((handle, slug, hash, path)): Path<(String, String, String, String)>,
+    params: Result<Path<(String, String, String, String)>, PathRejection>,
     headers: HeaderMap,
 ) -> Result<Response> {
-    let (Ok(hash), Ok(path)) = (hash.parse::<RevisionHash>(), path.parse::<TreePath>()) else {
+    let Ok(Path((handle, slug, hash, path))) = params else {
         return Ok(not_found());
     };
-    let Some((design, _owner)) = design::find(&state.db, &handle, &slug).await? else {
+    let (Ok(handle), Ok(slug), Ok(hash), Ok(path)) = (
+        handle.parse::<Handle>(),
+        slug.parse::<Slug>(),
+        hash.parse::<RevisionHash>(),
+        path.parse::<TreePath>(),
+    ) else {
+        return Ok(not_found());
+    };
+    let Some((design, _owner)) = design::find(&state.db, handle.as_str(), slug.as_str()).await?
+    else {
         return Ok(not_found());
     };
     let Some(entry) = design::file_at(&state.db, design.id, hash, &path).await? else {
         return Ok(not_found());
     };
     if design::is_blocked(&state.db, &entry.blob).await? {
-        return Ok((StatusCode::GONE, "this file was taken down\n").into_response());
+        return Ok((
+            StatusCode::GONE,
+            [Policy::NotFound.header()],
+            "this file was taken down\n",
+        )
+            .into_response());
     }
-    let blob = entry.blob;
-    let Some(compressed) = state.blobs.get_gzip(&blob).await? else {
-        // The tree names a blob the store lost: the tree is the record,
-        // so this is the store's fault, not a missing file.
-        return Err(Error::Malformed(format!(
-            "blob {blob} of {path} in revision {hash} is not in the store"
-        )));
+    let Some(mut response) = blob::stored(&state, entry.blob, &headers).await? else {
+        return Err(Error::ReadBlob {
+            hash: entry.blob,
+            path: object_name(&entry.blob).into(),
+            source: std::io::ErrorKind::NotFound.into(),
+        });
     };
-    // Decoding and hashing are CPU work, off the runtime's threads. The
-    // decoded bytes are the body for a client without gzip.
-    let (compressed, bytes) = blocking(move || {
-        let bytes = gunzip(&compressed).map_err(|source| Error::ReadBlob {
-            hash: blob,
-            path: crate::blob::object_name(&blob).into(),
-            source,
-        })?;
-        let bytes = verified(&blob, bytes)?;
-        Ok((compressed, bytes))
-    })
-    .await?;
     // The name is a path segment, so it holds no control character and
     // the disposition is printable ASCII: a valid header value.
     let disposition = HeaderValue::from_str(&content_disposition(path.file_name()))
         .map_err(|error| Error::Malformed(format!("disposition for {path}: {error}")))?;
-    let common = [
-        (CONTENT_TYPE, HeaderValue::from_static(blob::TEXT)),
-        (X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")),
-        (
-            CACHE_CONTROL,
-            HeaderValue::from_static(Policy::Immutable.value()),
-        ),
-        (VARY, HeaderValue::from_static("Accept-Encoding")),
-        (CONTENT_DISPOSITION, disposition),
-    ];
-    Ok(if blob::accepts_gzip(&headers) {
-        (common, [(CONTENT_ENCODING, "gzip")], compressed).into_response()
-    } else {
-        (common, bytes).into_response()
-    })
+    response
+        .headers_mut()
+        .insert(CONTENT_DISPOSITION, disposition);
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -200,8 +200,9 @@ mod tests {
     #[test_case("semi;colon.kicad_pcb", r#"attachment; filename="semi;colon.kicad_pcb""#; "a semicolon is fine quoted")]
     #[test_case("Stromversorgung ü.kicad_sch", r#"attachment; filename="Stromversorgung _.kicad_sch"; filename*=UTF-8''Stromversorgung%20%C3%BC.kicad_sch"#; "a non-ASCII name gets a filename star")]
     #[test_case("日本語.kicad_pcb", r#"attachment; filename="___.kicad_pcb"; filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E.kicad_pcb"#; "a name with no ASCII at all")]
-    #[test_case("50% done.kicad_pcb", r#"attachment; filename="50% done.kicad_pcb""#; "a percent sign is fine quoted")]
-    #[test_case("ü%.kicad_pcb", r#"attachment; filename="_%.kicad_pcb"; filename*=UTF-8''%C3%BC%25.kicad_pcb"#; "a percent sign is escaped in the filename star")]
+    #[test_case("50% done.kicad_pcb", r#"attachment; filename="50_ done.kicad_pcb"; filename*=UTF-8''50%25%20done.kicad_pcb"#; "a percent sign goes in the filename star")]
+    #[test_case("a%20b.kicad_pcb", r#"attachment; filename="a_20b.kicad_pcb"; filename*=UTF-8''a%2520b.kicad_pcb"#; "text a client would decode stays literal")]
+    #[test_case("ü%.kicad_pcb", r#"attachment; filename="__.kicad_pcb"; filename*=UTF-8''%C3%BC%25.kicad_pcb"#; "both at once")]
     fn the_disposition_names_the_file_as_rfc_6266_and_8187_spell_it(name: &str, expected: &str) {
         assert_eq!(content_disposition(name), expected);
         assert!(
@@ -216,7 +217,7 @@ mod tests {
     #[test_case("what?.kicad_pcb#1", "what%3F.kicad_pcb%231"; "a query or fragment delimiter")]
     #[test_case("ü.kicad_sch", "%C3%BC.kicad_sch"; "non-ASCII as UTF-8")]
     #[test_case("a+b&c=d.kicad_pcb", "a+b&c=d.kicad_pcb"; "sub-delimiters a path may hold")]
-    fn the_url_escapes_the_path_segment_by_segment(path: &str, encoded: &str) {
+    fn the_url_escapes_the_path_and_keeps_its_folders(path: &str, encoded: &str) {
         let slug: Slug = "demo".parse().unwrap();
         let handle: Handle = "alice".parse().unwrap();
         let hash: RevisionHash = "6da0f20b5d53135dbecca52d60fb77ba50a2cf637be3be968ed20712e8c9ea85"

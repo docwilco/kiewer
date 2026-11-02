@@ -30,14 +30,14 @@ pub fn url(hash: &BlobHash) -> String {
 pub const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
 /// Every blob is one of the three KiCad text files the upload keeps.
-pub(super) const TEXT: &str = "text/plain; charset=utf-8";
+const TEXT: &str = "text/plain; charset=utf-8";
 
 fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "no such blob\n").into_response()
 }
 
 /// Whether the request takes gzip, which every browser does.
-pub(super) fn accepts_gzip(headers: &HeaderMap) -> bool {
+fn accepts_gzip(headers: &HeaderMap) -> bool {
     headers
         .get_all(ACCEPT_ENCODING)
         .iter()
@@ -67,8 +67,26 @@ pub async fn serve(
     if design::is_blocked(&state.db, &hash).await? {
         return Ok(not_found());
     }
+    Ok(stored(&state, hash, &headers)
+        .await?
+        .unwrap_or_else(not_found))
+}
+
+/// The bytes stored under `hash` as a response: the stored gzip to a
+/// client that takes it, decoded for one that does not, immutable either
+/// way; `None` when nothing is stored under it. The caller has checked
+/// the hash against `blocked_blob`.
+///
+/// # Errors
+///
+/// As [`serve`].
+pub(super) async fn stored(
+    state: &AppState,
+    hash: BlobHash,
+    headers: &HeaderMap,
+) -> Result<Option<Response>> {
     let Some(compressed) = state.blobs.get_gzip(&hash).await? else {
-        return Ok(not_found());
+        return Ok(None);
     };
     // Decoding and hashing are CPU work, off the runtime's threads. The
     // decoded bytes are the body for a client without gzip.
@@ -88,11 +106,11 @@ pub async fn serve(
         (CACHE_CONTROL, IMMUTABLE),
         (VARY, "Accept-Encoding"),
     ];
-    Ok(if accepts_gzip(&headers) {
+    Ok(Some(if accepts_gzip(headers) {
         (common, [(CONTENT_ENCODING, "gzip")], compressed).into_response()
     } else {
         (common, bytes).into_response()
-    })
+    }))
 }
 
 #[cfg(test)]
