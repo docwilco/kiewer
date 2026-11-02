@@ -6,8 +6,8 @@
 //! `.zip` is expanded there; a part's file name may be a relative path,
 //! as the folder picker and a dropped folder send (the page's script
 //! builds the body with `webkitRelativePath` and the dropped entries'
-//! paths). The hourly allowance is checked before the body is read, so a
-//! refused upload writes nothing to disk. The upload pages are the
+//! paths). The hourly allowance is checked before the body is read, so an
+//! upload over it writes nothing to disk. The upload pages are the
 //! person's own, so they carry `private, no-store`; the design page
 //! renders the same for everyone.
 

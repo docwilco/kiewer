@@ -11,25 +11,27 @@
 //! What is kept: `.kicad_pcb`, `.kicad_sch` and `.kicad_pro`; anything
 //! else is dropped with a line in the log, and so is what the skip list
 //! names ([`skipped`]: `-backups` folders, lock files, autosaves and save
-//! files, dot-directories, `__MACOSX`). A part named `.zip` is received
-//! whole and expanded by `upload/archive.rs` under the same rules, its
-//! central directory read first. A board is parsed with `kicad_core` for its
-//! metadata; a schematic is parsed with it too, so a sheet KiCad 9 cannot
-//! read is refused naming its version; a project file is checked to be
-//! JSON. All three are stored as they are.
+//! files, dot-directories, `__MACOSX`). A zip uploaded by itself is
+//! received whole and expanded by `upload/archive.rs` under the same
+//! rules, its central directory read first; a zip inside a folder is
+//! another file that is not kept. A board is parsed with `kicad_core` for
+//! its metadata; a schematic is parsed with it too, so a sheet KiCad 9
+//! cannot read is refused naming its version; a project file is checked
+//! to be JSON. All three are stored as they are.
 //!
 //! Rooting: the tree is rooted at the project folder (GLOSSARY) with the
-//! paths under it kept, so an Explorer zip's wrapper folder goes and a
-//! sub-sheet's path stays. More than one project in the upload: the
-//! shallowest is taken and [`Pushed::warnings`] names the others, for the
-//! page to show. The hourly allowance on pushes is `crate::rate_limit`,
-//! checked before the rows are written.
+//! paths under it kept, so an Explorer zip's wrapper folder goes and the
+//! path of a sheet in a folder stays. More than one project in the
+//! upload: the shallowest is taken and [`Pushed::warnings`] names the
+//! others, for the page to show. The hourly allowance on uploads is
+//! `crate::rate_limit`, checked before the rows are written.
 
 mod archive;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
+use derive_more::Display;
 use sqlx::{PgConnection, PgPool};
 use tokio::io::AsyncWriteExt;
 use tokio::time::Instant;
@@ -177,39 +179,62 @@ pub struct Incoming {
     files: Vec<Received>,
     open: Option<Open>,
     total: u64,
-    /// How many parts have begun: the temporary files are numbered by it.
+    /// The number of the next temporary file: one for each part and each
+    /// file a zip yields.
     parts: usize,
     limits: Limits,
 }
 
-/// Why a path is one the upload skips (docs/v1-scope.md, Uploads), or
-/// `None` for one it looks at. A folder segment ending in `-backups`,
-/// starting with a dot, or named `__MACOSX`; a file named `*.lck`,
-/// `_autosave-*` or `*-save.kicad_*`.
+/// Why the upload skips a path (docs/v1-scope.md, Uploads).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
+pub enum Skipped {
+    /// Under a folder whose name ends in `-backups`.
+    #[display("in a -backups folder")]
+    Backups,
+    /// Under a folder whose name starts with a dot.
+    #[display("in a dot-directory")]
+    DotDirectory,
+    /// Under a folder named `__MACOSX`.
+    #[display("in the __MACOSX folder")]
+    MacOs,
+    /// A file named `*.lck`.
+    #[display("a lock file")]
+    Lock,
+    /// A file named `_autosave-*`.
+    #[display("an autosave")]
+    Autosave,
+    /// A file named `*-save.kicad_*`.
+    #[display("a save file")]
+    Save,
+}
+
+/// Why `path` is one the upload skips, or `None` for one it looks at. The
+/// page's script filters by the same rules to spare the transfer; this is
+/// the one that decides.
 #[must_use]
-pub fn skipped(path: &TreePath) -> Option<&'static str> {
+pub fn skipped(path: &TreePath) -> Option<Skipped> {
     let mut segments = path.as_str().split('/');
     let name = segments.next_back()?;
     for folder in segments {
         if folder.ends_with("-backups") {
-            return Some("in a -backups folder");
+            return Some(Skipped::Backups);
         }
         if folder.starts_with('.') {
-            return Some("in a dot-directory");
+            return Some(Skipped::DotDirectory);
         }
         if folder == "__MACOSX" {
-            return Some("in the __MACOSX folder");
+            return Some(Skipped::MacOs);
         }
     }
     let lower = name.to_ascii_lowercase();
     if lower.rsplit_once('.').is_some_and(|(_, ext)| ext == "lck") {
-        return Some("a lock file");
+        return Some(Skipped::Lock);
     }
     if lower.starts_with("_autosave-") {
-        return Some("an autosave");
+        return Some(Skipped::Autosave);
     }
     if lower.contains("-save.kicad_") {
-        return Some("a save file");
+        return Some(Skipped::Save);
     }
     None
 }
@@ -247,7 +272,7 @@ impl Incoming {
             }
         };
         if let Some(why) = skipped(&path) {
-            tracing::info!(%path, why, "upload: skipped a file");
+            tracing::info!(%path, %why, "upload: skipped a file");
             return None;
         }
         if let Some(kind) = FileKind::of(&path) {
@@ -259,13 +284,15 @@ impl Incoming {
     }
 
     /// Whether a part named `name` is a zip the upload expands: by its
-    /// extension, any case, and outside the skip list, since a dropped
-    /// folder's `-backups` folder is full of KiCad's zips.
+    /// extension, any case, and uploaded by itself. A zip inside a folder
+    /// is not the upload but something beside the project (KiCad writes
+    /// one into `-backups` at every save and one beside the project for
+    /// Archive Project), and expanding it would root the tree at an old
+    /// snapshot.
     #[must_use]
     pub fn is_archive(name: &str) -> bool {
-        name.parse::<TreePath>().is_ok_and(|path| {
-            skipped(&path).is_none() && path.extension().as_deref() == Some("zip")
-        })
+        name.parse::<TreePath>()
+            .is_ok_and(|path| path.depth() == 0 && path.extension().as_deref() == Some("zip"))
     }
 
     /// Start receiving the file at `path`.
@@ -486,8 +513,8 @@ pub struct Pushed {
 
 /// An upload rooted at its project folder.
 struct Rooted {
-    /// The project folder's file name without its extension: a new
-    /// design's name when none was given.
+    /// The name, without its extension, of the file the project folder
+    /// was found by: a new design's name when none was given.
     stem: String,
     /// Every file under the folder with its path relative to it, in path
     /// order, shallowest first.
@@ -863,17 +890,17 @@ mod tests {
         assert!(Incoming::accepts(name).is_none());
     }
 
-    #[test_case("demo/demo-backups/demo-2026-11-02.kicad_pcb", Some("in a -backups folder"); "a backups folder")]
-    #[test_case("demo/.git/x.kicad_sch", Some("in a dot-directory"); "a dot-directory")]
-    #[test_case("__MACOSX/demo/._demo.kicad_pcb", Some("in the __MACOSX folder"); "the Finder's folder")]
-    #[test_case("demo/~demo.kicad_pcb.lck", Some("a lock file"); "a lock file")]
-    #[test_case("demo/demo.kicad_pro.lck", Some("a lock file"); "a lock file without the tilde")]
-    #[test_case("demo/_autosave-demo.kicad_sch", Some("an autosave"); "an autosave")]
-    #[test_case("demo/demo-save.kicad_pcb", Some("a save file"); "a save file")]
+    #[test_case("demo/demo-backups/demo-2026-11-02.kicad_pcb", Some(Skipped::Backups); "a backups folder")]
+    #[test_case("demo/.git/x.kicad_sch", Some(Skipped::DotDirectory); "a dot-directory")]
+    #[test_case("__MACOSX/demo/._demo.kicad_pcb", Some(Skipped::MacOs); "the Finder's folder")]
+    #[test_case("demo/~demo.kicad_pcb.lck", Some(Skipped::Lock); "a lock file")]
+    #[test_case("demo/demo.kicad_pro.lck", Some(Skipped::Lock); "a lock file without the tilde")]
+    #[test_case("demo/_autosave-demo.kicad_sch", Some(Skipped::Autosave); "an autosave")]
+    #[test_case("demo/demo-save.kicad_pcb", Some(Skipped::Save); "a save file")]
     #[test_case("demo/demo.kicad_pcb", None; "the board itself")]
     #[test_case("demo-backups.kicad_sch", None; "a file named like the folder")]
     #[test_case("demo/.hidden.kicad_sch", None; "a dot-file is not a dot-directory")]
-    fn the_skip_list_names_why(path: &str, why: Option<&str>) {
+    fn the_skip_list_names_why(path: &str, why: Option<Skipped>) {
         let path: TreePath = path.parse().unwrap();
         assert_eq!(skipped(&path), why);
         assert_eq!(
@@ -889,8 +916,8 @@ mod tests {
     #[test_case("zip", false; "no extension")]
     #[test_case("demo/demo-backups/demo-2026-11-02_120000.zip", false; "KiCad's backup zip in a dropped folder")]
     #[test_case("demo/.cache/demo.zip", false; "a zip in a dot-directory")]
-    #[test_case("demo/project.zip", true; "a zip in a dropped folder")]
-    fn a_zip_is_told_by_its_extension(name: &str, is_archive: bool) {
+    #[test_case("demo/demo-archive.zip", false; "a zip in a dropped folder, not the upload itself")]
+    fn a_zip_is_a_part_of_its_own_with_the_extension(name: &str, is_archive: bool) {
         assert_eq!(Incoming::is_archive(name), is_archive);
     }
 

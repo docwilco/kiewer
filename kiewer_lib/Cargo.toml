@@ -80,7 +80,7 @@ tracing = "0.1"
 # week, so a release is taken once it has aged two weeks. 9.0.5 was the
 # newest such on 2026-11-02. Later readers are faster on a hostile zip, which
 # archive.rs's screen bounds on any version; moving up is its own issue.
-zip ={ version = "=9.0.5", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2"] }
 
 [build-dependencies]
 # The static assets (docs/v1-scope.md, Caching; build.rs): the viewer's

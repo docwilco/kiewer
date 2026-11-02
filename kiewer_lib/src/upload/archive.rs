@@ -4,15 +4,14 @@
 //! opening an archive is the expensive part of a hostile zip: the `zip`
 //! crate holds every entry in memory, and walks the directory again for
 //! each end-of-directory record it tries. Then the directory, opened:
-//! which entries are KiCad
-//! files the upload keeps ([`super::Incoming::accepts`]'s rule: the three
-//! kinds, the skip list), that each one is plain or deflated, its
-//! declared size against the per-file cap and their sum against the
-//! per-revision cap. A zip that fails any of these is refused before one
-//! byte is inflated. Then only the planned entries are inflated, each
-//! bounded by its declared size: an entry that inflates to more than its
-//! directory says is a lie (a zip bomb's), and the whole upload is
-//! refused naming it.
+//! which entries are KiCad files the upload keeps
+//! ([`super::Incoming::accepts`]'s rule: the three kinds, the skip list),
+//! that each one is stored or deflated, its declared size against the
+//! per-file cap and their sum against the per-revision cap. A zip that
+//! fails any of these is refused before one byte is inflated. Then only
+//! the planned entries are inflated, each bounded by its declared size:
+//! an entry that inflates to more than its directory says is a lie (a zip
+//! bomb's), and the whole upload is refused naming it.
 //!
 //! Deflate alone is compiled in (`deflate-flate2`, through the flate2
 //! already in the tree). Blocking I/O: the caller runs this off the
@@ -29,21 +28,30 @@ use crate::error::{Error, Refusal, Result};
 use crate::revision::TreePath;
 
 /// The signature every central directory header starts with.
-const CENTRAL_HEADER: &[u8] = b"PK\x01\x02";
+const HEADER_SIGNATURE: &[u8] = b"PK\x01\x02";
 
 /// The signature every end-of-directory record starts with.
-const END_RECORD: &[u8] = b"PK\x05\x06";
+const END_SIGNATURE: &[u8] = b"PK\x05\x06";
 
 /// The tail of a zip the `zip` crate searches for end-of-directory
 /// records: 64 KiB of comment and the record, doubled for a margin.
 const END_SPAN: u64 = 1 << 17;
 
 /// The most end-of-directory records a zip may hold in that tail. A zip
-/// has one, and a stored zip inside it near the end adds its own; nothing
-/// honest has more than a few. The bound is what keeps opening cheap: a
-/// 535 KB zip of 9,999 headers and 2,978 records, each naming another
-/// directory start, took the 9.0.5 reader 70 seconds.
-const END_RECORDS: usize = 16;
+/// has one, and every zip stored inside it near the end adds its own:
+/// `zip -r` stores a small project's `-backups` zips whole, so a few dozen
+/// are honest. The bound is what keeps opening cheap: a 535 KB zip of
+/// 9,999 headers and 2,978 records, each naming another directory start,
+/// took the 9.0.5 reader 70 seconds.
+const MAX_END_RECORDS: usize = 32;
+
+/// A refusal of the zip named `name`.
+fn bad(name: &str, reason: String) -> Error {
+    Error::Refused(Refusal::BadArchive {
+        path: name.to_owned(),
+        reason,
+    })
+}
 
 /// One entry the directory says to inflate.
 struct Planned {
@@ -54,7 +62,7 @@ struct Planned {
     size: u64,
 }
 
-/// The entries of the zip at `zip` (named `name` in the upload) that the
+/// The entries of the zip at `path` (named `name` in the upload) that the
 /// upload keeps, inflated into `into` as `{first}.part`, `{first + 1}.part`
 /// and so on, with `total` the bytes the upload already holds: the files,
 /// each with its temporary path and size. Nothing is inflated unless the
@@ -64,34 +72,28 @@ struct Planned {
 ///
 /// [`Error::Refused`]: [`Refusal::BadArchive`] for bytes that are not a
 /// zip, too many end-of-directory records, an encrypted entry, a
-/// compression method other than deflate or stored, or an entry that
-/// inflates past its declared size;
-/// [`Refusal::TooManyEntries`], [`Refusal::FileTooLarge`] and
-/// [`Refusal::RevisionTooLarge`] from the directory alone. [`Error::Io`]
-/// for the temporary files.
+/// compression method other than deflate or stored, or an entry whose
+/// inflated size differs from what it declares; [`Refusal::TooManyEntries`]
+/// from the bytes, [`Refusal::FileTooLarge`] and
+/// [`Refusal::RevisionTooLarge`] from the directory. [`Error::Io`] for the
+/// temporary files.
 pub(super) fn expand(
-    zip: &Path,
+    path: &Path,
     name: &str,
     into: &Path,
     first: usize,
     total: u64,
     limits: &Limits,
 ) -> Result<Vec<Received>> {
-    let bad = |reason: String| {
-        Error::Refused(Refusal::BadArchive {
-            path: name.to_owned(),
-            reason,
-        })
-    };
-    let mut file = BufReader::new(File::open(zip)?);
+    let mut file = BufReader::new(File::open(path)?);
     screen(&mut file, name, limits)?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|error| bad(error.to_string()))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| bad(name, error.to_string()))?;
     let planned = plan(&archive, name, total, limits)?;
     let mut received = Vec::with_capacity(planned.len());
     for (offset, entry) in planned.into_iter().enumerate() {
         let temp = into.join(format!("{}.part", first + offset));
         inflate(&mut archive, &entry, &temp).map_err(|error| match error {
-            Error::Malformed(reason) => bad(format!("{}: {reason}", entry.path)),
+            Error::Malformed(reason) => bad(name, format!("{}: {reason}", entry.path)),
             other => other,
         })?;
         received.push(Received {
@@ -112,7 +114,7 @@ pub(super) fn expand(
 /// a stored zip inside the zip or on a signature by chance in compressed
 /// bytes (about once in 4 GB), far under either limit.
 fn screen(file: &mut (impl Read + Seek), name: &str, limits: &Limits) -> Result<()> {
-    let count = count_signature(file, CENTRAL_HEADER)?;
+    let count = count_signature(file, HEADER_SIGNATURE)?;
     if count > limits.zip_entries {
         return Err(Refusal::TooManyEntries {
             path: name.to_owned(),
@@ -123,15 +125,14 @@ fn screen(file: &mut (impl Read + Seek), name: &str, limits: &Limits) -> Result<
     }
     let length = file.seek(SeekFrom::End(0))?;
     file.seek(SeekFrom::Start(length.saturating_sub(END_SPAN)))?;
-    let ends = count_signature(file, END_RECORD)?;
-    if ends > END_RECORDS {
-        return Err(Refusal::BadArchive {
-            path: name.to_owned(),
-            reason: format!(
-                "holds {ends} end-of-directory records, more than the {END_RECORDS} the server tries"
+    let ends = count_signature(file, END_SIGNATURE)?;
+    if ends > MAX_END_RECORDS {
+        return Err(bad(
+            name,
+            format!(
+                "holds {ends} end-of-directory records, more than the {MAX_END_RECORDS} the server tries"
             ),
-        }
-        .into());
+        ));
     }
     file.seek(SeekFrom::Start(0))?;
     Ok(())
@@ -171,12 +172,9 @@ fn plan<R: Read + Seek>(
     let mut planned = Vec::new();
     let mut sum = total;
     for index in 0..archive.len() {
-        let entry = archive.by_index_data(index).map_err(|error| {
-            Error::Refused(Refusal::BadArchive {
-                path: name.to_owned(),
-                reason: error.to_string(),
-            })
-        })?;
+        let entry = archive
+            .by_index_data(index)
+            .map_err(|error| bad(name, error.to_string()))?;
         if entry.is_dir() {
             continue;
         }
@@ -194,21 +192,16 @@ fn plan<R: Read + Seek>(
             continue;
         };
         if entry.encrypted() {
-            return Err(Refusal::BadArchive {
-                path: name.to_owned(),
-                reason: format!("{path} is encrypted"),
-            }
-            .into());
+            return Err(bad(name, format!("{path} is encrypted")));
         }
         if !matches!(
             entry.compression(),
             CompressionMethod::Stored | CompressionMethod::Deflated
         ) {
-            return Err(Refusal::BadArchive {
-                path: name.to_owned(),
-                reason: format!("{path} is compressed with neither deflate nor stored"),
-            }
-            .into());
+            return Err(bad(
+                name,
+                format!("{path} is compressed with neither deflate nor stored"),
+            ));
         }
         let size = entry.size();
         if size > limits.file_bytes {
@@ -299,14 +292,14 @@ mod tests {
     #[test_case(READ; "the first bytes of the second read")]
     fn a_signature_counts_once_wherever_the_reads_fall(at: usize) {
         let mut bytes = vec![0; READ + 16];
-        bytes[at..at + 4].copy_from_slice(CENTRAL_HEADER);
+        bytes[at..at + 4].copy_from_slice(HEADER_SIGNATURE);
         let mut bytes = Cursor::new(bytes);
-        assert_eq!(count_signature(&mut bytes, CENTRAL_HEADER).unwrap(), 1);
+        assert_eq!(count_signature(&mut bytes, HEADER_SIGNATURE).unwrap(), 1);
     }
 
     #[test]
     fn a_part_of_a_signature_is_not_one() {
         let mut bytes = Cursor::new(b"PK\x01");
-        assert_eq!(count_signature(&mut bytes, CENTRAL_HEADER).unwrap(), 0);
+        assert_eq!(count_signature(&mut bytes, HEADER_SIGNATURE).unwrap(), 0);
     }
 }

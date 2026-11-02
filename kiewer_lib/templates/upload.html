@@ -82,6 +82,19 @@ const dropped = [];
 // revision would hold only what the walk had reached.
 let walking = Promise.resolve();
 
+// What leaves the browser. The server's rules decide what is kept (FileKind,
+// upload::skipped, Incoming::is_archive); these spare the transfer, since
+// everything sent counts against the body limit and a large .git beside the
+// project would refuse an upload whose files fit.
+const skippedFolder = (name) => name.endsWith("-backups") || name.startsWith(".") || name === "__MACOSX";
+
+function sent(path) {
+  const folders = path.split("/");
+  const name = folders.pop().toLowerCase();
+  if (folders.some(skippedFolder)) return false;
+  return /\.kicad_(pcb|sch|pro)$/.test(name) || (folders.length === 0 && name.endsWith(".zip"));
+}
+
 function note(path) {
   const item = document.createElement("li");
   item.textContent = path;
@@ -99,9 +112,10 @@ function entriesOf(reader) {
 async function walk(entry, prefix) {
   if (entry.isFile) {
     const path = prefix + entry.name;
+    if (!sent(path)) return;
     dropped.push({ path, file: await fileOf(entry) });
     note(path);
-  } else if (entry.isDirectory) {
+  } else if (entry.isDirectory && !skippedFolder(entry.name)) {
     const reader = entry.createReader();
     for (;;) {
       const batch = await entriesOf(reader);
@@ -124,6 +138,7 @@ drop.addEventListener("drop", async (event) => {
     .filter((entry) => entry !== null);
   if (entries.length === 0) {
     for (const file of event.dataTransfer.files) {
+      if (!sent(file.name)) continue;
       dropped.push({ path: file.name, file });
       note(file.name);
     }
@@ -143,7 +158,10 @@ form.addEventListener("submit", async (event) => {
     for (const field of form.elements) {
       if (!field.name) continue;
       if (field.type === "file") {
-        for (const file of field.files) body.append("files", file, file.webkitRelativePath || file.name);
+        for (const file of field.files) {
+          const path = file.webkitRelativePath || file.name;
+          if (sent(path)) body.append("files", file, path);
+        }
       } else {
         body.append(field.name, field.value);
       }

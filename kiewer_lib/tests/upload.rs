@@ -25,6 +25,7 @@ use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
 use sqlx::PgPool;
+use test_case::test_case;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
@@ -32,7 +33,7 @@ const BOARD: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pcb
 const SCHEMATIC: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_sch");
 const PROJECT: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pro");
 /// A sheet below the root sheet: the least the parser takes.
-const SUB_SHEET: &[u8] = b"(kicad_sch (version 20250114) (generator \"test\"))";
+const LOWER_SHEET: &[u8] = b"(kicad_sch (version 20250114) (generator \"test\"))";
 
 /// A zip as Explorer or `zip -r` writes one: a directory entry for each
 /// of `folders`, then `entries` (path, bytes) deflated.
@@ -606,7 +607,7 @@ async fn an_explorer_zip_of_the_hand_off_project_uploads_rooted_with_the_sheet_p
             ("midi8knob/midi8knob.kicad_pro", PROJECT),
             ("midi8knob/midi8knob.kicad_pcb", BOARD),
             ("midi8knob/midi8knob.kicad_sch", SCHEMATIC),
-            ("midi8knob/sub/power.kicad_sch", SUB_SHEET),
+            ("midi8knob/sub/power.kicad_sch", LOWER_SHEET),
             (
                 "midi8knob/midi8knob-backups/midi8knob-2026-11-02_120000.zip",
                 b"PK\x03\x04 not a zip",
@@ -669,8 +670,10 @@ async fn a_dropped_folder_sends_paths_and_two_projects_yield_the_shallowest_with
     // A dropped folder `designs` holding two projects, as the page's
     // script sends it: one part per file, named by its path. The backups
     // folder comes along as it does on disk, with the zip KiCad writes
-    // there at every save, which is not expanded: its bytes are no zip,
-    // so looking at it would refuse the upload.
+    // there at every save, and so does a zip beside the project, as its
+    // Archive Project command leaves one. Neither is expanded: their
+    // bytes are no zip, so looking at one would refuse the upload, and a
+    // real one would put an old snapshot at the top of the tree.
     let posted = browser
         .post_multipart(
             "/upload",
@@ -679,7 +682,7 @@ async fn a_dropped_folder_sends_paths_and_two_projects_yield_the_shallowest_with
                 Part::file("designs/midi8knob/midi8knob.kicad_pro", PROJECT),
                 Part::file("designs/midi8knob/midi8knob.kicad_pcb", BOARD),
                 Part::file("designs/midi8knob/midi8knob.kicad_sch", SCHEMATIC),
-                Part::file("designs/midi8knob/sub/power.kicad_sch", SUB_SHEET),
+                Part::file("designs/midi8knob/sub/power.kicad_sch", LOWER_SHEET),
                 Part::file(
                     "designs/midi8knob/midi8knob-backups/midi8knob.kicad_sch",
                     b"(garbage",
@@ -688,8 +691,9 @@ async fn a_dropped_folder_sends_paths_and_two_projects_yield_the_shallowest_with
                     "designs/midi8knob/midi8knob-backups/midi8knob-2026-11-02_120000.zip",
                     b"PK not a zip",
                 ),
+                Part::file("designs/midi8knob/midi8knob-archive.zip", b"PK not a zip"),
                 Part::file("designs/other/deep/other.kicad_pro", PROJECT),
-                Part::file("designs/other/deep/other.kicad_sch", SUB_SHEET),
+                Part::file("designs/other/deep/other.kicad_sch", LOWER_SHEET),
             ],
         )
         .await;
@@ -721,8 +725,8 @@ async fn a_dropped_folder_sends_paths_and_two_projects_yield_the_shallowest_with
     );
 }
 
-/// A zip written to an `Incoming` under `limits`, as the handler writes
-/// the part: begun as an archive, written in chunks, ended (expanded).
+/// A zip written to `incoming` as the handler writes the part: begun as
+/// an archive, written in chunks, ended (expanded).
 async fn receive_zip(incoming: &mut Incoming, name: &str, bytes: &[u8]) -> Result<()> {
     incoming.begin_archive(name).await?;
     for piece in bytes.chunks(4096) {
@@ -890,9 +894,9 @@ async fn a_zip_written_with_backslashes_keeps_its_folders() {
     );
 }
 
-/// A sheet beside a zip stored whole, as `zip -r` keeps a backup: the
-/// inner zip's end-of-directory record stays readable in the outer's tail.
-fn zip_holding_a_stored_zip() -> Vec<u8> {
+/// A sheet beside `backups` zips stored whole, as `zip -r` keeps them: each
+/// inner end-of-directory record stays readable in the outer's tail.
+fn zip_holding_stored_zips(backups: usize) -> Vec<u8> {
     let inner = zip_of(&[], &[("old.kicad_sch", &sized_sheet(30))]);
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
@@ -901,10 +905,12 @@ fn zip_holding_a_stored_zip() -> Vec<u8> {
         .start_file("demo/demo.kicad_sch", deflated)
         .expect("an entry");
     writer.write_all(&sized_sheet(20)).expect("its bytes");
-    writer
-        .start_file("demo/demo-backups/old.zip", stored)
-        .expect("an entry");
-    writer.write_all(&inner).expect("its bytes");
+    for backup in 0..backups {
+        writer
+            .start_file(format!("demo/demo-backups/old-{backup}.zip"), stored)
+            .expect("an entry");
+        writer.write_all(&inner).expect("its bytes");
+    }
     writer.finish().expect("a zip").into_inner()
 }
 
@@ -916,14 +922,14 @@ async fn a_zip_with_too_many_end_records_is_refused_before_it_is_opened() {
     // last record is good, would open.
     let mut zip = zip_of(&[], &[("a.kicad_sch", &sized_sheet(20))]);
     let record = zip[zip.len() - 22..].to_vec();
-    zip.extend(record.repeat(16));
+    zip.extend(record.repeat(32));
     let mut incoming = Incoming::new(Limits::DEFAULT).unwrap();
     let err = receive_zip(&mut incoming, "ends.zip", &zip)
         .await
-        .expect_err("seventeen records");
+        .expect_err("thirty-three records");
     assert!(
         matches!(err, Error::Refused(Refusal::BadArchive { ref path, ref reason })
-            if path == "ends.zip" && reason.contains("17 end-of-directory records")),
+            if path == "ends.zip" && reason.contains("33 end-of-directory records")),
         "{err}"
     );
 
@@ -932,16 +938,17 @@ async fn a_zip_with_too_many_end_records_is_refused_before_it_is_opened() {
     let mut incoming = Incoming::new(Limits::DEFAULT).unwrap();
     receive_zip(&mut incoming, "ends.zip", &zip)
         .await
-        .expect("sixteen records");
+        .expect("thirty-two records");
     assert_eq!(incoming.len(), 1);
 }
 
 #[tokio::test]
-async fn a_zip_holding_a_stored_zip_is_read_as_one_zip() {
+async fn a_small_project_with_stored_backups_is_read_as_one_zip() {
+    // Twenty-five backups small enough that every record is in the tail.
     let mut incoming = Incoming::new(Limits::DEFAULT).unwrap();
-    receive_zip(&mut incoming, "demo.zip", &zip_holding_a_stored_zip())
+    receive_zip(&mut incoming, "demo.zip", &zip_holding_stored_zips(25))
         .await
-        .expect("the inner record is not mistaken for an attack");
+        .expect("the inner records are not mistaken for an attack");
     assert_eq!((incoming.len(), incoming.total()), (1, 20));
 }
 
@@ -968,30 +975,27 @@ async fn a_zip_streamed_with_data_descriptors_is_read_from_its_directory() {
     assert_eq!((incoming.len(), incoming.total()), (1, 20));
 }
 
+// Offsets from the central header's signature: the general purpose flags
+// at 8 (bit 0 is encrypted), the compression method at 10 (12 is bzip2).
+#[test_case(8, &[1], "encrypted"; "an encrypted entry")]
+#[test_case(10, &[12, 0], "deflate"; "an entry in bzip2")]
 #[tokio::test]
-async fn a_zip_the_server_will_not_inflate_is_refused_from_its_directory() {
-    // Offsets from the central header's signature: the general purpose
-    // flags at 8 (bit 0 is encrypted), the compression method at 10
-    // (12 is bzip2).
-    let plain = zip_of(&[], &[("a.kicad_sch", &sized_sheet(200))]);
-    let mut encrypted = plain.clone();
-    patch_directory(&mut encrypted, 8, &[1]);
-    let mut bzip2 = plain.clone();
-    patch_directory(&mut bzip2, 10, &12_u16.to_le_bytes());
-    for (name, zip, says) in [
-        ("encrypted.zip", &encrypted, "encrypted"),
-        ("bzip2.zip", &bzip2, "deflate"),
-    ] {
-        let mut incoming = Incoming::new(Limits::DEFAULT).unwrap();
-        let err = receive_zip(&mut incoming, name, zip)
-            .await
-            .expect_err("refused");
-        assert!(
-            matches!(err, Error::Refused(Refusal::BadArchive { ref path, ref reason })
-                if path == name && reason.starts_with("a.kicad_sch ") && reason.contains(says)),
-            "{name}: {err}"
-        );
-    }
+async fn a_zip_the_server_will_not_inflate_is_refused_from_its_directory(
+    at: usize,
+    patch: &[u8],
+    says: &str,
+) {
+    let mut zip = zip_of(&[], &[("a.kicad_sch", &sized_sheet(200))]);
+    patch_directory(&mut zip, at, patch);
+    let mut incoming = Incoming::new(Limits::DEFAULT).unwrap();
+    let err = receive_zip(&mut incoming, "demo.zip", &zip)
+        .await
+        .expect_err("refused");
+    assert!(
+        matches!(err, Error::Refused(Refusal::BadArchive { ref path, ref reason })
+            if path == "demo.zip" && reason.starts_with("a.kicad_sch ") && reason.contains(says)),
+        "{err}"
+    );
 }
 
 #[tokio::test]
