@@ -14,8 +14,9 @@ askama = { version = "0.14", default-features = false, features = ["derive", "st
 async-trait = "0.1"
 # http1 only: Fastly and Cloud Run's front end speak HTTP/1.1 to the
 # container. form: the handle and sign-out forms; json: /api/me; query:
-# the OAuth callback's code and state.
-axum = { version = "0.8", default-features = false, features = ["form", "http1", "json", "query", "tokio"] }
+# the OAuth callback's code and state; multipart: the upload form's
+# files, streamed part by part (multer underneath).
+axum = { version = "0.8", default-features = false, features = ["form", "http1", "json", "multipart", "query", "tokio"] }
 # cookie: the session and OAuth-state cookie jar. Neither signed nor
 # private: the session cookie is an opaque random id and the state cookie
 # is compared with the provider's echo, so neither carries a claim.
@@ -47,11 +48,16 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
+# The upload's temporary files: one directory per upload under the
+# system's temporary directory, removed with it, named so two uploads
+# never collide. In the tree already through kiewer_test_support.
+tempfile = "3"
 sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "tls-rustls"] }
 # The Duration type a cookie's Max-Age takes (the cookie crate's, which
 # axum-extra does not re-export). Nothing else: the clock is Postgres's.
 time = { version = "0.3", default-features = false }
-tokio = { version = "1", features = ["macros", "net", "rt", "signal", "time"] }
+# fs and io-util: the upload's parts streamed into temporary files.
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "signal", "time"] }
 tracing = "0.1"
 
 [dev-dependencies]

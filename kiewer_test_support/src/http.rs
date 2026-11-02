@@ -88,21 +88,44 @@ pub async fn request(
     headers: &[(&str, &str)],
     body: &str,
 ) -> Response {
+    let content_type = (!body.is_empty()).then_some("application/x-www-form-urlencoded");
+    send(addr, method, path, headers, content_type, body.as_bytes()).await
+}
+
+/// One HTTP/1.0 request at `addr` with any body: `method path`, the
+/// extra `headers`, `Content-Type: content_type` when given, and `body`
+/// with its length.
+///
+/// # Panics
+///
+/// As [`request`].
+pub async fn send(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    content_type: Option<&str>,
+    body: &[u8],
+) -> Response {
     use std::fmt::Write as _;
     let mut text = format!("{method} {path} HTTP/1.0\r\nHost: {addr}\r\n");
     // Writing to a String cannot fail.
     for (name, value) in headers {
         let _ = write!(text, "{name}: {value}\r\n");
     }
-    if !body.is_empty() {
-        text.push_str("Content-Type: application/x-www-form-urlencoded\r\n");
+    if let Some(content_type) = content_type {
+        let _ = write!(text, "Content-Type: {content_type}\r\n");
     }
-    let _ = write!(text, "Content-Length: {}\r\n\r\n{body}", body.len());
+    let _ = write!(text, "Content-Length: {}\r\n\r\n", body.len());
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     stream
         .write_all(text.as_bytes())
         .await
-        .expect("write the request");
+        .expect("write the request head");
+    stream
+        .write_all(body)
+        .await
+        .expect("write the request body");
     let mut raw = Vec::new();
     stream
         .read_to_end(&mut raw)
@@ -139,6 +162,37 @@ pub async fn get(addr: SocketAddr, path: &str) -> (u16, String) {
     (response.status, response.body)
 }
 
+/// One part of a multipart body: a text field without a file name, a
+/// file with one.
+#[derive(Debug, Clone, Copy)]
+pub struct Part<'a> {
+    pub name: &'a str,
+    pub file_name: Option<&'a str>,
+    pub body: &'a [u8],
+}
+
+impl<'a> Part<'a> {
+    /// A text field.
+    #[must_use]
+    pub fn text(name: &'a str, value: &'a str) -> Self {
+        Self {
+            name,
+            file_name: None,
+            body: value.as_bytes(),
+        }
+    }
+
+    /// A file under the field `files`, as the upload form names it.
+    #[must_use]
+    pub fn file(file_name: &'a str, body: &'a [u8]) -> Self {
+        Self {
+            name: "files",
+            file_name: Some(file_name),
+            body,
+        }
+    }
+}
+
 /// A client that keeps the cookies one server sets, as a browser does:
 /// a `Set-Cookie` stores or, with `Max-Age=0`, forgets; every request
 /// carries what is stored. Paths and expiry are not modelled beyond
@@ -171,17 +225,62 @@ impl Browser {
         self.cookies.get(name).map(String::as_str)
     }
 
+    /// Store a cookie as if the server had set it: a session a test made
+    /// in the database goes in a browser this way.
+    pub fn set_cookie(&mut self, name: &str, value: &str) {
+        self.cookies.insert(name.to_owned(), value.to_owned());
+    }
+
     /// `GET path` with the stored cookies.
     pub async fn get(&mut self, path: &str) -> Response {
-        self.send("GET", path, "").await
+        self.send("GET", path, None, b"").await
     }
 
     /// `POST path` with `body` as a form and the stored cookies.
     pub async fn post_form(&mut self, path: &str, body: &str) -> Response {
-        self.send("POST", path, body).await
+        let content_type = (!body.is_empty()).then_some("application/x-www-form-urlencoded");
+        self.send("POST", path, content_type, body.as_bytes()).await
     }
 
-    async fn send(&mut self, method: &str, path: &str, body: &str) -> Response {
+    /// `POST path` as a `multipart/form-data` body of `parts`, with the
+    /// stored cookies: what a browser sends for a form with files.
+    pub async fn post_multipart(&mut self, path: &str, parts: &[Part<'_>]) -> Response {
+        let boundary = "kiewer-test-boundary-7d3f";
+        let mut body = Vec::new();
+        for part in parts {
+            body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+            match part.file_name {
+                Some(file_name) => body.extend_from_slice(
+                    format!(
+                        "Content-Disposition: form-data; name=\"{}\"; filename=\"{file_name}\"\r\n\
+                         Content-Type: application/octet-stream\r\n\r\n",
+                        part.name
+                    )
+                    .as_bytes(),
+                ),
+                None => body.extend_from_slice(
+                    format!(
+                        "Content-Disposition: form-data; name=\"{}\"\r\n\r\n",
+                        part.name
+                    )
+                    .as_bytes(),
+                ),
+            }
+            body.extend_from_slice(part.body);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        let content_type = format!("multipart/form-data; boundary={boundary}");
+        self.send("POST", path, Some(&content_type), &body).await
+    }
+
+    async fn send(
+        &mut self,
+        method: &str,
+        path: &str,
+        content_type: Option<&str>,
+        body: &[u8],
+    ) -> Response {
         let cookie_header = self
             .cookies
             .iter()
@@ -193,7 +292,7 @@ impl Browser {
         } else {
             vec![("Cookie", cookie_header.as_str())]
         };
-        let response = request(self.addr, method, path, &headers, body).await;
+        let response = send(self.addr, method, path, &headers, content_type, body).await;
         for set_cookie in response.headers_named("set-cookie") {
             let mut parts = set_cookie.split(';').map(str::trim);
             let Some((name, value)) = parts.next().and_then(|pair| pair.split_once('=')) else {

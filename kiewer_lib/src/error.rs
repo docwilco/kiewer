@@ -96,7 +96,6 @@ pub enum Error {
     /// act on: the upload page shows it, with a status of the web layer's
     /// choosing.
     #[display("upload refused: {_0}")]
-    #[from(ignore)]
     Refused(#[error(not(source))] Refusal),
 }
 

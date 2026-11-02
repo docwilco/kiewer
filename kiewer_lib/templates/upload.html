@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Upload - kiewer</title>
+<style>
+  label { display: block; margin: 0.6em 0; }
+  .error { color: #a00; }
+</style>
+</head>
+<body>
+<nav><a href="/">kiewer</a> · <a href="/{{ handle }}">{{ handle }}</a> · <a href="/settings">Settings</a></nav>
+<h1>Upload a revision</h1>
+{% if let Some(error) = error %}
+<p class="error" role="alert">{{ error }}</p>
+{% endif %}
+<form method="post" action="/upload" enctype="multipart/form-data">
+  <label>Design
+    <select name="design">
+      <option value="">A new design</option>
+      {% for design in designs %}
+      <option value="{{ design.slug }}">{{ design.name }} ({{ design.slug }})</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Name, for a new design (else the project's file name)
+    <input name="name" maxlength="200">
+  </label>
+  <label>Message
+    <input name="message" maxlength="500">
+  </label>
+  <label>Files
+    <input type="file" name="files" multiple required accept=".kicad_pcb,.kicad_sch,.kicad_pro">
+  </label>
+  <p>Only <code>.kicad_pcb</code>, <code>.kicad_sch</code> and <code>.kicad_pro</code> files are kept, from KiCad 9 or later, up to {{ file_mb }} MB each and {{ revision_mb }} MB together. Other files are left out.</p>
+  <button type="submit">Upload</button>
+</form>
+</body>
+</html>

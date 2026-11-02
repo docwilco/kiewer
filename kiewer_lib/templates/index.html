@@ -11,7 +11,7 @@
      everyone and cacheable (ADR 0003), so nothing in it may depend on
      the session. -->
 <span id="signed-out">{% for provider in providers %}<a href="/auth/{{ provider }}" rel="nofollow">Sign in with {{ provider.name() }}</a> {% endfor %}</span>
-<span id="signed-in" hidden><a id="handle" href="/welcome">Pick your handle</a> <a href="/settings">Settings</a> <form method="post" action="/auth/sign-out" style="display:inline"><button type="submit">Sign out</button></form></span>
+<span id="signed-in" hidden><a id="handle" href="/welcome">Pick your handle</a> <a href="/settings">Settings</a> <a href="/upload">Upload</a> <form method="post" action="/auth/sign-out" style="display:inline"><button type="submit">Sign out</button></form></span>
 <a href="/about">About</a>
 </nav>
 <h1>kiewer</h1>

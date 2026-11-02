@@ -20,9 +20,10 @@ Running the server: `docker compose up -d` starts Postgres (`compose.yaml`),
 or `kicad_core`: it writes the browser viewer to `kiewer_viewer/dist`, which
 `cargo run` embeds; without it the server runs and the viewer page says the
 viewer is not built in), then `cargo run`. The first line on stdout is the
-build line; the page is at http://localhost:8090/, the viewer at
-http://localhost:8090/viewer, and `/healthz` says `ok` once the database
-answers.
+build line; the page is at http://localhost:8090/, the viewer with the
+hand-off board at http://localhost:8090/viewer, the upload form at
+http://localhost:8090/upload once signed in, and `/healthz` says `ok` once
+the database answers.
 `kiewer_lib::config` is the list of variables the server reads and their
 defaults; the blob store writes under `blobs/` (git-ignored) unless
 `BLOB_BUCKET` names a GCS bucket, which makes it the GCS store (with

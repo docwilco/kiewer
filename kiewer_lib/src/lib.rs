@@ -11,6 +11,7 @@ pub mod error;
 pub mod revision;
 pub mod server;
 pub mod session;
+pub mod upload;
 pub mod web;
 
 pub use error::{Error, Result};

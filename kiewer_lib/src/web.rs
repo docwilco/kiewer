@@ -2,11 +2,14 @@
 //! the welcome page, sign-out and `/api/me` are in `web/auth.rs`; the
 //! settings pages in `web/settings.rs`; the viewer page and its assets
 //! in `web/viewer.rs`; the renderer beacon in `web/beacon.rs`; the about
-//! page in `web/about.rs`.
+//! page in `web/about.rs`; the design page and the upload in
+//! `web/design.rs`; the blob route in `web/blob.rs`.
 
 mod about;
 mod auth;
 pub mod beacon;
+pub mod blob;
+mod design;
 mod settings;
 pub mod viewer;
 
@@ -16,7 +19,7 @@ use std::time::Duration;
 
 use askama::Template;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -54,6 +57,18 @@ pub fn router(state: AppState) -> Router {
         )
         .merge(viewer::routes())
         .merge(beacon::routes())
+        // The upload's body may hold a revision's worth of files; every
+        // other route keeps axum's default limit. Static routes above win
+        // over the design page's two segments (axum 0.8 matches the most
+        // specific route), so /settings/sessions is never a design.
+        .route(
+            "/upload",
+            get(design::upload_form)
+                .post(design::upload)
+                .layer(DefaultBodyLimit::max(crate::upload::BODY_LIMIT)),
+        )
+        .route("/blob/{hash}", get(blob::serve))
+        .route("/{handle}/{slug}", get(design::page))
         .with_state(state)
 }
 
