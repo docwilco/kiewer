@@ -7,21 +7,24 @@
 //! anti-aliasing is rsvg's coverage where the viewer's is 4x
 //! multisampling, and a translucent layer is composited as a group
 //! where the viewer blends shape by shape (#56). So the metric is a
-//! count: inside each view's tile, a pixel is off when its colour is
-//! more than [`CHANNEL_TOLERANCE`] away on some channel from the
-//! reference's pixel there and from every reference pixel one step
-//! around it (the step forgives an edge anti-aliased differently or
-//! placed a fraction of a pixel apart); the page fails when the off
-//! pixels exceed its budget in [`BUDGETS`], set about one point above
-//! what the sample board measured (the floor is in each line there, the
-//! measurement in the done-note of #7). Inside that margin a change of
-//! colour on a layer that covers an area, copper, mask, board fill or a
-//! hole rim, blows through on the pages that show it, as does a missing
-//! layer, a shift or a mirror; a tint change on the silkscreen text or
-//! the paste inside the pads does not, since those pixels are already
-//! in the floor under the labels and the other face. Outside the tiles
-//! (the margins and the header band, where the hand-off writes the
-//! title) the pages are not compared.
+//! count: inside each view's tile, a pixel is off when the render's
+//! colour there is more than [`CHANNEL_TOLERANCE`] away on some channel
+//! from the reference's pixel and from every reference pixel one step
+//! around it, or the reference's colour there is that far from the
+//! render's pixel and every render pixel one step around it (the step
+//! forgives an edge anti-aliased differently or placed a fraction of a
+//! pixel apart, both ways, so a feature the viewer drops counts as much
+//! as one it adds); the page fails when the off pixels exceed its
+//! budget in [`BUDGETS`], set about one point above what the sample
+//! board measured (the floor is in each line there, the measurement in
+//! the done-note of #7). Inside that margin a change of colour on a
+//! layer that covers an area, copper, mask, board fill or a hole rim,
+//! blows through on the pages that show it, as does a missing layer, a
+//! shift or a mirror; a tint change on the silkscreen text or the paste
+//! inside the pads does not, since those pixels are already in the
+//! floor under the labels and the other face. Outside the tiles (the
+//! margins and the header band, where the hand-off writes the title)
+//! the pages are not compared.
 //!
 //! Needs a Vulkan driver: lavapipe on a box without a GPU. Without one
 //! the tests skip with a line saying so, except on CI (`CI` set), where
@@ -31,12 +34,13 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use kiewer_viewer::headless::Headless;
 use kiewer_viewer::headless::hand_off::{self, Page, Rendered};
-use kiewer_viewer::headless::{Frame, Headless};
-use kiewer_viewer::render::offscreen::Image;
+use kiewer_viewer::render::offscreen::{Image, Offscreen};
 use kiewer_viewer::scene::Scene;
+use kiewer_viewer::view::palette::F_CU;
 use kiewer_viewer::view::{Layer, ViewState};
 
 const BOARD_PATH: &str = concat!(
@@ -58,15 +62,15 @@ const CHANNEL_TOLERANCE: u8 = 8;
 /// both sides, the compounded translucent copper (#56) and the courtyard
 /// lines, a thin line being off along its whole length.
 const BUDGETS: [(&str, f64); 9] = [
-    ("01-F_Cu_F_Paste.png", 0.065),                              // 5.54%
-    ("02-In1_Cu.png", 0.030),                                    // 1.82%
-    ("03-In2_Cu.png", 0.030),                                    // 1.83%
-    ("04-B_Cu.png", 0.035),                                      // 2.59%
-    ("05-F_Cu_F_Paste_F_Mask_F_SilkS.png", 0.085),               // 7.19%
-    ("06-B_Cu_B_Paste_B_Mask_B_SilkS_mirrored.png", 0.030),      // 2.10%
-    ("07-F_Cu_B_Cu_F_SilkS_B_SilkS_F_CrtYd_B_CrtYd.png", 0.130), // 11.69%
-    ("08-B_Cu_F_Cu_B_SilkS_F_SilkS_B_CrtYd_F_CrtYd.png", 0.115), // 10.04%
-    ("midi8knob-layers.png", 0.085),                             // 7.40%
+    ("01-F_Cu_F_Paste.png", 0.095),                              // 8.21%
+    ("02-In1_Cu.png", 0.045),                                    // 3.29%
+    ("03-In2_Cu.png", 0.045),                                    // 3.31%
+    ("04-B_Cu.png", 0.060),                                      // 4.87%
+    ("05-F_Cu_F_Paste_F_Mask_F_SilkS.png", 0.115),               // 10.42%
+    ("06-B_Cu_B_Paste_B_Mask_B_SilkS_mirrored.png", 0.055),      // 4.15%
+    ("07-F_Cu_B_Cu_F_SilkS_B_SilkS_F_CrtYd_B_CrtYd.png", 0.170), // 15.56%
+    ("08-B_Cu_F_Cu_B_SilkS_F_SilkS_B_CrtYd_F_CrtYd.png", 0.155), // 13.94%
+    ("midi8knob-layers.png", 0.135),                             // 12.11%
 ];
 
 /// The budget of the page named `name`.
@@ -112,8 +116,10 @@ fn reference(name: &str) -> Image {
     Image::from_png(&bytes).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-/// Where a failed comparison writes what it rendered, for a look:
-/// cargo's scratch directory.
+/// Where a failed comparison writes what it rendered, for a look: a
+/// fixed directory under cargo's scratch directory, not `scratch_dir!`,
+/// since the files must outlive the test and the support crate links
+/// the server library.
 fn dump(name: &str, image: &Image) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("golden");
     std::fs::create_dir_all(&dir).expect("cargo's scratch directory is writable");
@@ -132,24 +138,65 @@ fn channel_difference(a: [u8; 4], e: [u8; 4]) -> u8 {
         .unwrap_or(0)
 }
 
-/// Whether the pixel at (`x`, `y`) of `actual` is off: it differs by
-/// more than the tolerance from the reference's pixel there and from
-/// every reference pixel one step around it. The step forgives the
-/// edge of a shape, which the two rasterisers anti-alias differently
-/// and place a fraction of a pixel apart; it forgives nothing a pixel
-/// wide or more, so a layer in another colour, a missing layer, a shift
-/// or a mirror still count.
-fn is_off(actual: &Image, expected: &Image, x: u32, y: u32) -> bool {
-    let Some(a) = actual.pixel(x, y) else {
-        return false;
-    };
+/// Whether `pixel` is more than the tolerance from every pixel of
+/// `image` one step around (`x`, `y`), that one included.
+fn unlike_everything_near(pixel: [u8; 4], image: &Image, x: u32, y: u32) -> bool {
     let near = |dx: i64, dy: i64| {
         let x = u32::try_from(i64::from(x) + dx).ok()?;
         let y = u32::try_from(i64::from(y) + dy).ok()?;
-        expected.pixel(x, y)
+        image.pixel(x, y)
     };
     (-1..=1).all(|dy| {
-        (-1..=1).all(|dx| near(dx, dy).is_none_or(|e| channel_difference(a, e) > CHANNEL_TOLERANCE))
+        (-1..=1)
+            .all(|dx| near(dx, dy).is_none_or(|e| channel_difference(pixel, e) > CHANNEL_TOLERANCE))
+    })
+}
+
+/// One compared pixel: where, how far apart the two colours are, and
+/// whether it counts as off (the module doc has the rule).
+struct Compared {
+    x: u32,
+    y: u32,
+    difference: u8,
+    off: bool,
+}
+
+/// Every pixel inside the tiles of `page` that both images have. The
+/// two may differ by a pixel in size: the hand-off's page is laid out
+/// around kicad-cli's box of the outline, which falls a hundredth of a
+/// millimetre short of the outline's own (its arcs are polygonised),
+/// and at 30 px/mm that is the last pixel of the width; the pixels the
+/// smaller page lacks are not compared.
+fn compared_pixels<'a>(
+    page: &'a Page,
+    actual: &'a Image,
+    expected: &'a Image,
+) -> impl Iterator<Item = Compared> + 'a {
+    assert!(
+        actual.width.abs_diff(expected.width) <= 1 && actual.height.abs_diff(expected.height) <= 1,
+        "the page is {} by {}, the reference {} by {}",
+        actual.width,
+        actual.height,
+        expected.width,
+        expected.height
+    );
+    page.tiles.iter().flat_map(move |tile| {
+        let pixels = tile.pixel_box();
+        pixels.rows().flat_map(move |y| {
+            pixels.columns().filter_map(move |x| {
+                let (a, e) = (actual.pixel(x, y)?, expected.pixel(x, y)?);
+                let difference = channel_difference(a, e);
+                let off = difference > CHANNEL_TOLERANCE
+                    && (unlike_everything_near(a, expected, x, y)
+                        || unlike_everything_near(e, actual, x, y));
+                Some(Compared {
+                    x,
+                    y,
+                    difference,
+                    off,
+                })
+            })
+        })
     })
 }
 
@@ -158,7 +205,7 @@ fn is_off(actual: &Image, expected: &Image, x: u32, y: u32) -> bool {
 struct Verdict {
     /// Pixels compared.
     compared: u64,
-    /// Pixels off by more than the tolerance on some channel.
+    /// Pixels off.
     off: u64,
     /// The mean over the compared pixels of the largest channel difference.
     mean: f64,
@@ -175,42 +222,18 @@ impl Verdict {
     }
 }
 
-/// Compare `actual` with `expected` inside the tiles of `page`. The two
-/// may differ by a pixel in size: the hand-off's page is laid out around
-/// kicad-cli's box of the outline, which falls a hundredth of a
-/// millimetre short of the outline's own (its arcs are polygonised), and
-/// at 30 px/mm that is the last pixel of the width; the pixels the
-/// smaller page lacks are not compared.
+/// Compare `actual` with `expected` inside the tiles of `page`.
 fn compare(page: &Page, actual: &Image, expected: &Image) -> Verdict {
-    assert!(
-        actual.width.abs_diff(expected.width) <= 1 && actual.height.abs_diff(expected.height) <= 1,
-        "the page is {} by {}, the reference {} by {}",
-        actual.width,
-        actual.height,
-        expected.width,
-        expected.height
-    );
     let mut verdict = Verdict {
         compared: 0,
         off: 0,
         mean: 0.0,
     };
     let mut total: u64 = 0;
-    for tile in &page.tiles {
-        let (left, top, right, bottom) = tile.pixel_box();
-        for y in top..bottom {
-            for x in left..right {
-                let (Some(a), Some(e)) = (actual.pixel(x, y), expected.pixel(x, y)) else {
-                    continue;
-                };
-                let difference = channel_difference(a, e);
-                verdict.compared += 1;
-                total += u64::from(difference);
-                if difference > CHANNEL_TOLERANCE && is_off(actual, expected, x, y) {
-                    verdict.off += 1;
-                }
-            }
-        }
+    for pixel in compared_pixels(page, actual, expected) {
+        verdict.compared += 1;
+        total += u64::from(pixel.difference);
+        verdict.off += u64::from(pixel.off);
     }
     #[expect(
         clippy::cast_precision_loss,
@@ -226,36 +249,21 @@ fn compare(page: &Page, actual: &Image, expected: &Image) -> Verdict {
 /// grey where it differs within the tolerance, black where it matches,
 /// outside the tiles the page colour.
 fn difference_image(page: &Page, actual: &Image, expected: &Image) -> Image {
-    let (width, height) = (actual.width, actual.height);
-    let mut rgba = [0x2b, 0x2b, 0x2b, 255].repeat(width as usize * height as usize);
-    for tile in &page.tiles {
-        let (left, top, right, bottom) = tile.pixel_box();
-        for y in top..bottom.min(height) {
-            for x in left..right.min(width) {
-                let (Some(a), Some(e)) = (actual.pixel(x, y), expected.pixel(x, y)) else {
-                    continue;
-                };
-                let difference = channel_difference(a, e);
-                let shade = if difference > CHANNEL_TOLERANCE && is_off(actual, expected, x, y) {
-                    255
-                } else if difference > 0 {
-                    96
-                } else {
-                    0
-                };
-                let at = (y as usize * width as usize + x as usize) * 4;
-                rgba[at..at + 3].copy_from_slice(&[shade, shade, shade]);
-            }
-        }
+    let mut out = Image::filled(actual.width, actual.height, [0x2b, 0x2b, 0x2b, 255]);
+    for pixel in compared_pixels(page, actual, expected) {
+        let shade = if pixel.off {
+            255
+        } else if pixel.difference > 0 {
+            96
+        } else {
+            0
+        };
+        out.put(pixel.x, pixel.y, [shade, shade, shade, 255]);
     }
-    Image {
-        width,
-        height,
-        rgba,
-    }
+    out
 }
 
-fn report(name: &str, verdict: &Verdict, budget: f64, elapsed: std::time::Duration) -> String {
+fn report(name: &str, verdict: &Verdict, budget: f64, elapsed: Duration) -> String {
     format!(
         "{name}: {:.3}% of {} pixels off by more than {CHANNEL_TOLERANCE} (budget {:.1}%), mean difference {:.2}, compared in {:.2}s",
         verdict.off_fraction() * 100.0,
@@ -318,25 +326,10 @@ fn a_layer_in_another_colour_fails_the_comparison() {
     let scene = scene();
     // View 5, the front as built, with the copper drawn in the KiCad
     // theme's red instead of copper yellow: the kind of palette slip
-    // the comparison exists to catch.
+    // the comparison exists to catch. The page is composed as the real
+    // one is, with the draws recoloured.
     let page = hand_off::page(&scene.bounds, &[5], hand_off::VIEW_DENSITY);
-    let tile = &page.tiles[0];
-    let frame = Frame {
-        width: page.width,
-        height: page.height,
-        center: kicad_core::model::Point {
-            x: scene.bounds.center().x
-                + (f64::from(page.width) / 2.0 - (tile.x + tile.width / 2.0)) / page.scale,
-            y: scene.bounds.center().y
-                + (f64::from(page.height) / 2.0 - (tile.y + tile.height / 2.0)) / page.scale,
-        },
-        scale: page.scale,
-        mirrored: false,
-    };
-    let mut draws = scene.draw_list(
-        &ViewState::new(5),
-        kiewer_viewer::render::offscreen::Offscreen::FORMAT,
-    );
+    let mut draws = scene.draw_list(&ViewState::new(5), Offscreen::FORMAT);
     let copper = scene
         .slices
         .iter()
@@ -347,29 +340,63 @@ fn a_layer_in_another_colour_fails_the_comparison() {
     let mut recoloured = 0;
     for draw in &mut draws {
         if draw.range == copper {
-            draw.color = kiewer_viewer::view::palette::F_CU
-                .for_format(kiewer_viewer::render::offscreen::Offscreen::FORMAT);
+            draw.color = F_CU.for_format(Offscreen::FORMAT);
             recoloured += 1;
         }
     }
     assert_eq!(recoloured, 1);
-    let image = headless
-        .render_draws(scene, &draws, &frame)
-        .expect("renders");
+    let image = hand_off::compose(&page, |tile| {
+        headless
+            .render_draws(scene, &draws, &tile.frame(scene, page.scale, false))
+            .map(Some)
+    })
+    .expect("renders");
     let name = "05-F_Cu_F_Paste_F_Mask_F_SilkS.png";
     let verdict = compare(&page, &image, &reference(name));
     let budget = budget(name);
     eprintln!(
         "{}",
-        report(
-            "recoloured copper",
-            &verdict,
-            budget,
-            std::time::Duration::ZERO
-        )
+        report("recoloured copper", &verdict, budget, Duration::ZERO)
     );
     assert!(
         verdict.off_fraction() > budget,
         "the comparison let a recoloured copper layer through: {verdict:?}"
     );
+}
+
+#[test]
+fn a_feature_the_render_drops_counts_as_off_like_one_it_adds() {
+    // Two synthetic pages: the reference has a two-pixel line the render
+    // lacks, and the other way round. The one-step forgiveness must
+    // swallow neither; a one-pixel shift of the line it must.
+    let page = Page {
+        width: 40,
+        height: 20,
+        scale: 1.0,
+        tiles: vec![hand_off::Tile {
+            view: 1,
+            x: 0.0,
+            y: 0.0,
+            width: 40.0,
+            height: 20.0,
+        }],
+    };
+    let blank = Image::filled(40, 20, [0x2b, 0x2b, 0x2b, 255]);
+    let mut line = blank.clone();
+    for x in 5..35 {
+        line.put(x, 10, [255, 255, 255, 255]);
+        line.put(x, 11, [255, 255, 255, 255]);
+    }
+    let dropped = compare(&page, &blank, &line);
+    let added = compare(&page, &line, &blank);
+    assert_eq!(dropped.off, 60, "{dropped:?}");
+    assert_eq!(added.off, 60, "{added:?}");
+    let mut shifted = blank.clone();
+    for x in 5..35 {
+        shifted.put(x, 11, [255, 255, 255, 255]);
+        shifted.put(x, 12, [255, 255, 255, 255]);
+    }
+    let moved = compare(&page, &shifted, &line);
+    assert_eq!(moved.off, 0, "{moved:?}");
+    assert!(moved.mean > 0.0);
 }

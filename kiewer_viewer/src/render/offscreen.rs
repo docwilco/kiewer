@@ -29,15 +29,38 @@ pub struct Image {
 }
 
 impl Image {
+    /// An image of `width` by `height` pixels, every one `rgba`.
+    #[must_use]
+    pub fn filled(width: u32, height: u32, rgba: [u8; 4]) -> Self {
+        Self {
+            width,
+            height,
+            rgba: rgba.repeat(width as usize * height as usize),
+        }
+    }
+
+    /// Where the pixel at (`x`, `y`) starts in `rgba`, `None` outside the
+    /// image.
+    fn offset(&self, x: u32, y: u32) -> Option<usize> {
+        (x < self.width && y < self.height)
+            .then(|| (y as usize * self.width as usize + x as usize) * 4)
+    }
+
     /// The pixel at (`x`, `y`) as `[r, g, b, a]`, `None` outside the image.
     #[must_use]
     pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 4]> {
-        if x >= self.width || y >= self.height {
-            return None;
-        }
-        let start = (y as usize * self.width as usize + x as usize) * 4;
+        let start = self.offset(x, y)?;
         let bytes = self.rgba.get(start..start + 4)?;
         Some([bytes[0], bytes[1], bytes[2], bytes[3]])
+    }
+
+    /// Set the pixel at (`x`, `y`); nothing outside the image.
+    pub fn put(&mut self, x: u32, y: u32, rgba: [u8; 4]) {
+        if let Some(start) = self.offset(x, y)
+            && let Some(bytes) = self.rgba.get_mut(start..start + 4)
+        {
+            bytes.copy_from_slice(&rgba);
+        }
     }
 
     /// The image as a PNG: 8-bit RGBA, at the encoder's default
@@ -250,6 +273,19 @@ mod tests {
         assert_eq!(back, image);
         assert_eq!(back.pixel(36, 10), Some([36, 10, 128, 255]));
         assert_eq!(back.pixel(37, 0), None);
+    }
+
+    #[test]
+    fn a_filled_image_takes_a_pixel_inside_and_ignores_one_outside() {
+        let mut image = Image::filled(3, 2, [1, 2, 3, 4]);
+        assert_eq!(image.rgba.len(), 24);
+        assert_eq!(image.pixel(2, 1), Some([1, 2, 3, 4]));
+        image.put(2, 1, [9, 9, 9, 9]);
+        image.put(3, 0, [7, 7, 7, 7]);
+        image.put(0, 2, [7, 7, 7, 7]);
+        assert_eq!(image.pixel(2, 1), Some([9, 9, 9, 9]));
+        assert_eq!(image.pixel(1, 1), Some([1, 2, 3, 4]));
+        assert!(!image.rgba.contains(&7));
     }
 
     #[test]

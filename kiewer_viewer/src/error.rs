@@ -103,7 +103,7 @@ pub enum Error {
 /// The crate's result type.
 pub type Result<T, E = Error> = core::result::Result<T, E>;
 
-/// The process exit code of `kiewer_render` for each kind of failure.
+/// The process exit code of `kiewer_render_dev` for each kind of failure.
 /// Explicit discriminants from 3, so a duplicate is a compile error; 0,
 /// 1, 2, 101 and 126 up are never assigned ([`Exit::reserved`]).
 #[cfg(not(target_arch = "wasm32"))]
@@ -237,7 +237,7 @@ mod tests {
         let readme = include_str!("../../README.md");
         assert!(
             readme.contains(&Exit::table()),
-            "README.md's kiewer_render exit-code table is out of date; it should read:\n{}",
+            "README.md's kiewer_render_dev exit-code table is out of date; it should read:\n{}",
             Exit::table()
         );
     }

@@ -82,7 +82,7 @@ with `viewer-drop/exports/png`; its tolerance is in its module doc. It
 needs a Vulkan driver: on a box without a GPU that is Mesa's lavapipe,
 `apt install mesa-vulkan-drivers`, the package CI and the Dockerfile
 install. Without one it skips with a line saying so; on CI it fails
-instead. `cargo run --bin kiewer_render -- viewer-drop/board/midi8knob.kicad_pcb <dir>`
+instead. `cargo run --bin kiewer_render_dev -- viewer-drop/board/midi8knob.kicad_pcb <dir>`
 writes the same PNGs for a look.
 
 Clippy is pedantic with no blanket allows: every finding is fixed or carries a
@@ -104,7 +104,7 @@ The executable's non-zero exits, each a kind of `kiewer_lib::error::Error`
 | 8 | Failed | a failure with no better kind |
 | 9 | Upstream | a sign-in provider or another service over HTTP |
 
-`kiewer_render`'s, each a kind of `kiewer_viewer::error::Error` (`Exit`
+`kiewer_render_dev`'s, each a kind of `kiewer_viewer::error::Error` (`Exit`
 there, the same way); 2 is a usage error.
 
 | Code | Kind | Meaning |

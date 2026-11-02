@@ -1996,7 +1996,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kiewer_render"
+name = "kiewer_render_dev"
 version = "0.1.0"
 dependencies = [
  "kicad_core",

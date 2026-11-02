@@ -1,4 +1,4 @@
-//! `kiewer_render <board.kicad_pcb> <out-dir>`: the viewer's frames of a
+//! `kiewer_render_dev <board.kicad_pcb> <out-dir>`: the viewer's frames of a
 //! board as the hand-off's pages (`viewer-drop/exports/png`), rendered
 //! headless on Vulkan (lavapipe on a machine without a GPU) and written
 //! as PNG files into the directory, one per view plus the overview. A
@@ -16,7 +16,7 @@ use kiewer_viewer::scene::Scene;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [board, out] = args.as_slice() else {
-        eprintln!("usage: kiewer_render <board.kicad_pcb> <out-dir>");
+        eprintln!("usage: kiewer_render_dev <board.kicad_pcb> <out-dir>");
         return ExitCode::from(2);
     };
     match run(Path::new(board), Path::new(out)) {
@@ -40,7 +40,7 @@ fn run(board: &Path, out: &Path) -> Result<()> {
     let mut headless = Headless::new()?;
     let adapter = headless.adapter();
     eprintln!(
-        "kiewer_render: {} ({:?}), {} samples per pixel",
+        "kiewer_render_dev: {} ({:?}), {} samples per pixel",
         adapter.name,
         adapter.device_type,
         headless.sample_count()
