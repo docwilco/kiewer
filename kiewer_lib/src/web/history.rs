@@ -76,18 +76,32 @@ fn not_found(what: &str) -> Response {
 async fn at_branch(
     State(state): State<AppState>,
     Path((handle, slug, branch)): Path<(String, String, String)>,
+    Query(linked): Query<Linked>,
 ) -> Result<Response> {
     let Ok(branch) = branch.parse::<BranchName>() else {
         return Ok(not_found("branch"));
     };
-    design::show(&state, &handle, &slug, At::Branch(&branch)).await
+    design::show(&state, &handle, &slug, At::Branch(&branch), linked.stays()).await
 }
 
-/// The query a revision URL may carry: the branch whose page linked it.
+/// The query a design page URL may carry: `b`, the branch whose page
+/// linked a revision, and `design`, which keeps the design page for a
+/// revision with no board (one that otherwise opens on its schematic),
+/// so its settings, history and upload links stay reachable. The
+/// schematic page's revision form reads the same query.
 #[derive(Debug, Default, Deserialize)]
-struct Linked {
+pub(super) struct Linked {
     #[serde(default)]
-    b: Option<String>,
+    pub(super) b: Option<String>,
+    #[serde(default)]
+    pub(super) design: Option<String>,
+}
+
+impl Linked {
+    /// Whether the URL asks for the design page itself (`?design`).
+    pub(super) fn stays(&self) -> bool {
+        self.design.is_some()
+    }
 }
 
 /// `GET /{handle}/{slug}/r/{hash}`: the viewer at one revision, when the
@@ -102,12 +116,13 @@ async fn at_revision(
     let Ok(hash) = hash.parse::<RevisionHash>() else {
         return Ok(not_found("revision"));
     };
+    let stay = linked.stays();
     let branch = linked.b.and_then(|name| name.parse::<BranchName>().ok());
     let at = At::Revision {
         hash,
         branch: branch.as_ref(),
     };
-    design::show(&state, &handle, &slug, at).await
+    design::show(&state, &handle, &slug, at, stay).await
 }
 
 /// One row of the history page.

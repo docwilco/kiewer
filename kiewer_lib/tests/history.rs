@@ -109,6 +109,14 @@ async fn push(browser: &mut http::Browser, slug: &str, fields: &[(&str, &str)]) 
 
 /// Three uploads of `slug` on `main` through the form, with messages
 /// `rev 1` to `rev 3`; the design's page afterwards.
+/// The design page at `path`, asked to stay: the revisions here hold a
+/// sheet and no board, so the bare page opens on the schematic
+/// (tests/schematic.rs) and `design` in the query keeps it.
+async fn design_page(addr: SocketAddr, path: &str) -> http::Response {
+    let separator = if path.contains('?') { '&' } else { '?' };
+    http::request(addr, "GET", &format!("{path}{separator}design"), &[], "").await
+}
+
 async fn chain_of_three(browser: &mut http::Browser, handle: &Handle, slug: &str) -> String {
     let path = format!("{handle}/{slug}");
     for i in 1..=3 {
@@ -132,9 +140,9 @@ async fn chain_of_three(browser: &mut http::Browser, handle: &Handle, slug: &str
             Some(format!("/{handle}/{slug}").as_str())
         );
     }
-    let (status, body) = http::get(browser.addr(), &format!("/{handle}/{slug}")).await;
-    assert_eq!(status, 200, "{body}");
-    body
+    let page = design_page(browser.addr(), &format!("/{handle}/{slug}")).await;
+    assert_eq!(page.status, 200, "{}", page.body);
+    page.body
 }
 
 #[tokio::test]
@@ -222,7 +230,7 @@ async fn the_branch_and_revision_urls_resolve_and_an_unreached_revision_is_404()
     let hashes = linked_revisions(&history.body, &handle, "urls");
     let (third, first) = (&hashes[0], &hashes[2]);
 
-    let at_branch = http::request(addr, "GET", &format!("/{handle}/urls/b/main"), &[], "").await;
+    let at_branch = design_page(addr, &format!("/{handle}/urls/b/main")).await;
     assert_eq!(at_branch.status, 200, "{}", at_branch.body);
     assert_eq!(
         at_branch.body, page,
@@ -233,7 +241,7 @@ async fn the_branch_and_revision_urls_resolve_and_an_unreached_revision_is_404()
         "the head is the third: {page}"
     );
 
-    let at_first = http::request(addr, "GET", &format!("/{handle}/urls/r/{first}"), &[], "").await;
+    let at_first = design_page(addr, &format!("/{handle}/urls/r/{first}")).await;
     assert_eq!(at_first.status, 200, "{}", at_first.body);
     let body = &at_first.body;
     assert!(body.contains(&format!(r#"title="{first}""#)), "{body}");
@@ -271,8 +279,8 @@ async fn the_branch_and_revision_urls_resolve_and_an_unreached_revision_is_404()
     let foreign = &theirs[0];
     let (status, _) = http::get(addr, &format!("/{handle}/urls/r/{foreign}")).await;
     assert_eq!(status, 404, "a revision the design does not reach");
-    let (status, _) = http::get(addr, &format!("/{other_handle}/urls/r/{foreign}")).await;
-    assert_eq!(status, 200, "but its own design reaches it");
+    let reached = design_page(addr, &format!("/{other_handle}/urls/r/{foreign}")).await;
+    assert_eq!(reached.status, 200, "but its own design reaches it");
     let (status, _) = http::get(addr, &format!("/{handle}/urls/r/not-a-hash")).await;
     assert_eq!(status, 404);
     let (status, _) = http::get(addr, &format!("/{handle}/urls/r/{}", "0".repeat(64))).await;
@@ -346,14 +354,7 @@ async fn the_form_pushes_to_the_selected_branch_or_a_new_one_and_refuses_a_taken
         Some(format!("/{handle}/branchy/b/experiment").as_str()),
         "the browser goes to the new branch's head"
     );
-    let at_branch = http::request(
-        addr,
-        "GET",
-        &format!("/{handle}/branchy/b/experiment"),
-        &[],
-        "",
-    )
-    .await;
+    let at_branch = design_page(addr, &format!("/{handle}/branchy/b/experiment")).await;
     assert_eq!(at_branch.status, 200, "{}", at_branch.body);
     assert!(at_branch.body.contains("on a branch"), "{}", at_branch.body);
     assert!(
@@ -521,7 +522,7 @@ async fn a_link_from_a_branch_keeps_its_context_and_the_banner_names_that_branch
 
     // Followed, the link opens in the branch's context, with the banner
     // naming the branch; without the hint the shared root is main's.
-    let hinted = http::request(addr, "GET", &format!("/{handle}/ctx/r/{a}?b=side"), &[], "").await;
+    let hinted = design_page(addr, &format!("/{handle}/ctx/r/{a}?b=side")).await;
     assert_eq!(hinted.status, 200, "{}", hinted.body);
     assert!(
         hinted
@@ -539,21 +540,14 @@ async fn a_link_from_a_branch_keeps_its_context_and_the_banner_names_that_branch
         hinted.body
     );
     assert_design_links(&hinted.body, &handle, "ctx");
-    let bare = http::request(addr, "GET", &format!("/{handle}/ctx/r/{root}"), &[], "").await;
+    let bare = design_page(addr, &format!("/{handle}/ctx/r/{root}")).await;
     assert!(
         bare.body
             .contains("This is rev 1 of main, 2 behind the head."),
         "{}",
         bare.body
     );
-    let hinted_root = http::request(
-        addr,
-        "GET",
-        &format!("/{handle}/ctx/r/{root}?b=side"),
-        &[],
-        "",
-    )
-    .await;
+    let hinted_root = design_page(addr, &format!("/{handle}/ctx/r/{root}?b=side")).await;
     assert!(
         hinted_root
             .body
@@ -561,14 +555,7 @@ async fn a_link_from_a_branch_keeps_its_context_and_the_banner_names_that_branch
         "{}",
         hinted_root.body
     );
-    let wrong_hint = http::request(
-        addr,
-        "GET",
-        &format!("/{handle}/ctx/r/{root}?b=nothing"),
-        &[],
-        "",
-    )
-    .await;
+    let wrong_hint = design_page(addr, &format!("/{handle}/ctx/r/{root}?b=nothing")).await;
     assert_eq!(wrong_hint.status, 200);
     assert!(
         wrong_hint.body.contains("rev 1 of main"),

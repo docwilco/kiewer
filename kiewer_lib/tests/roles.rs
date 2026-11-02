@@ -221,7 +221,7 @@ async fn a_push_to_someone_elses_design_needs_the_collaborator_role(
     assert_eq!(pushed.status, status, "{}", pushed.body);
     if status == 303 {
         assert_eq!(pushed.header("location"), Some(format!("/{path}").as_str()));
-        let page = http::request(addr, "GET", &format!("/{path}"), &[], "").await;
+        let page = http::request(addr, "GET", &format!("/{path}?design"), &[], "").await;
         assert!(page.body.contains("another sheet"), "{}", page.body);
         assert!(
             page.body.contains(member_handle.as_str()),
@@ -593,7 +593,7 @@ async fn visibility_and_transfer_are_the_owners(granted: Option<Role>, status: u
         .post_form(&format!("{url}/visibility"), "visibility=unlisted")
         .await;
     assert_eq!(unlisted.status, status, "{}", unlisted.body);
-    let page = http::request(addr, "GET", &design_path, &[], "").await;
+    let page = http::request(addr, "GET", &format!("{design_path}?design"), &[], "").await;
     assert_eq!(page.status, 200, "an unlisted design opens by its link");
     let expected = if status == 303 { "unlisted" } else { "public" };
     assert!(
@@ -629,7 +629,7 @@ async fn visibility_and_transfer_are_the_owners(granted: Option<Role>, status: u
                 (owner_handle.to_string(), Role::Admin)
             ]
         );
-        let moved = http::request(addr, "GET", &format!("/{heir}/team"), &[], "").await;
+        let moved = http::request(addr, "GET", &format!("/{heir}/team?design"), &[], "").await;
         assert_eq!(moved.status, 200, "the design is at the heir's URL");
         let old = http::request(addr, "GET", &design_path, &[], "").await;
         assert_eq!(old.status, 404);
@@ -715,7 +715,7 @@ async fn the_home_page_and_a_persons_page_list_public_designs_and_never_unlisted
         own.body
     );
 
-    let opened = http::request(addr, "GET", &format!("/{handle}/hidden"), &[], "").await;
+    let opened = http::request(addr, "GET", &format!("/{handle}/hidden?design"), &[], "").await;
     assert_eq!(opened.status, 200, "an unlisted design opens by its link");
 
     // A person with a handle and nothing uploaded has a page too.

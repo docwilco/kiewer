@@ -165,7 +165,7 @@ impl Tessellator {
 }
 
 /// `value`, or `fallback` when the file wrote 0 for "the default".
-fn default(value: f64, fallback: f64) -> f64 {
+pub(crate) fn default(value: f64, fallback: f64) -> f64 {
     if value > 0.0 { value } else { fallback }
 }
 
@@ -697,7 +697,7 @@ impl Tessellator {
                     }
                 }
                 SheetItem::Pin { symbol, unit, pin } => {
-                    if let Some((placed, pin)) = sheet_pin_of(sheet, symbol, unit, pin)
+                    if let Some((placed, pin)) = symbol_pin_of(sheet, symbol, unit, pin)
                         && !pin.hidden
                     {
                         layers.pin_line(pin, &placed.frame(), &mut None);
@@ -719,7 +719,7 @@ impl Tessellator {
 }
 
 /// The placed symbol and the library pin a pin item names.
-fn sheet_pin_of(sheet: &Sheet, symbol: usize, unit: usize, pin: usize) -> Option<(&Symbol, &Pin)> {
+fn symbol_pin_of(sheet: &Sheet, symbol: usize, unit: usize, pin: usize) -> Option<(&Symbol, &Pin)> {
     let placed = sheet.symbols.get(symbol)?;
     let library = sheet.library_symbol(placed)?;
     Some((placed, library.units.get(unit)?.pins.get(pin)?))

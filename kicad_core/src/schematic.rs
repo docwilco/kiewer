@@ -10,9 +10,9 @@
 //! holds complete symbols.
 
 pub mod connect;
-pub mod hierarchy;
 pub mod hit;
 pub mod model;
+pub mod sheet_tree;
 
 use std::collections::BTreeMap;
 

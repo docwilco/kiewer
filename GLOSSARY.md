@@ -176,7 +176,7 @@ _Avoid_: hierarchical sheet, subsheet
 
 **Sheet tree**:
 Every sheet of a schematic hung below the root through the sheet symbols that stand for it; a file used under two sheet symbols is two places in the tree.
-_Avoid_: hierarchy (KiCad's word for the same thing, kept out of the code), sheet list
+_Avoid_: hierarchy (KiCad's word for the same thing)
 
 **Sheet path**:
 What names one place in the sheet tree: the sheet symbols' names from the root down (`/power/reg`), a sibling's uuid where two share a name. Carried in the schematic page's URL fragment as `sheet=power/reg`; the root is no `sheet` key at all.
@@ -184,10 +184,10 @@ _Avoid_: KiCad's uuid path (`/uuid/uuid`), breadcrumb (how the path is shown)
 
 **Sheet panel**:
 The schematic page's list of the sheet tree, one row per sheet, where a click shows that sheet; the other way in is a click on a sheet symbol in the canvas.
-_Avoid_: sheet list, navigator, hierarchy navigator (KiCad's name)
+_Avoid_: navigator, hierarchy navigator (KiCad's name)
 
 **Connectivity**:
-Which wires, junctions, labels, pins and sheet pins of one sheet are one net, and what each net is called, by KiCad's connection rules without its electrical rules check. Per sheet: a global or hierarchical name is the same net on every sheet it appears on, and that is as far as the join goes.
+Which wires, junctions, labels, pins and sheet pins of one sheet are one net, and what each net is called, from the connections the drawing shows, without KiCad's electrical rules check. Per sheet: a global or hierarchical name is the same net on every sheet it appears on, and that is as far as the join goes.
 _Avoid_: netlist (KiCad's exported file), ERC
 
 **Library symbol**:

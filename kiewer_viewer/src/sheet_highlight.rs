@@ -320,7 +320,7 @@ mod tests {
 
     const ROOT: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../kicad_core/tests/fixtures/hierarchy/hier.kicad_sch"
+        "/../kicad_core/tests/fixtures/sheet_tree/hier.kicad_sch"
     );
     const HAND_OFF: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),

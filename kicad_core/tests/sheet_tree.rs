@@ -1,5 +1,5 @@
 //! The sheet tree of a hierarchical schematic (docs/v1-scope.md,
-//! Schematic): the fixture under `tests/fixtures/hierarchy` is a root
+//! Schematic): the fixture under `tests/fixtures/sheet_tree` is a root
 //! with two sheet symbols, `power` beside it and `io` in a subfolder,
 //! and `power` holds a third, `reg`, that reuses `io`'s file; the tree,
 //! the sheet paths that name its nodes, and the fragment they travel in.
@@ -8,11 +8,11 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use kicad_core::parse_schematic;
-use kicad_core::schematic::hierarchy::{SheetNode, SheetPath, build};
 use kicad_core::schematic::model::Sheet;
+use kicad_core::schematic::sheet_tree::{SheetNode, SheetPath, build};
 use test_case::test_case;
 
-const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hierarchy");
+const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sheet_tree");
 
 /// The fixture's sheets by their path in the revision's tree.
 fn sheets() -> &'static BTreeMap<String, Sheet> {
@@ -37,7 +37,7 @@ fn tree() -> &'static SheetNode {
 }
 
 #[test]
-fn the_parser_keeps_the_uuids_the_hierarchy_is_named_by() {
+fn the_parser_keeps_the_uuids_the_sheet_tree_is_named_by() {
     let root = sheets().get("hier.kicad_sch").expect("the root");
     assert_eq!(
         root.uuid.as_deref(),

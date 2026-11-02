@@ -1,7 +1,7 @@
 //! The schematic page through a real listener: the hand-off sheet at
 //! `/schematic`, its file at a fixed URL, and a design's sheets at
 //! `/{handle}/{slug}/schematic` with the sheet tree in the panel. The
-//! hierarchy fixture of `kicad_core` uploaded as a design with no board
+//! sheet tree fixture of `kicad_core` uploaded as a design with no board
 //! shows the tree, and its design page (the base, branch and revision
 //! forms) sends the browser to the schematic page. The Postgres tests
 //! skip without `DATABASE_URL`, like `tests/db.rs`.
@@ -22,17 +22,18 @@ use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
 use sqlx::PgPool;
+use test_case::test_case;
 
 const SCHEMATIC_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../viewer-drop/board/midi8knob.kicad_sch"
 );
 
-/// The hierarchy fixture: a root, a child beside it, a child in a
+/// The sheet tree fixture: a root, a child beside it, a child in a
 /// subfolder that the first child reuses under a third sheet symbol.
-const ROOT: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/hierarchy/hier.kicad_sch");
-const POWER: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/hierarchy/power.kicad_sch");
-const IO: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/hierarchy/sub/io.kicad_sch");
+const ROOT: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/sheet_tree/hier.kicad_sch");
+const POWER: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/sheet_tree/power.kicad_sch");
+const IO: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/sheet_tree/sub/io.kicad_sch");
 
 fn state(db: PgPool, dir: &TempDir) -> AppState {
     AppState {
@@ -125,22 +126,21 @@ async fn the_sheet_is_served_as_text_from_the_repo_file() {
     assert_eq!(response.body.len(), file.len());
 }
 
+#[test_case("/Not%20A%20Handle/x/schematic"; "the base page")]
+#[test_case("/Not%20A%20Handle/x/b/main/schematic"; "the branch page")]
+#[test_case("/Not%20A%20Handle/x/r/0000/schematic"; "the revision page")]
+#[test_case("/a/b/b/Not%20A%20Branch/schematic"; "a branch that is no branch name")]
+#[test_case("/a/b/r/nothex/schematic"; "a revision that is no hash")]
 #[tokio::test]
-async fn a_design_path_that_is_no_handle_and_slug_is_not_found_before_any_lookup() {
+async fn a_path_that_names_no_handle_slug_branch_or_hash_is_not_found_before_any_lookup(
+    path: &str,
+) {
     // The pool reaches nothing: a 404 here proves the name check comes
     // first, as on the design page.
     let (addr, _dir) = start().await;
-    for path in [
-        "/Not%20A%20Handle/x/schematic",
-        "/Not%20A%20Handle/x/b/main/schematic",
-        "/Not%20A%20Handle/x/r/0000/schematic",
-        "/a/b/b/Not%20A%20Branch/schematic",
-        "/a/b/r/nothex/schematic",
-    ] {
-        let (status, body) = http::get(addr, path).await;
-        assert_eq!(status, 404, "{path}: {body}");
-        assert!(body.contains("no such"), "{path}: {body}");
-    }
+    let (status, body) = http::get(addr, path).await;
+    assert_eq!(status, 404, "{path}: {body}");
+    assert!(body.contains("no such"), "{path}: {body}");
 }
 
 /// A person with a handle and a live session: the browser carries the
@@ -211,8 +211,10 @@ fn assert_sheet_panel(body: &str, design_path: &str) {
         "one file, two rows: {body}"
     );
     assert!(
-        body.contains(&format!(r#"<a href="{design_path}">board</a>"#)),
-        "back to the design page: {body}"
+        body.contains(&format!(
+            r#"<a href="{design_path}?design">design page</a>"#
+        )),
+        "back to the design page, asked to stay: {body}"
     );
 }
 
@@ -230,7 +232,7 @@ async fn a_schematic_only_design_lists_its_sheet_tree_and_opens_on_it() {
             &[
                 Part::text("design", ""),
                 Part::text("name", ""),
-                Part::text("message", "the hierarchy fixture"),
+                Part::text("message", "the sheet tree fixture"),
                 Part::file("hier.kicad_sch", ROOT),
                 Part::file("power.kicad_sch", POWER),
                 Part::file("sub/io.kicad_sch", IO),
@@ -276,11 +278,35 @@ async fn a_schematic_only_design_lists_its_sheet_tree_and_opens_on_it() {
     assert_eq!(page.status, 200, "{}", page.body);
     assert!(page.body.contains("sheet=power/reg"), "{}", page.body);
     assert!(
-        page.body
-            .contains(&format!(r#"<a href="{design_path}/r/{hash}">board</a>"#)),
+        page.body.contains(&format!(
+            r#"<a href="{design_path}/r/{hash}?design">design page</a>"#
+        )),
         "{}",
         page.body
     );
+    // The design page itself, asked to stay, still shows the revision
+    // with its files and links, for the settings and the upload.
+    let stayed = http::request(addr, "GET", &format!("{design_path}?design"), &[], "").await;
+    assert_eq!(stayed.status, 200, "{}", stayed.body);
+    assert!(
+        stayed.body.contains("no board in this revision"),
+        "{}",
+        stayed.body
+    );
+    assert!(
+        stayed.body.contains("the sheet tree fixture"),
+        "{}",
+        stayed.body
+    );
+    let stayed = http::request(
+        addr,
+        "GET",
+        &format!("{design_path}/r/{hash}?design"),
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(stayed.status, 200, "{}", stayed.body);
     let (status, _) = http::get(addr, &format!("{design_path}/b/nope/schematic")).await;
     assert_eq!(status, 404, "a branch the design lacks");
     let (status, _) = http::get(addr, &format!("{design_path}/schematic/extra")).await;

@@ -19,7 +19,7 @@ use std::fmt;
 
 use super::model::Sheet;
 
-/// How deep the tree is followed: a hierarchy deeper than this is a
+/// How deep the tree is followed: a sheet tree deeper than this is a
 /// loop the uuid check missed, not a design.
 const MAX_DEPTH: usize = 32;
 

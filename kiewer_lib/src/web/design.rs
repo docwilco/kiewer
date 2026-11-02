@@ -152,8 +152,9 @@ pub(super) fn design_page(
 pub(super) async fn page(
     State(state): State<AppState>,
     Path((handle, slug)): Path<(String, String)>,
+    Query(linked): Query<history::Linked>,
 ) -> Result<Response> {
-    show(&state, &handle, &slug, At::Default).await
+    show(&state, &handle, &slug, At::Default, linked.stays()).await
 }
 
 /// The design `/{handle}/{slug}` shown at `at`, as [`design_page`]
@@ -167,6 +168,7 @@ pub(super) async fn show(
     handle: &str,
     slug: &str,
     at: At<'_>,
+    stay: bool,
 ) -> Result<Response> {
     let not_found = || (StatusCode::NOT_FOUND, "no such design\n").into_response();
     let (Ok(handle), Ok(slug)) = (handle.parse::<Handle>(), slug.parse::<Slug>()) else {
@@ -187,8 +189,9 @@ pub(super) async fn show(
         });
     };
     // A revision with no board and a schematic opens on its first sheet:
-    // the schematic page at the same branch or revision.
-    if shown.opens_on_schematic() {
+    // the schematic page at the same branch or revision. `?design` keeps
+    // this page, which is where its settings and history links are.
+    if shown.opens_on_schematic() && !stay {
         let sheet = schematic::url_at(
             &handle,
             &shown.design.slug,

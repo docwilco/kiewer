@@ -15,11 +15,11 @@
 use super::connect::{Connectivity, SheetItem, SheetNetId};
 use super::model::{Sheet, Symbol, SymbolShape};
 use crate::geometry::Bounds;
-use crate::hit::{Shape, grow, overlaps};
+use crate::hit::{Shape, finite, grow, overlaps};
 use crate::model::Point;
 use crate::tessellate::schematic::{
-    DEFAULT_JUNCTION_DIAMETER, DEFAULT_LINE_WIDTH, DEFAULT_WIRE_WIDTH, label_outline, pin_ends,
-    sheet_pin_flag,
+    DEFAULT_JUNCTION_DIAMETER, DEFAULT_LINE_WIDTH, DEFAULT_WIRE_WIDTH, default, label_outline,
+    pin_ends, sheet_pin_flag,
 };
 
 /// What an item is, in the order a query prefers them.
@@ -114,7 +114,7 @@ impl SheetIndex {
 
     fn push(&mut self, item: SheetItem, net: SheetNetId, shape: Shape) {
         let Some(bounds) = shape.bounds() else { return };
-        if !bounds.min.x.is_finite() || !bounds.max.y.is_finite() {
+        if !finite(bounds) {
             return;
         }
         self.entries.push(Entry {
@@ -187,7 +187,6 @@ impl SheetIndex {
 /// The shape an item is measured by, as the tessellator draws it;
 /// `None` for an item the sheet lacks or one with no extent.
 fn shape_of(sheet: &Sheet, item: SheetItem) -> Option<Shape> {
-    let default = |value: f64, fallback: f64| if value > 0.0 { value } else { fallback };
     match item {
         SheetItem::Wire(index) => {
             let wire = sheet.wires.get(index)?;
@@ -211,6 +210,11 @@ fn shape_of(sheet: &Sheet, item: SheetItem) -> Option<Shape> {
             let placed = sheet.symbols.get(symbol)?;
             let library = sheet.library_symbol(placed)?;
             let pin = library.units.get(unit)?.pins.get(pin)?;
+            // An invisible power pin is on a net but nowhere to point
+            // at; a power symbol's hidden pin sits where its wire ends.
+            if pin.hidden && !library.power {
+                return None;
+            }
             let (pos, end) = pin_ends(pin, &placed.frame());
             Some(Shape::Stroke {
                 points: vec![pos, end],

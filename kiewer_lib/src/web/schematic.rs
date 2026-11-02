@@ -5,7 +5,7 @@
 //! (and under `/b/{branch}` and `/r/{hash}`, as the design page has
 //! them) the sheets are the revision's: the server parses every
 //! `.kicad_sch` of the revision, builds the tree below the root sheet
-//! (`kicad_core::schematic::hierarchy`) and renders one row per node
+//! (`kicad_core::schematic::sheet_tree`) and renders one row per node
 //! with its sheet path, its fragment and its blob's URL. The page keeps
 //! the sheet path in the URL fragment (`#sheet=power/reg`), fetches that
 //! node's blob and calls `load_schematic`; a click on a sheet symbol in
@@ -21,12 +21,12 @@ use axum::http::StatusCode;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
-use kicad_core::schematic::hierarchy::{self, SheetNode, SheetPath};
 use kicad_core::schematic::model::Sheet;
-use serde::Deserialize;
+use kicad_core::schematic::sheet_tree::{self, SheetNode, SheetPath};
 
+use super::history::{self, Linked};
 use super::viewer::{NOT_BUILT, embedded};
-use super::{AppState, blob, history};
+use super::{AppState, blob};
 use crate::account::Handle;
 use crate::blob::blocking;
 use crate::design::{self, At, BranchName, DesignHead, Slug};
@@ -151,21 +151,29 @@ pub struct Page {
     /// The sheet panel, the root sheet first; empty for a revision
     /// without a schematic.
     pub sheets: Vec<SheetView>,
-    /// The design's board page, when there is one to go back to.
-    pub design_url: Option<String>,
+    /// The way back to the design, when there is one.
+    pub back: Option<Back>,
+}
+
+/// The header's link back from the schematic page: the design's board
+/// page, or the design page itself for a revision without a board.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Back {
+    pub url: String,
+    pub label: &'static str,
 }
 
 impl Page {
     /// A page for `title` with the viewer's build state filled in.
     #[must_use]
-    pub fn new(title: String, sheets: Vec<SheetView>, design_url: Option<String>) -> Self {
+    pub fn new(title: String, sheets: Vec<SheetView>, back: Option<Back>) -> Self {
         Self {
             build: crate::build::line(),
             embedded: embedded(),
             not_built: NOT_BUILT.trim_end(),
             title,
             sheets,
-            design_url,
+            back,
         }
     }
 }
@@ -226,7 +234,7 @@ async fn sheets_of(state: &AppState, shown: &DesignHead) -> Result<Vec<SheetView
                 Err(error) => tracing::warn!(%path, %error, "a stored sheet does not parse"),
             }
         }
-        Ok(hierarchy::build(&root_path, &sheets))
+        Ok(sheet_tree::build(&root_path, &sheets))
     })
     .await?;
     Ok(tree.map_or_else(Vec::new, |tree| {
@@ -261,7 +269,22 @@ async fn show(state: &AppState, handle: &str, slug: &str, at: At<'_>) -> Result<
             &shown.branch,
         ),
     };
-    let page = Page::new(shown.design.name, sheets, Some(design_url));
+    // The way back: the board, or for a revision without one the design
+    // page itself, asked to stay (it would otherwise send the browser
+    // straight here again).
+    let back = if shown.board().is_some() {
+        Back {
+            url: design_url,
+            label: "board",
+        }
+    } else {
+        let separator = if design_url.contains('?') { '&' } else { '?' };
+        Back {
+            url: format!("{design_url}{separator}design"),
+            label: "design page",
+        }
+    };
+    let page = Page::new(shown.design.name, sheets, Some(back));
     Ok(Html(page.render()?).into_response())
 }
 
@@ -283,14 +306,6 @@ async fn at_branch(
         return Ok((StatusCode::NOT_FOUND, "no such branch\n").into_response());
     };
     show(&state, &handle, &slug, At::Branch(&branch)).await
-}
-
-/// The query a revision URL may carry: the branch whose page linked it,
-/// as on the design page.
-#[derive(Debug, Default, Deserialize)]
-struct Linked {
-    #[serde(default)]
-    b: Option<String>,
 }
 
 /// `GET /{handle}/{slug}/r/{hash}/schematic`: one revision, when the
@@ -340,7 +355,7 @@ mod tests {
                 kicad_core::parse_schematic(text).expect("parses"),
             );
         }
-        let tree = hierarchy::build("top.kicad_sch", &sheets).expect("the root");
+        let tree = sheet_tree::build("top.kicad_sch", &sheets).expect("the root");
         let listed = rows(&tree, &|file| Some(format!("/blob/{file}")));
         // Each row as one line: index, parent, symbol, depth, name,
         // path, fragment.

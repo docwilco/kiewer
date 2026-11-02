@@ -1,6 +1,6 @@
 //! Net membership on a sheet (docs/v1-scope.md, Net interaction): which
 //! wires, junctions, labels, pins and sheet pins belong together, and
-//! what the net is called, on the hierarchy fixture and the hand-off
+//! what the net is called, on the sheet tree fixture and the hand-off
 //! sheet.
 
 use std::sync::OnceLock;
@@ -11,7 +11,7 @@ use kicad_core::schematic::connect::{Connectivity, SheetItem, net_pins};
 use kicad_core::schematic::model::Sheet;
 use test_case::test_case;
 
-const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hierarchy");
+const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sheet_tree");
 const HAND_OFF: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../viewer-drop/board/midi8knob.kicad_sch"
@@ -148,6 +148,68 @@ fn the_child_sheets_name_their_nets_by_hierarchical_and_global_labels() {
 }
 
 #[test]
+fn an_invisible_power_pin_joins_the_net_of_its_name_without_a_wire() {
+    // U1 has a hidden power_in pin VCC and a drawn pin; a VCC power
+    // symbol stands elsewhere with no wire between them.
+    let source = r##"(kicad_sch (version 20250114) (generator "eeschema")
+      (lib_symbols
+        (symbol "Logic:U" (pin_names (offset 0.5))
+          (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+          (symbol "U_0_1" (rectangle (start -2.54 -2.54) (end 2.54 2.54) (stroke (width 0.254) (type default)) (fill (type none))))
+          (symbol "U_1_1"
+            (pin power_in line (at 0 5.08 270) (length 2.54) (hide yes) (name "VCC" (effects (font (size 1.27 1.27)))) (number "14" (effects (font (size 1.27 1.27)))))
+            (pin input line (at -5.08 0 0) (length 2.54) (name "A" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))))
+        (symbol "power:VCC" (power) (pin_names (offset 0) (hide yes))
+          (property "Reference" "#PWR" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+          (property "Value" "VCC" (at 0 0 0) (effects (font (size 1.27 1.27))))
+          (symbol "VCC_1_1"
+            (pin power_in line (at 0 0 90) (length 0) (hide yes) (name "VCC" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27))))))))
+      (wire (pts (xy 50 50) (xy 60 50)) (stroke (width 0) (type default)) (uuid "w"))
+      (symbol (lib_id "Logic:U") (at 20 20 0) (unit 1) (uuid "u")
+        (property "Reference" "U1" (at 20 15 0) (effects (font (size 1.27 1.27)))))
+      (symbol (lib_id "power:VCC") (at 50 50 0) (unit 1) (uuid "p")
+        (property "Reference" "#PWR1" (at 50 50 0) (effects (font (size 1.27 1.27)) (hide yes)))
+        (property "Value" "VCC" (at 50 47 0) (effects (font (size 1.27 1.27))))))"##;
+    let sheet = parse_schematic(source).expect("parses");
+    let connectivity = Connectivity::build(&sheet);
+    let hidden = SheetItem::Pin {
+        symbol: 0,
+        unit: 1,
+        pin: 0,
+    };
+    let power = SheetItem::Pin {
+        symbol: 1,
+        unit: 0,
+        pin: 0,
+    };
+    assert_eq!(name_of(&connectivity, hidden), Some("VCC"));
+    assert_eq!(connectivity.net_of(hidden), connectivity.net_of(power));
+    assert_eq!(
+        connectivity.net_of(SheetItem::Wire(0)),
+        connectivity.net_of(power)
+    );
+    assert_eq!(
+        name_of(
+            &connectivity,
+            SheetItem::Pin {
+                symbol: 0,
+                unit: 1,
+                pin: 1
+            }
+        ),
+        Some("unconnected-(U1-Pad1)"),
+        "the drawn pin is on its own"
+    );
+    let pins = net_pins(
+        &sheet,
+        &connectivity,
+        connectivity.net_of(power).expect("VCC"),
+    );
+    let listed: Vec<&str> = pins.iter().map(|pin| pin.reference.as_str()).collect();
+    assert_eq!(listed, ["#PWR1", "U1"]);
+}
+
+#[test]
 fn a_wire_ending_on_another_wire_joins_it_and_a_crossing_does_not() {
     let source = r#"(kicad_sch (version 20250114) (generator "eeschema") (lib_symbols)
       (wire (pts (xy 0 10) (xy 20 10)) (stroke (width 0) (type default)) (uuid "a"))
@@ -188,12 +250,21 @@ fn the_hand_off_sheet_connects_as_kicad_drew_it() {
         .expect("GND");
     let gnd_pins = net_pins(sheet, connectivity, gnd);
     assert!(gnd_pins.len() > 20, "{}", gnd_pins.len());
+    // Sorted by reference in natural order: the letters, then the number
+    // as a number, so C2 comes before C10 and every C before every R.
+    let split = |reference: &str| {
+        let digits = reference.trim_start_matches(|c: char| !c.is_ascii_digit());
+        let letters = &reference[..reference.len() - digits.len()];
+        (letters.to_owned(), digits.parse::<u64>().unwrap_or(0))
+    };
+    let keys: Vec<(String, u64)> = gnd_pins.iter().map(|pin| split(&pin.reference)).collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(keys, sorted, "sorted by reference");
     assert!(
-        gnd_pins
-            .windows(2)
-            .all(|pair| pair[0].reference <= pair[1].reference
-                || pair[0].reference.len() < pair[1].reference.len()),
-        "sorted by reference"
+        keys.iter().any(|(letters, _)| letters == "C")
+            && keys.iter().any(|(letters, _)| letters == "U"),
+        "capacitors and ICs among them: {keys:?}"
     );
     // R5 at (196.85, 140.97): pin 1 at (196.85, 138.43) ends a wire,
     // pin 2 at (196.85, 143.51) sits on a junction between two wires.

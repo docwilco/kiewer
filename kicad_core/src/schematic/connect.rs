@@ -1,13 +1,16 @@
 //! Net membership on one sheet (docs/v1-scope.md, Net interaction):
 //! which wires, junctions, labels, pins and sheet pins are one net, and
-//! what it is called. KiCad's connection rules without its electrical
-//! rules check: two items whose connection points coincide are joined
-//! (a wire's vertices, a junction, a label's anchor, a pin's end, a
-//! sheet pin's anchor), and a connection point on the body of a wire
-//! joins that wire, so a wire ending on another wire's middle connects
-//! and two wires crossing do not. Hidden pins are left out except on a
-//! power symbol, whose hidden pin is what names its net. Buses and bus
-//! entries carry several nets and are not followed.
+//! what it is called: the connections the drawing shows, without KiCad's
+//! electrical rules check. Two items whose connection points coincide
+//! are joined (a wire's vertices, a junction, a label's anchor, a pin's
+//! end, a sheet pin's anchor), and a connection point on the body of a
+//! wire joins that wire, so a wire ending on another wire's middle
+//! connects (KiCad draws a junction there when it draws the T) and two
+//! wires crossing do not. Hidden pins are left out except a power
+//! symbol's, which is what names its net, and an ordinary symbol's
+//! hidden `power_in` pin, which joins the net of its name without a wire
+//! ([`connects`]). Buses and bus entries carry several nets and are not
+//! followed.
 //!
 //! A net's name follows KiCad's driver priority: a global label, then a
 //! power symbol's value through a `power_in` pin (GND, +3V3), then one
@@ -24,8 +27,8 @@
 
 use std::collections::BTreeMap;
 
-use super::model::{LabelKind, Pin, PinElectrical, Sheet, Symbol};
-use crate::hit::natural_key;
+use super::model::{LabelKind, LibrarySymbol, Pin, PinElectrical, Sheet, Symbol, Wire};
+use crate::hit::{natural_key, segment_distance};
 use crate::model::Point;
 
 /// Two connection points closer than this, in millimetres, are one.
@@ -83,18 +86,63 @@ pub struct Connectivity {
     of: BTreeMap<SheetItem, SheetNetId>,
 }
 
+/// What names a net, in KiCad's driver priority: a stronger kind comes
+/// first, and among two of one kind the name that sorts first wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DriverKind {
+    /// A global label.
+    GlobalLabel,
+    /// A power symbol's `power_in` pin: GND, +3V3.
+    GlobalPower,
+    /// A power symbol's `power_out` pin: a power flag.
+    LocalPower,
+    /// A local label.
+    LocalLabel,
+    /// A hierarchical label.
+    HierarchicalLabel,
+    /// A sheet pin.
+    SheetPin,
+}
+
+/// The namespace a driver's name joins within: a name shared by two
+/// drivers of one scope on the sheet makes them one net.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Scope {
+    /// Global labels and global power pins, which KiCad joins across the
+    /// whole schematic.
+    Global,
+    /// Local labels, joined within the sheet.
+    Local,
+    /// Hierarchical labels, joined within the sheet (they all reach the
+    /// same sheet pin of the parent).
+    Hierarchical,
+}
+
+impl DriverKind {
+    /// The scope the kind joins by name within; `None` for a power flag
+    /// and a sheet pin, whose names join nothing.
+    fn scope(self) -> Option<Scope> {
+        match self {
+            DriverKind::GlobalLabel | DriverKind::GlobalPower => Some(Scope::Global),
+            DriverKind::LocalLabel => Some(Scope::Local),
+            DriverKind::HierarchicalLabel => Some(Scope::Hierarchical),
+            DriverKind::LocalPower | DriverKind::SheetPin => None,
+        }
+    }
+}
+
 /// The name a driver gives its net and how strongly, lower first.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Driver {
-    priority: u8,
+    kind: DriverKind,
     key: Vec<(u64, String)>,
     name: String,
 }
 
 impl Driver {
-    fn new(priority: u8, name: String) -> Self {
+    fn new(kind: DriverKind, name: String) -> Self {
         Self {
-            priority,
+            kind,
             key: natural_key(&name),
             name,
         }
@@ -105,6 +153,15 @@ impl Driver {
 #[must_use]
 pub fn pin_position(symbol: &Symbol, pin: &Pin) -> Point {
     symbol.frame().apply(pin.at)
+}
+
+/// Whether `pin` of `library` takes part in a net: every drawn pin, a
+/// power symbol's hidden pin (what names its net), and an ordinary
+/// symbol's hidden `power_in` pin, which KiCad joins to the net of its
+/// name without a wire (an invisible power pin).
+#[must_use]
+pub fn connects(pin: &Pin, library: &LibrarySymbol) -> bool {
+    !pin.hidden || library.power || pin.electrical == PinElectrical::PowerIn
 }
 
 /// Every pin the net rules see: the drawn pins, and the hidden pins of
@@ -120,7 +177,7 @@ fn connecting_pins(sheet: &Sheet) -> Vec<(SheetItem, Point)> {
                 continue;
             }
             for (pin_index, pin) in unit.pins.iter().enumerate() {
-                if pin.hidden && !library.power {
+                if !connects(pin, library) {
                     continue;
                 }
                 pins.push((
@@ -191,11 +248,6 @@ fn close(a: Point, b: Point) -> bool {
     (a.x - b.x).abs() <= EPSILON && (a.y - b.y).abs() <= EPSILON
 }
 
-/// How far `point` is from the segment `from`-`to`.
-fn segment_distance(point: Point, from: Point, to: Point) -> f64 {
-    crate::hit::segment_distance(point, from, to)
-}
-
 impl Connectivity {
     /// The nets of `sheet`.
     #[must_use]
@@ -207,9 +259,13 @@ impl Connectivity {
             let index = items.len();
             items.push(item);
             points.extend(at.iter().map(|&p| (index, p)));
+            index
         };
+        // Each wire's position in `items`, for the joins along its body.
+        let mut wire_items: Vec<(usize, &Wire)> = Vec::new();
         for (index, wire) in sheet.wires.iter().enumerate() {
-            push(SheetItem::Wire(index), &wire.points, &mut items);
+            let item = push(SheetItem::Wire(index), &wire.points, &mut items);
+            wire_items.push((item, wire));
         }
         for (index, junction) in sheet.junctions.iter().enumerate() {
             push(SheetItem::Junction(index), &[junction.at], &mut items);
@@ -256,24 +312,24 @@ impl Connectivity {
         }
         // A connection point on a wire's body joins the wire.
         for &(index, point) in &points {
-            for (wire_index, wire) in sheet.wires.iter().enumerate() {
+            for &(wire_item, wire) in &wire_items {
                 let on_wire = wire.points.windows(2).any(
                     |pair| matches!(pair, [a, b] if segment_distance(point, *a, *b) <= EPSILON),
                 );
                 if on_wire {
-                    joins.join(index, wire_index);
+                    joins.join(index, wire_item);
                 }
             }
         }
         // A name joins what no wire does: every global label and power
         // symbol of one name is one net, and so is every local label of
         // one name on this sheet, and every hierarchical label.
-        let mut by_name: BTreeMap<(u8, String), usize> = BTreeMap::new();
+        let mut by_name: BTreeMap<(Scope, String), usize> = BTreeMap::new();
         for (index, &item) in items.iter().enumerate() {
             let Some(driver) = driver_of(sheet, item) else {
                 continue;
             };
-            let Some(scope) = driver.scope() else {
+            let Some(scope) = driver.kind.scope() else {
                 continue;
             };
             match by_name.entry((scope, driver.name)) {
@@ -351,20 +407,23 @@ fn driver_of(sheet: &Sheet, item: SheetItem) -> Option<Driver> {
     match item {
         SheetItem::Label(index) => {
             let label = sheet.labels.get(index)?;
-            let priority = match label.kind {
-                LabelKind::Global(_) => Driver::GLOBAL_LABEL,
-                LabelKind::Local => Driver::LOCAL_LABEL,
-                LabelKind::Hierarchical(_) => Driver::HIERARCHICAL_LABEL,
+            let kind = match label.kind {
+                LabelKind::Global(_) => DriverKind::GlobalLabel,
+                LabelKind::Local => DriverKind::LocalLabel,
+                LabelKind::Hierarchical(_) => DriverKind::HierarchicalLabel,
             };
-            Some(Driver::new(priority, label.text.text.clone()))
+            Some(Driver::new(kind, label.text.text.clone()))
         }
         SheetItem::Pin { symbol, unit, pin } => {
             let placed = sheet.symbols.get(symbol)?;
             let library = sheet.library_symbol(placed)?;
-            if !library.power {
-                return None;
-            }
             let pin = library.units.get(unit)?.pins.get(pin)?;
+            if !library.power {
+                // An invisible power pin names its net by its own name,
+                // as a global power pin does.
+                return (pin.hidden && pin.electrical == PinElectrical::PowerIn)
+                    .then(|| Driver::new(DriverKind::GlobalPower, pin.name.clone()));
+            }
             let value = placed
                 .value()
                 .filter(|value| !value.is_empty())
@@ -372,39 +431,18 @@ fn driver_of(sheet: &Sheet, item: SheetItem) -> Option<Driver> {
             // A power symbol's power_in pin (GND, +3V3) names its net
             // everywhere; a power_out one (a power flag) only where it
             // sits, and only when nothing else does.
-            let priority = if pin.electrical == PinElectrical::PowerIn {
-                Driver::GLOBAL_POWER
+            let kind = if pin.electrical == PinElectrical::PowerIn {
+                DriverKind::GlobalPower
             } else {
-                Driver::LOCAL_POWER
+                DriverKind::LocalPower
             };
-            Some(Driver::new(priority, value))
+            Some(Driver::new(kind, value))
         }
         SheetItem::SheetPin { sheet: index, pin } => {
             let pin = sheet.sheet_symbols.get(index)?.pins.get(pin)?;
-            Some(Driver::new(Driver::SHEET_PIN, pin.text.text.clone()))
+            Some(Driver::new(DriverKind::SheetPin, pin.text.text.clone()))
         }
         SheetItem::Wire(_) | SheetItem::Junction(_) => None,
-    }
-}
-
-impl Driver {
-    /// KiCad's driver priorities, strongest first.
-    const GLOBAL_LABEL: u8 = 0;
-    const GLOBAL_POWER: u8 = 1;
-    const LOCAL_POWER: u8 = 2;
-    const LOCAL_LABEL: u8 = 3;
-    const HIERARCHICAL_LABEL: u8 = 4;
-    const SHEET_PIN: u8 = 5;
-
-    /// The namespace a driver's name joins within: global labels and
-    /// global power pins share one, local labels another, hierarchical
-    /// labels a third; a power flag and a sheet pin join nothing.
-    fn scope(&self) -> Option<u8> {
-        match self.priority {
-            Driver::GLOBAL_LABEL | Driver::GLOBAL_POWER => Some(Driver::GLOBAL_LABEL),
-            Driver::LOCAL_LABEL | Driver::HIERARCHICAL_LABEL => Some(self.priority),
-            _ => None,
-        }
     }
 }
 

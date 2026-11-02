@@ -1,5 +1,5 @@
 //! Hit testing on a sheet (docs/v1-scope.md, Net interaction): what is
-//! under a point on the hierarchy fixture's root and on the hand-off
+//! under a point on the sheet tree fixture's root and on the hand-off
 //! sheet, the sheet symbol a click enters, the reference search, and the
 //! net's geometry the highlight draws.
 
@@ -16,7 +16,7 @@ use test_case::test_case;
 
 const ROOT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/hierarchy/hier.kicad_sch"
+    "/tests/fixtures/sheet_tree/hier.kicad_sch"
 );
 const HAND_OFF: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),

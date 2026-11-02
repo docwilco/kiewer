@@ -108,7 +108,7 @@ async fn the_owner_saves_a_description_that_the_page_shows_rendered() {
     let design_path = upload(&mut browser, "Demo board").await;
     assert_eq!(design_path, format!("/{handle}/demo-board"));
 
-    let page = http::request(addr, "GET", &design_path, &[], "").await;
+    let page = http::request(addr, "GET", &format!("{design_path}?design"), &[], "").await;
     assert_eq!(page.status, 200, "{}", page.body);
     assert!(
         page.body.contains(r#"<details id="settings" hidden>"#),
@@ -143,7 +143,7 @@ async fn the_owner_saves_a_description_that_the_page_shows_rendered() {
     assert_eq!(saved.header("location"), Some(design_path.as_str()));
     assert_eq!(saved.header("cache-control"), Some("private, no-store"));
 
-    let page = http::request(addr, "GET", &design_path, &[], "").await;
+    let page = http::request(addr, "GET", &format!("{design_path}?design"), &[], "").await;
     // The rendered description alone: the form's textarea below it
     // echoes the Markdown back, javascript link and all, escaped.
     let (_, rest) = page
@@ -205,7 +205,7 @@ async fn a_stranger_and_another_person_cannot_save() {
     let refused = other.post_form(&settings_path, &body).await;
     assert_eq!(refused.status, 403, "{}", refused.body);
 
-    let page = http::request(addr, "GET", &design_path, &[], "").await;
+    let page = http::request(addr, "GET", &format!("{design_path}?design"), &[], "").await;
     assert!(
         page.body.contains("<title>Guarded - kiewer</title>") && !page.body.contains("mine now"),
         "nothing changed: {}",
@@ -240,7 +240,7 @@ async fn a_moved_slug_redirects_until_a_new_design_takes_it() {
         Some(new_path.as_str()),
         "the browser goes to the new slug"
     );
-    let page = http::request(addr, "GET", &new_path, &[], "").await;
+    let page = http::request(addr, "GET", &format!("{new_path}?design"), &[], "").await;
     assert_eq!(page.status, 200, "{}", page.body);
     assert!(
         page.body.contains("<title>Mover, moved - kiewer</title>"),
@@ -254,7 +254,7 @@ async fn a_moved_slug_redirects_until_a_new_design_takes_it() {
     // A new design named so that its slug is the old one takes it over.
     let reused = upload(&mut browser, "Mover").await;
     assert_eq!(reused, old_path, "the old slug is free for a new design");
-    let page = http::request(addr, "GET", &old_path, &[], "").await;
+    let page = http::request(addr, "GET", &format!("{old_path}?design"), &[], "").await;
     assert_eq!(
         page.status, 200,
         "the new design, no redirect: {}",

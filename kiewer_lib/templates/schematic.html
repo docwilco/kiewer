@@ -46,7 +46,7 @@
 <body>
 <header>
   <h1><a href="/">kiewer</a> / {{ title }} / schematic <span id="sheet-path"></span></h1>
-  {% if let Some(url) = design_url %}<a href="{{ url }}">board</a>{% endif %}
+  {% if let Some(back) = back %}<a href="{{ back.url }}">{{ back.label }}</a>{% endif %}
   <button id="fit" type="button" title="Home">Fit</button>
   <span id="status"></span>
 </header>
@@ -131,7 +131,6 @@ function schedule() {
     frame = 0;
     try { viewer.render(); } catch (e) { fail(e); }
     showZoom();
-    window.dispatchEvent(new Event("kiewer-frame"));
   });
 }
 function showZoom() {
@@ -248,12 +247,20 @@ const sheets = Array.from(document.querySelectorAll("#sheets li")).map(function 
   };
 });
 let current = null;
+// A fragment's segments decoded, so a hand-typed or differently escaped
+// path still names its row; a bad escape is kept as written.
+function segmentsOf(fragment) {
+  return fragment.split("/").filter(Boolean).map(function (segment) {
+    try { return decodeURIComponent(segment); } catch (e) { return segment; }
+  }).join("\u0000");
+}
 function sheetNamed(hash) {
   const pair = String(hash || "").replace(/^#/, "").split("&")
     .map(function (p) { return p.split("="); })
     .find(function (p) { return p[0] === "sheet"; });
-  const fragment = pair ? "sheet=" + pair.slice(1).join("=") : "";
-  return sheets.find(function (s) { return s.fragment === fragment; }) || sheets[0] || null;
+  const wanted = pair ? segmentsOf(pair.slice(1).join("=")) : "";
+  return sheets.find(function (s) { return segmentsOf(s.fragment.replace(/^sheet=/, "")) === wanted; })
+    || sheets[0] || null;
 }
 async function showSheet(entry) {
   if (!viewer || !entry || entry === current) return;
@@ -277,6 +284,8 @@ function enter(symbol) {
   if (!current) return false;
   const child = sheets.find(function (s) { return s.parent === current.index && s.symbol === symbol; });
   if (!child) return false;
+  // A sheet the revision lacks has no page to go to: say so, stay here.
+  if (!child.url) { fail("the sheet " + child.path + " is not in this revision"); return true; }
   window.location.hash = "#" + child.fragment;
   return true;
 }

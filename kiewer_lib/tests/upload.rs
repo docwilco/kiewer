@@ -245,6 +245,15 @@ async fn uploading_the_hand_off_files_makes_a_design_shown_with_the_viewer() {
         "the sheet is the new revision's: {}",
         page.body
     );
+    // The design page stays when asked, with the revision's details.
+    let page = http::request(addr, "GET", &format!("{design_path}?design"), &[], "").await;
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(page.body.contains("schematic only"), "{}", page.body);
+    assert!(
+        page.body.contains("no board in this revision"),
+        "{}",
+        page.body
+    );
     let (listed, parents, heads): (i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM design_revision dr JOIN design d ON d.id = dr.design_id
                  JOIN account a ON a.id = d.owner_id WHERE a.handle = $1),

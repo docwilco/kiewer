@@ -361,7 +361,7 @@ impl Index {
     /// item on no copper layer or with no extent is not indexed.
     fn push(&mut self, item: Item, net: NetId, layers: Vec<LayerId>, shape: Shape) {
         let Some(bounds) = shape.bounds() else { return };
-        if layers.is_empty() || !bounds.min.x.is_finite() || !bounds.max.y.is_finite() {
+        if layers.is_empty() || !finite(bounds) {
             return;
         }
         let index = self.entries.len();
@@ -476,6 +476,14 @@ fn cells_of(bounds: Bounds) -> impl Iterator<Item = (i64, i64)> {
     let (x0, x1) = (cell_of(bounds.min.x), cell_of(bounds.max.x));
     let (y0, y1) = (cell_of(bounds.min.y), cell_of(bounds.max.y));
     (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
+}
+
+/// Whether every side of a box is a number: a shape a crafted file puts
+/// at infinity or NaN has no place in a grid or a scan.
+pub(crate) fn finite(bounds: Bounds) -> bool {
+    [bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y]
+        .iter()
+        .all(|side| side.is_finite())
 }
 
 /// Whether two boxes share any point.
