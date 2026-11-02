@@ -5,6 +5,7 @@
 //! pool and serve a page. A revision is only ever read through a design
 //! (`design_revision`), since a bare hash would be a capability.
 
+use std::fmt;
 use std::str::FromStr;
 
 use sqlx::{PgConnection, PgExecutor, PgPool};
@@ -28,6 +29,65 @@ pub struct DesignId(i64);
 
 /// The branch every design starts with (GLOSSARY, Default branch).
 pub const DEFAULT_BRANCH: &str = "main";
+
+/// A branch's name (GLOSSARY, Branch): ASCII letters, digits, hyphens,
+/// underscores and dots, 1 to 64 characters, not starting with a hyphen or
+/// a dot. One URL segment (`/b/{branch}`), so no slash; typed, so a form
+/// field never reaches a row or a URL unchecked.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BranchName(String);
+
+impl BranchName {
+    /// The longest name.
+    pub const MAX_LEN: usize = 64;
+
+    /// The name as text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// A name read back from its row, taken as it is.
+    pub(crate) fn from_row(text: String) -> Self {
+        Self(text)
+    }
+
+    fn fault(text: &str) -> Option<&'static str> {
+        if text.is_empty() {
+            return Some("is empty");
+        }
+        if text.len() > Self::MAX_LEN {
+            return Some("is longer than 64 characters");
+        }
+        if !text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+        {
+            return Some("may use only letters, digits, hyphens, underscores and dots");
+        }
+        if text.starts_with('-') || text.starts_with('.') {
+            return Some("may not start with a hyphen or a dot");
+        }
+        None
+    }
+}
+
+impl fmt::Display for BranchName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromStr for BranchName {
+    type Err = Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        match Self::fault(text) {
+            None => Ok(Self(text.to_owned())),
+            Some(fault) => Err(Error::Malformed(format!("branch name {text:?} {fault}"))),
+        }
+    }
+}
 
 /// A design as its row has it. The owner is the one person it belongs
 /// to (`roles`: exactly one, since the column is never null); the other
@@ -316,7 +376,8 @@ pub async fn head(
 /// # Errors
 ///
 /// [`Error::Refused`] with [`Refusal::HeadMoved`] when the head is no
-/// longer `expected`; [`Error::Db`] when Postgres refuses.
+/// longer `expected`, or with [`Refusal::BranchTaken`] when `expected` is
+/// `None` and the branch exists; [`Error::Db`] when Postgres refuses.
 pub async fn set_head(
     tx: &mut PgConnection,
     design: DesignId,
@@ -324,8 +385,8 @@ pub async fn set_head(
     expected: Option<RevisionHash>,
     new: RevisionHash,
 ) -> Result<()> {
-    let moved = match expected {
-        None => {
+    let (moved, refusal) = match expected {
+        None => (
             sqlx::query(
                 "INSERT INTO branch (design_id, name, head_hash) VALUES ($1, $2, $3)
                  ON CONFLICT (design_id, name) DO NOTHING",
@@ -334,9 +395,12 @@ pub async fn set_head(
             .bind(branch)
             .bind(new.as_bytes())
             .execute(tx)
-            .await?
-        }
-        Some(expected) => {
+            .await?,
+            Refusal::BranchTaken {
+                branch: branch.to_owned(),
+            },
+        ),
+        Some(expected) => (
             sqlx::query(
                 "UPDATE branch SET head_hash = $3, updated_at = now()
                  WHERE design_id = $1 AND name = $2 AND head_hash = $4",
@@ -346,16 +410,38 @@ pub async fn set_head(
             .bind(new.as_bytes())
             .bind(expected.as_bytes())
             .execute(tx)
-            .await?
-        }
+            .await?,
+            Refusal::HeadMoved {
+                branch: branch.to_owned(),
+            },
+        ),
     };
     if moved.rows_affected() == 1 {
         Ok(())
     } else {
-        Err(Error::Refused(Refusal::HeadMoved {
-            branch: branch.to_owned(),
-        }))
+        Err(Error::Refused(refusal))
     }
+}
+
+/// Whether `design` reaches `revision`: whether `design_revision` lists
+/// it, the index every read of a revision is scoped by. On a connection
+/// rather than the pool, so a push checks the revision a new branch
+/// starts at inside its own transaction and a page checks on the pool.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses.
+pub async fn reaches<'c, E>(db: E, design: DesignId, revision: RevisionHash) -> Result<bool>
+where
+    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+{
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM design_revision WHERE design_id = $1 AND revision_hash = $2)",
+    )
+    .bind(design)
+    .bind(revision.as_bytes())
+    .fetch_one(db)
+    .await?)
 }
 
 /// `revision` becomes one `design` may show.
@@ -517,16 +603,63 @@ impl TryFrom<RevisionRow> for Revision {
     }
 }
 
-/// What a design page shows: the design, its owner's handle, the branch
-/// and the revision at its head, with the revision's files.
+/// A branch of a design: its name and its head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Branch {
+    pub name: BranchName,
+    pub head: RevisionHash,
+}
+
+/// One revision along a branch: its ordinal (GLOSSARY, Ordinal) and the
+/// revision. What a history page lists.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Entry {
+    /// How many revisions deep it sits along the branch, from 1 at the
+    /// root.
+    pub ordinal: u32,
+    pub revision: Revision,
+}
+
+/// Which revision of a design a URL names (docs/v1-scope.md, URLs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum At<'a> {
+    /// `/{handle}/{slug}`: the head of the default branch.
+    Default,
+    /// `/{handle}/{slug}/b/{branch}`: the head of this branch.
+    Branch(&'a str),
+    /// `/{handle}/{slug}/r/{hash}`: this revision, when the design
+    /// reaches it.
+    Revision(RevisionHash),
+}
+
+/// How many revisions a design page's revision dropdown lists.
+pub const RECENT: u32 = 10;
+
+/// What a design page shows: the design, its owner's handle, the
+/// revision with its files, and the branch in context: the one named, or
+/// for a revision named by hash the default branch when it reaches the
+/// revision, else the first by name that does.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DesignHead {
     pub design: Design,
     pub owner: Handle,
-    pub branch: String,
+    /// The branch in context.
+    pub branch: BranchName,
+    /// Its head: the revision shown, or the one `behind` revisions ahead.
+    pub head: RevisionHash,
     pub revision: Revision,
+    /// The revision's ordinal along the branch in context.
+    pub ordinal: u32,
+    /// How many revisions the branch's head is ahead of the one shown: 0
+    /// at the head.
+    pub behind: u32,
     /// The tree's entries, in path order.
     pub files: Vec<TreeEntry>,
+    /// Every branch of the design, by name.
+    pub branches: Vec<Branch>,
+    /// The last [`RECENT`] revisions along the branch in context, newest
+    /// first.
+    pub recent: Vec<Entry>,
 }
 
 impl DesignHead {
@@ -584,44 +717,242 @@ impl DesignHead {
 /// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
 /// holds a hash that is not 32 bytes, which the schema forbids.
 pub async fn show(db: &PgPool, handle: &str, slug: &str) -> Result<Option<DesignHead>> {
-    // Two reads on the pool for one page: the head and its files. A push
-    // between them could show a head with the files of the same head only,
-    // since both are keyed by hashes the first read returned; nothing is
-    // written.
+    show_at(db, handle, slug, At::Default).await
+}
+
+/// The design at `/{handle}/{slug}` shown at `at`, or `None` when there
+/// is no such design, no such branch, or the design does not reach the
+/// revision named (a revision no branch of the design has in its chain is
+/// not shown either, whatever `design_revision` still lists: the index
+/// is maintained on branch delete, so such a row is the collector's).
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
+/// holds a hash that is not 32 bytes, which the schema forbids.
+pub async fn show_at(
+    db: &PgPool,
+    handle: &str,
+    slug: &str,
+    at: At<'_>,
+) -> Result<Option<DesignHead>> {
+    // Several reads on the pool for one page, nothing written. A push
+    // between two of them moves a head the page already read: the page
+    // then shows the revision it resolved with that revision's files and
+    // a chain read a moment later, which is at worst one revision ahead
+    // of the head it named. Nothing shown is keyed by anything but the
+    // hashes the earlier reads returned.
+    let Some((design, owner)) = find(db, handle, slug).await? else {
+        return Ok(None);
+    };
+    let branches = branches(db, design.id).await?;
+    let hash = match at {
+        At::Default | At::Branch(_) => {
+            let name = match at {
+                At::Branch(name) => name,
+                _ => design.default_branch.as_str(),
+            };
+            match branches.iter().find(|branch| branch.name.as_str() == name) {
+                Some(branch) => branch.head,
+                None => return Ok(None),
+            }
+        }
+        At::Revision(hash) => {
+            if !reaches(db, design.id, hash).await? {
+                return Ok(None);
+            }
+            hash
+        }
+    };
+    let positions = positions(db, design.id, hash).await?;
+    let position = match at {
+        At::Branch(name) => positions.iter().find(|p| p.branch.as_str() == name),
+        At::Default | At::Revision(_) => positions
+            .iter()
+            .find(|p| p.branch.as_str() == design.default_branch)
+            .or_else(|| positions.first()),
+    };
+    let Some(position) = position.cloned() else {
+        return Ok(None);
+    };
+    let Some(revision) = revision(db, hash).await? else {
+        return Ok(None);
+    };
+    let files = entries(db, revision.tree).await?;
+    let recent = history(db, design.id, position.branch.as_str(), Some(RECENT)).await?;
+    let head = branches
+        .iter()
+        .find(|branch| branch.name == position.branch)
+        .map_or(hash, |branch| branch.head);
+    Ok(Some(DesignHead {
+        design,
+        owner,
+        branch: position.branch,
+        head,
+        revision,
+        ordinal: position.ordinal,
+        behind: position.behind,
+        files,
+        branches,
+        recent,
+    }))
+}
+
+/// The design at `/{handle}/{slug}` and its owner's handle, or `None`
+/// without one. One read on the pool: a page's lookup, part of no write.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses.
+pub async fn find(db: &PgPool, handle: &str, slug: &str) -> Result<Option<(Design, Handle)>> {
     #[derive(sqlx::FromRow)]
-    struct HeadRow {
+    struct Row {
         #[sqlx(flatten)]
         design: DesignRow,
         handle: String,
-        #[sqlx(flatten)]
-        revision: RevisionRow,
     }
-    let row: Option<HeadRow> = sqlx::query_as(&format!(
-        "SELECT {DESIGN_COLUMNS}, a.handle, {REVISION_COLUMNS}
-         FROM design d
-         JOIN account a ON a.id = d.owner_id
-         JOIN branch b ON b.design_id = d.id AND b.name = d.default_branch
-         JOIN revision r ON r.hash = b.head_hash
-         JOIN design_revision dr ON dr.design_id = d.id AND dr.revision_hash = r.hash
+    let row: Option<Row> = sqlx::query_as(&format!(
+        "SELECT {DESIGN_COLUMNS}, a.handle
+         FROM design d JOIN account a ON a.id = d.owner_id
          WHERE a.handle = $1 AND d.slug = $2"
     ))
     .bind(handle)
     .bind(slug)
     .fetch_optional(db)
     .await?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let revision = Revision::try_from(row.revision)?;
-    let files = entries(db, revision.tree).await?;
-    let design = Design::try_from(row.design)?;
-    Ok(Some(DesignHead {
-        branch: design.default_branch.clone(),
-        design,
-        owner: Handle::from_row(row.handle),
-        revision,
-        files,
-    }))
+    row.map(|row| Ok((Design::try_from(row.design)?, Handle::from_row(row.handle))))
+        .transpose()
+}
+
+/// Every branch of `design` with its head, by name. One read on the pool:
+/// a page's listing, part of no write.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
+/// holds a hash that is not 32 bytes, which the schema forbids.
+pub async fn branches(db: &PgPool, design: DesignId) -> Result<Vec<Branch>> {
+    let rows: Vec<(String, Vec<u8>)> =
+        sqlx::query_as("SELECT name, head_hash FROM branch WHERE design_id = $1 ORDER BY name")
+            .bind(design)
+            .fetch_all(db)
+            .await?;
+    rows.into_iter()
+        .map(|(name, head)| {
+            Ok(Branch {
+                name: BranchName::from_row(name),
+                head: RevisionHash::from_bytes(&head)?,
+            })
+        })
+        .collect()
+}
+
+/// Where a revision sits on one branch of a design.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Position {
+    branch: BranchName,
+    ordinal: u32,
+    behind: u32,
+}
+
+/// The chain from a branch's head down through the parents, as SQL: one
+/// row per revision with how far behind the head it is. Over every branch
+/// of the design (`$1`) with `$2` null, or the one named `$2`. Each step
+/// is a primary-key probe of `revision`, so the walk costs the chains'
+/// length, never a scan; a chain cannot loop, since a revision's hash
+/// covers its parent's.
+const CHAIN: &str = "chain AS (
+    SELECT b.name, b.head_hash AS hash, 0 AS behind
+    FROM branch b WHERE b.design_id = $1 AND ($2::text IS NULL OR b.name = $2)
+    UNION ALL
+    SELECT c.name, r.parent_hash, c.behind + 1
+    FROM chain c JOIN revision r ON r.hash = c.hash WHERE r.parent_hash IS NOT NULL
+)";
+
+/// The ordinal of a row of the chain: the chain's length less how far
+/// behind the head the row is.
+fn ordinal(length: i64, behind: i64) -> u32 {
+    u32::try_from(length - behind).unwrap_or(0)
+}
+
+/// On which branches of `design` the revision `hash` sits, by branch
+/// name, with its ordinal and distance behind the head on each. One read
+/// on the pool: a page's lookup, part of no write.
+async fn positions(db: &PgPool, design: DesignId, hash: RevisionHash) -> Result<Vec<Position>> {
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(&format!(
+        "WITH RECURSIVE {CHAIN}
+         SELECT name, behind::bigint, length FROM (
+             SELECT name, hash, behind, count(*) OVER (PARTITION BY name) AS length FROM chain
+         ) x WHERE x.hash = $3 ORDER BY name"
+    ))
+    .bind(design)
+    .bind(None::<&str>)
+    .bind(hash.as_bytes())
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(name, behind, length)| Position {
+            branch: BranchName::from_row(name),
+            ordinal: ordinal(length, behind),
+            behind: u32::try_from(behind).unwrap_or(u32::MAX),
+        })
+        .collect())
+}
+
+/// The revisions along `branch` of `design`, newest first, each with its
+/// ordinal; at most `limit` of them, every one without a limit; empty for
+/// a branch that does not exist. One read on the pool: a page's listing,
+/// part of no write.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
+/// holds a hash that is not 32 bytes, which the schema forbids.
+pub async fn history(
+    db: &PgPool,
+    design: DesignId,
+    branch: &str,
+    limit: Option<u32>,
+) -> Result<Vec<Entry>> {
+    #[derive(sqlx::FromRow)]
+    struct EntryRow {
+        behind: i64,
+        length: i64,
+        #[sqlx(flatten)]
+        revision: RevisionRow,
+    }
+    let rows: Vec<EntryRow> = sqlx::query_as(&format!(
+        "WITH RECURSIVE {CHAIN}
+         SELECT c.behind::bigint AS behind, count(*) OVER () AS length, {REVISION_COLUMNS}
+         FROM chain c JOIN revision r ON r.hash = c.hash
+         ORDER BY c.behind LIMIT $3"
+    ))
+    .bind(design)
+    .bind(Some(branch))
+    .bind(limit.map(i64::from))
+    .fetch_all(db)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(Entry {
+                ordinal: ordinal(row.length, row.behind),
+                revision: Revision::try_from(row.revision)?,
+            })
+        })
+        .collect()
+}
+
+/// The revision `hash`, or `None` without one. Called after the design
+/// was checked to reach it: the row is global, the check is the scope.
+async fn revision(db: &PgPool, hash: RevisionHash) -> Result<Option<Revision>> {
+    let row: Option<RevisionRow> = sqlx::query_as(&format!(
+        "SELECT {REVISION_COLUMNS} FROM revision r WHERE r.hash = $1"
+    ))
+    .bind(hash.as_bytes())
+    .fetch_optional(db)
+    .await?;
+    row.map(Revision::try_from).transpose()
 }
 
 /// The entries of `tree`, in path order.

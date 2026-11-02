@@ -1,0 +1,439 @@
+//! Branches and history over HTTP (#18): three uploads to `main` make a
+//! chain the history page lists as rev 1 to 3, the branch and revision
+//! URL forms resolve (the latter only for a revision the design
+//! reaches), the banner shows off the head, a push goes to a selected or
+//! a new branch, and a taken branch name is refused. The Postgres tests
+//! skip without `DATABASE_URL`, like `tests/db.rs`.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use kiewer_lib::account::{self, AccountId, Handle};
+use kiewer_lib::auth::{Auth, Provider, ProviderUser};
+use kiewer_lib::blob::fs::FsBlobStore;
+use kiewer_lib::session;
+use kiewer_lib::web::AppState;
+use kiewer_test_support::db::{fresh, pool_from_env};
+use kiewer_test_support::http::{self, Part};
+use kiewer_test_support::{TempDir, scratch_dir};
+use sqlx::PgPool;
+
+/// The server over `db` with a filesystem blob store under cargo's
+/// scratch directory and no sign-in provider.
+async fn server(db: PgPool) -> (SocketAddr, TempDir) {
+    let dir = scratch_dir!();
+    let state = AppState {
+        db,
+        blobs: Arc::new(FsBlobStore::new(dir.path())),
+        auth: Arc::new(Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth")),
+    };
+    (http::serve_on_free_port(state).await, dir)
+}
+
+/// A person with a handle and a live session: the browser carries the
+/// cookie as if they had signed in.
+async fn signed_in(db: &PgPool, addr: SocketAddr) -> (http::Browser, AccountId, Handle) {
+    let signed_in = account::sign_in(
+        db,
+        Provider::GitHub,
+        &ProviderUser {
+            id: fresh("gh"),
+            login: "historian".to_owned(),
+            email: None,
+        },
+    )
+    .await
+    .expect("sign in");
+    let handle: Handle = fresh("h").parse().expect("a handle");
+    account::choose_handle(db, signed_in.account_id, &handle)
+        .await
+        .expect("choose");
+    let id = session::start(db, signed_in.account_id)
+        .await
+        .expect("a session");
+    let mut browser = http::Browser::new(addr);
+    browser.set_cookie("kiewer_session", &id.to_string());
+    (browser, signed_in.account_id, handle)
+}
+
+/// A schematic whose text is `tag`'s alone, so each upload is a new blob.
+fn sheet(tag: &str) -> Vec<u8> {
+    format!("(kicad_sch (version 20250114) (uuid \"{}\"))", fresh(tag)).into_bytes()
+}
+
+/// The revision hashes a page links as `/{handle}/{slug}/r/{hash}`, in
+/// page order, each once.
+fn linked_revisions(body: &str, handle: &Handle, slug: &str) -> Vec<String> {
+    let prefix = format!("href=\"/{handle}/{slug}/r/");
+    let mut hashes: Vec<String> = Vec::new();
+    for (start, _) in body.match_indices(&prefix) {
+        let hash = &body[start + prefix.len()..start + prefix.len() + 64];
+        if !hashes.iter().any(|known| known == hash) {
+            hashes.push(hash.to_owned());
+        }
+    }
+    hashes
+}
+
+/// The history page of `branch` of `slug`.
+async fn history_page(
+    addr: SocketAddr,
+    handle: &Handle,
+    slug: &str,
+    branch: &str,
+) -> http::Response {
+    http::request(
+        addr,
+        "GET",
+        &format!("/{handle}/{slug}/b/{branch}/history"),
+        &[],
+        "",
+    )
+    .await
+}
+
+/// The text fields of one push.
+type Fields<'a> = [(&'a str, &'a str)];
+
+/// One sheet of `slug` pushed through the form with these text fields.
+async fn push(browser: &mut http::Browser, slug: &str, fields: &[(&str, &str)]) -> http::Response {
+    let bytes = sheet("push");
+    let name = format!("{slug}.kicad_sch");
+    let mut parts: Vec<Part<'_>> = fields
+        .iter()
+        .map(|(field, value)| Part::text(field, value))
+        .collect();
+    parts.push(Part::file(&name, &bytes));
+    browser.post_multipart("/upload", &parts).await
+}
+
+/// Three uploads of `slug` on `main` through the form, with messages
+/// `rev 1` to `rev 3`; the design's page afterwards.
+async fn chain_of_three(browser: &mut http::Browser, handle: &Handle, slug: &str) -> String {
+    let path = format!("{handle}/{slug}");
+    for i in 1..=3 {
+        let design = if i == 1 { "" } else { path.as_str() };
+        let bytes = sheet("s");
+        let posted = browser
+            .post_multipart(
+                "/upload",
+                &[
+                    Part::text("design", design),
+                    Part::text("name", slug),
+                    Part::text("branch", "main"),
+                    Part::text("message", &format!("rev {i}")),
+                    Part::file(&format!("{slug}.kicad_sch"), &bytes),
+                ],
+            )
+            .await;
+        assert_eq!(posted.status, 303, "upload {i}: {}", posted.body);
+        assert_eq!(
+            posted.header("location"),
+            Some(format!("/{handle}/{slug}").as_str())
+        );
+    }
+    let (status, body) = http::get(browser.addr(), &format!("/{handle}/{slug}")).await;
+    assert_eq!(status, 200, "{body}");
+    body
+}
+
+#[tokio::test]
+async fn three_uploads_to_main_make_a_chain_the_history_page_lists_as_rev_1_to_3() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut browser, _, handle) = signed_in(&db, addr).await;
+    let page = chain_of_three(&mut browser, &handle, "chain").await;
+    assert!(page.contains("rev 3"), "the head is rev 3: {page}");
+    assert!(
+        !page.contains(r#"id="off-head""#),
+        "no banner at the head: {page}"
+    );
+    assert!(
+        page.contains(&format!(r#"href="/{handle}/chain/b/main/history""#)),
+        "the summary links the history: {page}"
+    );
+
+    let history = history_page(addr, &handle, "chain", "main").await;
+    assert_eq!(history.status, 200, "{}", history.body);
+    let body = &history.body;
+    let positions: Vec<usize> = ["rev 3", "rev 2", "rev 1"]
+        .iter()
+        .map(|text| {
+            body.find(text)
+                .unwrap_or_else(|| panic!("{text} in {body}"))
+        })
+        .collect();
+    assert!(
+        positions[0] < positions[1] && positions[1] < positions[2],
+        "newest first: {body}"
+    );
+    assert!(body.contains(handle.as_str()), "the author: {body}");
+    assert!(
+        body.contains(r#"class="thumb""#),
+        "a thumbnail's place: {body}"
+    );
+    assert!(body.contains("<time datetime="), "the time: {body}");
+    let hashes = linked_revisions(body, &handle, "chain");
+    assert_eq!(hashes.len(), 3, "each revision links its page: {body}");
+    for hash in &hashes {
+        assert!(body.contains(&hash[..8]), "the short hash is shown: {body}");
+    }
+    assert!(
+        !body.contains("/history/") && !body.contains("rev/"),
+        "no ordinal in any URL: {body}"
+    );
+}
+
+#[tokio::test]
+async fn the_branch_and_revision_urls_resolve_and_an_unreached_revision_is_404() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut browser, _, handle) = signed_in(&db, addr).await;
+    let page = chain_of_three(&mut browser, &handle, "urls").await;
+    let history = history_page(addr, &handle, "urls", "main").await;
+    let hashes = linked_revisions(&history.body, &handle, "urls");
+    let (third, first) = (&hashes[0], &hashes[2]);
+
+    let at_branch = http::request(addr, "GET", &format!("/{handle}/urls/b/main"), &[], "").await;
+    assert_eq!(at_branch.status, 200, "{}", at_branch.body);
+    assert_eq!(
+        at_branch.body, page,
+        "the branch URL is the design page at the head"
+    );
+    assert!(
+        page.contains(&format!(r#"title="{third}""#)),
+        "the head is the third: {page}"
+    );
+
+    let at_first = http::request(addr, "GET", &format!("/{handle}/urls/r/{first}"), &[], "").await;
+    assert_eq!(at_first.status, 200, "{}", at_first.body);
+    let body = &at_first.body;
+    assert!(body.contains(&format!(r#"title="{first}""#)), "{body}");
+    assert!(body.contains("rev 1"), "{body}");
+    assert!(
+        body.contains(r#"id="off-head""#) && body.contains("2 behind the head"),
+        "the banner names the distance: {body}"
+    );
+    assert!(
+        body.contains(&format!(r#"href="/{handle}/urls""#)),
+        "the banner links the head: {body}"
+    );
+    assert!(
+        body.contains(&format!(
+            "/upload?design={handle}/urls&#38;branch=&#38;at={first}"
+        )),
+        "the banner links a new branch here: {body}"
+    );
+    assert!(
+        body.contains(&format!(
+            r#"<option value="/{handle}/urls/r/{first}" selected>"#
+        )),
+        "the revision dropdown has it selected: {body}"
+    );
+    assert!(
+        body.contains(r#"<option value="/"#) && body.contains(r"selected>main</option>"),
+        "the branch dropdown has main selected: {body}"
+    );
+
+    // Another design's revision is not this one's; nor is nonsense.
+    let (mut other, _, other_handle) = signed_in(&db, addr).await;
+    chain_of_three(&mut other, &other_handle, "urls").await;
+    let elsewhere = history_page(addr, &other_handle, "urls", "main").await;
+    let theirs = linked_revisions(&elsewhere.body, &other_handle, "urls");
+    let foreign = &theirs[0];
+    let (status, _) = http::get(addr, &format!("/{handle}/urls/r/{foreign}")).await;
+    assert_eq!(status, 404, "a revision the design does not reach");
+    let (status, _) = http::get(addr, &format!("/{other_handle}/urls/r/{foreign}")).await;
+    assert_eq!(status, 200, "but its own design reaches it");
+    let (status, _) = http::get(addr, &format!("/{handle}/urls/r/not-a-hash")).await;
+    assert_eq!(status, 404);
+    let (status, _) = http::get(addr, &format!("/{handle}/urls/r/{}", "0".repeat(64))).await;
+    assert_eq!(status, 404);
+    let (status, _) = http::get(addr, &format!("/{handle}/urls/b/nothing")).await;
+    assert_eq!(status, 404, "a branch the design does not have");
+    let (status, _) = http::get(addr, &format!("/{handle}/urls/b/nothing/history")).await;
+    assert_eq!(status, 404);
+    let (status, _) = http::get(addr, &format!("/{handle}/nothing/b/main/history")).await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn the_form_pushes_to_the_selected_branch_or_a_new_one_and_refuses_a_taken_name() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut browser, _, handle) = signed_in(&db, addr).await;
+    chain_of_three(&mut browser, &handle, "branchy").await;
+    let branchy = format!("{handle}/branchy");
+    let history = history_page(addr, &handle, "branchy", "main").await;
+    let hashes = linked_revisions(&history.body, &handle, "branchy");
+    let first = &hashes[2];
+
+    // The form opened from the first revision's page: the design and
+    // main preselected, the revision carried for a new branch.
+    let form = browser
+        .get(&format!(
+            "/upload?design={handle}/branchy&branch=main&at={first}"
+        ))
+        .await;
+    assert_eq!(form.status, 200, "{}", form.body);
+    for expected in [
+        r#"<option value="branchy" selected>"#.to_owned(),
+        r#"<option value="main" selected>main</option>"#.to_owned(),
+        r#"<option value="">A new branch</option>"#.to_owned(),
+        format!(r#"name="from" value="{first}""#),
+    ] {
+        assert!(form.body.contains(&expected), "{expected}: {}", form.body);
+    }
+    let new_branch_form = browser
+        .get(&format!(
+            "/upload?design={handle}/branchy&branch=&at={first}"
+        ))
+        .await;
+    assert!(
+        new_branch_form
+            .body
+            .contains(r#"<option value="" selected>A new branch</option>"#),
+        "opened for a new branch: {}",
+        new_branch_form.body
+    );
+
+    // A push to a new branch at the first revision: a chain of two there.
+    let posted = push(
+        &mut browser,
+        "branchy",
+        &[
+            ("design", &branchy),
+            ("branch", ""),
+            ("new_branch", "experiment"),
+            ("from", first),
+            ("message", "on a branch"),
+        ],
+    )
+    .await;
+    assert_eq!(posted.status, 303, "{}", posted.body);
+    assert_eq!(
+        posted.header("location"),
+        Some(format!("/{handle}/branchy/b/experiment").as_str()),
+        "the browser goes to the new branch's head"
+    );
+    let at_branch = http::request(
+        addr,
+        "GET",
+        &format!("/{handle}/branchy/b/experiment"),
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(at_branch.status, 200, "{}", at_branch.body);
+    assert!(at_branch.body.contains("on a branch"), "{}", at_branch.body);
+    assert!(
+        at_branch.body.contains(r"selected>experiment</option>")
+            && at_branch.body.contains(">main</option>"),
+        "both branches in the dropdown: {}",
+        at_branch.body
+    );
+    let branch_history = history_page(addr, &handle, "branchy", "experiment").await;
+    let on_branch = linked_revisions(&branch_history.body, &handle, "branchy");
+    assert_eq!(on_branch.len(), 2, "{}", branch_history.body);
+    assert_eq!(&on_branch[1], first, "rooted at the first revision");
+    assert!(
+        branch_history.body.contains("rev 2") && !branch_history.body.contains("rev 3"),
+        "ordinals along this branch: {}",
+        branch_history.body
+    );
+    let main_history = history_page(addr, &handle, "branchy", "main").await;
+    assert_eq!(
+        linked_revisions(&main_history.body, &handle, "branchy"),
+        hashes,
+        "main is as it was"
+    );
+    let form = browser
+        .get("/upload?design={handle}/branchy&branch=experiment")
+        .await;
+    assert!(
+        form.body
+            .contains(r#"<option value="experiment" selected>experiment</option>"#),
+        "the new branch is offered: {}",
+        form.body
+    );
+}
+
+#[tokio::test]
+async fn a_push_to_a_taken_or_missing_branch_is_refused_and_one_onto_the_head_lands() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut browser, _, handle) = signed_in(&db, addr).await;
+    chain_of_three(&mut browser, &handle, "branchy").await;
+    let branchy = format!("{handle}/branchy");
+    let new_branch = [
+        ("design", branchy.as_str()),
+        ("branch", ""),
+        ("new_branch", "experiment"),
+    ];
+    let posted = push(&mut browser, "branchy", &new_branch).await;
+    assert_eq!(posted.status, 303, "a branch from nothing: {}", posted.body);
+
+    // The name is taken; a nameless new branch; a branch that is not
+    // there; a revision the design does not reach.
+    let zeros = "0".repeat(64);
+    let refused: [(&Fields<'_>, u16, &str); 4] = [
+        (&new_branch, 409, "already has a branch experiment"),
+        (
+            &[("design", &branchy), ("branch", ""), ("new_branch", "")],
+            400,
+            "needs a name",
+        ),
+        (
+            &[("design", &branchy), ("branch", "nothing")],
+            404,
+            "no branch nothing",
+        ),
+        (
+            &[
+                ("design", &branchy),
+                ("branch", ""),
+                ("new_branch", "elsewhere"),
+                ("from", &zeros),
+            ],
+            404,
+            "no revision",
+        ),
+    ];
+    for (fields, status, reason) in refused {
+        let answer = push(&mut browser, "branchy", fields).await;
+        assert_eq!(answer.status, status, "{fields:?}: {}", answer.body);
+        assert!(answer.body.contains(reason), "{reason}: {}", answer.body);
+    }
+
+    // Onto the selected branch: the head moves, the chain grows to four.
+    let onto_main = push(
+        &mut browser,
+        "branchy",
+        &[
+            ("design", &branchy),
+            ("branch", "main"),
+            ("message", "rev 4"),
+        ],
+    )
+    .await;
+    assert_eq!(onto_main.status, 303, "{}", onto_main.body);
+    assert_eq!(
+        onto_main.header("location"),
+        Some(format!("/{handle}/branchy").as_str()),
+        "the default branch's head is the design's page"
+    );
+    let main_history = history_page(addr, &handle, "branchy", "main").await;
+    assert!(main_history.body.contains("rev 4"), "{}", main_history.body);
+    assert_eq!(
+        linked_revisions(&main_history.body, &handle, "branchy").len(),
+        4
+    );
+}

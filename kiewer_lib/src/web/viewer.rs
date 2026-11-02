@@ -1,8 +1,9 @@
 //! The viewer page and what it loads: the wasm-bindgen output of
 //! `kiewer_viewer` (embedded at build time, see `build.rs`) and the board.
 //! At `/viewer` the board is the hand-off one at a fixed URL, kept until
-//! a design exists; a design page (`web/design.rs`) renders the same
-//! [`Page`] with the revision's board blob and a [`DesignView`].
+//! a design exists; a design page (`web/design.rs`, `web/history.rs`)
+//! renders the same [`Page`] with the revision's board blob and a
+//! [`DesignView`].
 //! Content-hashed names and pre-compression for the assets are #26.
 
 use askama::Template;
@@ -66,6 +67,27 @@ pub struct FileView {
     pub size: u64,
 }
 
+/// One branch in a design page's branch dropdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchView {
+    pub name: String,
+    /// The URL of its head.
+    pub url: String,
+}
+
+/// One revision in a design page's revision dropdown: the last ten along
+/// the branch in context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentView {
+    pub ordinal: u32,
+    pub short: String,
+    pub url: String,
+    /// When, UTC, ISO 8601 to the second.
+    pub created_at: String,
+    /// Whether it is the revision the page shows.
+    pub current: bool,
+}
+
 /// What a design page says about the revision it shows, folded under the
 /// stage. Labels and values are text already: the template knows nothing
 /// of the metadata's shape, so a new field is a new pair.
@@ -73,7 +95,25 @@ pub struct FileView {
 pub struct DesignView {
     pub handle: String,
     pub slug: String,
+    /// The branch in context.
     pub branch: String,
+    /// Every branch of the design, by name, with the URL of its head.
+    pub branches: Vec<BranchView>,
+    /// The last ten revisions along the branch in context, newest first.
+    pub recent: Vec<RecentView>,
+    /// The revision's ordinal along the branch in context.
+    pub ordinal: u32,
+    /// How many revisions behind the branch's head the page is: 0 at the
+    /// head, else the banner shows.
+    pub behind: u32,
+    /// The URL of the branch's head.
+    pub head_url: String,
+    /// The URL of the branch's history page.
+    pub history_url: String,
+    /// The upload form, opened for this branch at this revision.
+    pub upload_url: String,
+    /// The upload form, opened for a new branch at this revision.
+    pub new_branch_url: String,
     /// The revision's hash, 64 hex characters.
     pub revision: String,
     /// Its short form, the first 8.

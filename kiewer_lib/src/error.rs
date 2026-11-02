@@ -142,6 +142,18 @@ pub enum Refusal {
     /// is no longer there: someone moved it while the form was open.
     #[display("the design is no longer at {slug}; open its page again and retry")]
     SlugMoved { slug: String },
+    /// The upload names a branch the design does not have.
+    #[display("the design has no branch {branch}")]
+    NoSuchBranch { branch: String },
+    /// A new branch's name is one the design already has.
+    #[display("the design already has a branch {branch}; give the new one another name")]
+    BranchTaken { branch: String },
+    /// A new branch was to start at a revision the design does not reach.
+    #[display("the design has no revision {hash}")]
+    NoSuchRevision { hash: String },
+    /// A new branch's name is missing or breaks the rules.
+    #[display("{reason}")]
+    BadBranchName { reason: String },
     /// The branch's head moved while the upload was in flight. Pending
     /// revisions (docs/v1-scope.md, Push) are not built yet, so the upload
     /// is retried.

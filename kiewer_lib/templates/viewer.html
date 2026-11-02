@@ -41,6 +41,10 @@
   #settings input { width: 100%; max-width: 30em; box-sizing: border-box; }
   #settings textarea { width: 100%; max-width: 60em; box-sizing: border-box; }
   #settings .error { padding: 0.3em 0.5em; background: #5a1e1e; border-radius: 4px; }
+  #design select { font: inherit; }
+  /* Off the head of the branch in context: one line above the details. */
+  #off-head { margin: 0; padding: 0.4em 0.8em; background: #4a3f1e; border-top: 1px solid #444; }
+  #off-head a { color: inherit; }
   /* The font warning and picker (docs/v1-scope.md, Fonts): over the
      stage's top right, one line per face the browser lacks. */
   #fonts { position: absolute; right: 0.8em; top: 0.8em; max-width: 28em; padding: 0.6em 0.8em; background: #4a3f1e; border-radius: 4px; }
@@ -122,8 +126,15 @@
   </div>
 </div>
 {% if let Some(design) = design %}
+{% if design.behind > 0 %}
+<p id="off-head">This is rev {{ design.ordinal }} of {{ design.branch }}, {{ design.behind }} behind the head. <a href="{{ design.head_url }}">Go to the head</a> · <a href="{{ design.new_branch_url }}">New branch here</a></p>
+{% endif %}
 <details id="design">
-  <summary><a href="/{{ design.handle }}">{{ design.handle }}</a> / {{ design.slug }}: branch {{ design.branch }}, revision <code title="{{ design.revision }}">{{ design.short }}</code> by {{ design.author }} at <time datetime="{{ design.created_at }}">{{ design.created_at }}</time>{% if let Some(message) = design.message %}, "{{ message }}"{% endif %}{% if let Some(url) = design.schematic_url %} <a href="{{ url }}">schematic</a>{% endif %}</summary>
+  <summary><a href="/{{ design.handle }}">{{ design.handle }}</a> / {{ design.slug }}:
+    branch <select id="branch" title="Branch" onchange="location.href = this.value">{% for branch in design.branches %}<option value="{{ branch.url }}"{% if branch.name == design.branch %} selected{% endif %}>{{ branch.name }}</option>{% endfor %}</select>
+    revision <select id="revision" title="Revision" onchange="location.href = this.value">{% for entry in design.recent %}<option value="{{ entry.url }}"{% if entry.current %} selected{% endif %}>rev {{ entry.ordinal }} {{ entry.short }} {{ entry.created_at }}</option>{% endfor %}</select>
+    <code title="{{ design.revision }}">{{ design.short }}</code> by {{ design.author }} at <time datetime="{{ design.created_at }}">{{ design.created_at }}</time>{% if let Some(message) = design.message %}, "{{ message }}"{% endif %}
+    · <a href="{{ design.history_url }}">history</a>{% if let Some(url) = design.schematic_url %} · <a href="{{ url }}">schematic</a>{% endif %} · <a href="{{ design.upload_url }}">upload a revision</a></summary>
   {% if !design.description_html.is_empty() %}<div id="description">{{ design.description_html|safe }}</div>{% endif %}
   <dl>
   {% for (label, value) in design.details %}

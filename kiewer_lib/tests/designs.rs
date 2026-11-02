@@ -7,7 +7,7 @@
 use kiewer_lib::account::{self, AccountId, Handle};
 use kiewer_lib::auth::{Provider, ProviderUser};
 use kiewer_lib::blob::BlobHash;
-use kiewer_lib::design::{self, DEFAULT_BRANCH, Design, Slug};
+use kiewer_lib::design::{self, At, DEFAULT_BRANCH, Design, Slug};
 use kiewer_lib::error::Refusal;
 use kiewer_lib::revision::{Metadata, RevisionDraft, RevisionHash, TreeEntry};
 use kiewer_lib::{Error, Result};
@@ -172,7 +172,7 @@ async fn a_design_gets_a_first_revision_and_the_page_reads_the_head() {
         .expect("the design has a head");
     assert_eq!(shown.design, design);
     assert_eq!(shown.owner, handle);
-    assert_eq!(shown.branch, DEFAULT_BRANCH);
+    assert_eq!(shown.branch.as_str(), DEFAULT_BRANCH);
     assert_eq!(shown.revision.hash, first);
     assert_eq!(shown.revision.parent, None);
     assert_eq!(shown.revision.author, handle.as_str());
@@ -273,6 +273,421 @@ async fn a_second_revision_goes_on_top_and_a_stale_parent_is_refused() {
         second,
         "the refused push wrote nothing"
     );
+}
+
+/// One push as `upload::push` writes it: the revision of `files` on
+/// `branch` of `design`, built on `parent`, the head moved from
+/// `expected` by compare-and-set (`None` makes the branch).
+struct Push<'a> {
+    design: &'a Design,
+    branch: &'a str,
+    parent: Option<RevisionHash>,
+    expected: Option<RevisionHash>,
+    files: &'a [TreeEntry],
+    message: Option<&'a str>,
+}
+
+/// `push` written in one transaction.
+async fn write(db: &PgPool, author: (AccountId, &Handle), push: Push<'_>) -> Result<RevisionHash> {
+    let mut tx = db.begin().await?;
+    for file in push.files {
+        design::record_blob(&mut tx, &file.blob, file.size).await?;
+    }
+    let tree = design::record_tree(&mut tx, push.files).await?;
+    let time = design::now_text(&mut tx).await?;
+    let draft = RevisionDraft {
+        tree,
+        parent: push.parent,
+        author: author.1,
+        time: &time,
+        message: push.message,
+    };
+    let hash = design::record_revision(&mut tx, &draft, author.0, None).await?;
+    design::set_head(&mut tx, push.design.id, push.branch, push.expected, hash).await?;
+    design::record_design_revision(&mut tx, push.design.id, hash).await?;
+    tx.commit().await?;
+    Ok(hash)
+}
+
+/// One revision of `files` on `branch`, built on `parent`, which is also
+/// the head the compare-and-set expects (`None` makes the branch).
+async fn push_to(
+    db: &PgPool,
+    author: (AccountId, &Handle),
+    design: &Design,
+    branch: &str,
+    parent: Option<RevisionHash>,
+    files: &[TreeEntry],
+    message: Option<&str>,
+) -> Result<RevisionHash> {
+    write(
+        db,
+        author,
+        Push {
+            design,
+            branch,
+            parent,
+            expected: parent,
+            files,
+            message,
+        },
+    )
+    .await
+}
+
+/// Three files, each a revision of its own: a chain of three.
+fn three_boards() -> [TreeEntry; 3] {
+    [
+        entry("demo.kicad_pcb", b"(kicad_pcb (version 20241229) (a))"),
+        entry("demo.kicad_pcb", b"(kicad_pcb (version 20241229) (b))"),
+        entry("demo.kicad_pcb", b"(kicad_pcb (version 20241229) (c))"),
+    ]
+}
+
+#[tokio::test]
+async fn a_chain_of_three_has_ordinals_along_the_branch_and_a_history_newest_first() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (owner, handle) = person(&db).await;
+    let design = new_design(&db, owner, "chain", "Chain").await;
+    let author = (owner, &handle);
+    let boards = three_boards();
+    let mut hashes = Vec::new();
+    let mut parent = None;
+    for (i, board) in boards.iter().enumerate() {
+        let message = format!("rev {}", i + 1);
+        let hash = push_to(
+            &db,
+            author,
+            &design,
+            DEFAULT_BRANCH,
+            parent,
+            std::slice::from_ref(board),
+            Some(&message),
+        )
+        .await
+        .expect("a revision");
+        hashes.push(hash);
+        parent = Some(hash);
+    }
+    let [first, second, third] = [hashes[0], hashes[1], hashes[2]];
+
+    let history = design::history(&db, design.id, DEFAULT_BRANCH, None)
+        .await
+        .expect("read");
+    let listed: Vec<(u32, RevisionHash, Option<&str>)> = history
+        .iter()
+        .map(|entry| {
+            (
+                entry.ordinal,
+                entry.revision.hash,
+                entry.revision.message.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (3, third, Some("rev 3")),
+            (2, second, Some("rev 2")),
+            (1, first, Some("rev 1"))
+        ],
+        "newest first, ordinals counted from the root"
+    );
+    let last_two = design::history(&db, design.id, DEFAULT_BRANCH, Some(2))
+        .await
+        .unwrap();
+    assert_eq!(last_two.len(), 2);
+    assert_eq!(last_two[0].ordinal, 3, "a limit keeps the ordinals");
+    assert!(
+        design::history(&db, design.id, "nothing", None)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a branch that does not exist has no history"
+    );
+
+    // The head by the branch's name, and by the design's default.
+    let at_branch = design::show_at(&db, handle.as_str(), "chain", At::Branch(DEFAULT_BRANCH))
+        .await
+        .unwrap()
+        .expect("the branch");
+    assert_eq!(at_branch.revision.hash, third);
+    assert_eq!((at_branch.ordinal, at_branch.behind), (3, 0));
+    assert_eq!(at_branch.branch.as_str(), DEFAULT_BRANCH);
+    assert_eq!(at_branch.head, third);
+    assert_eq!(
+        at_branch
+            .branches
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect::<Vec<_>>(),
+        [DEFAULT_BRANCH]
+    );
+    assert_eq!(
+        at_branch
+            .recent
+            .iter()
+            .map(|entry| entry.ordinal)
+            .collect::<Vec<_>>(),
+        [3, 2, 1],
+        "the last ten along the branch, newest first"
+    );
+    let by_default = design::show(&db, handle.as_str(), "chain")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_default.revision.hash, third);
+    assert_eq!(by_default.behind, 0);
+
+    // An older revision by hash: its ordinal and its distance behind.
+    let old = design::show_at(&db, handle.as_str(), "chain", At::Revision(first))
+        .await
+        .unwrap()
+        .expect("the design reaches it");
+    assert_eq!(old.revision.hash, first);
+    assert_eq!((old.ordinal, old.behind), (1, 2));
+    assert_eq!(old.branch.as_str(), DEFAULT_BRANCH);
+    assert_eq!(old.head, third, "the head of the branch in context");
+    assert_eq!(old.files.len(), 1);
+}
+
+#[tokio::test]
+async fn a_revision_the_design_does_not_reach_and_a_branch_it_lacks_are_not_shown() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (owner, handle) = person(&db).await;
+    let design = new_design(&db, owner, "chain", "Chain").await;
+    let boards = three_boards();
+    push_to(
+        &db,
+        (owner, &handle),
+        &design,
+        DEFAULT_BRANCH,
+        None,
+        &boards[1..2],
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Another design's revision, and nobody's.
+    let (other_owner, other_handle) = person(&db).await;
+    let other = new_design(&db, other_owner, "chain", "Another chain").await;
+    let elsewhere = push_to(
+        &db,
+        (other_owner, &other_handle),
+        &other,
+        DEFAULT_BRANCH,
+        None,
+        &boards[..1],
+        Some("someone else's"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        design::show_at(&db, handle.as_str(), "chain", At::Revision(elsewhere))
+            .await
+            .unwrap()
+            .is_none(),
+        "another design's revision is not this design's"
+    );
+    assert!(
+        design::show_at(
+            &db,
+            handle.as_str(),
+            "chain",
+            At::Revision(RevisionHash::from_bytes(&[7u8; 32]).unwrap())
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        design::show_at(&db, handle.as_str(), "chain", At::Branch("nothing"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_new_branch_starts_at_a_revision_and_a_taken_name_is_refused() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (owner, handle) = person(&db).await;
+    let design = new_design(&db, owner, "fork", "Fork").await;
+    let author = (owner, &handle);
+    let boards = three_boards();
+    let first = push_to(
+        &db,
+        author,
+        &design,
+        DEFAULT_BRANCH,
+        None,
+        &boards[..1],
+        None,
+    )
+    .await
+    .unwrap();
+    let second = push_to(
+        &db,
+        author,
+        &design,
+        DEFAULT_BRANCH,
+        Some(first),
+        &boards[1..2],
+        None,
+    )
+    .await
+    .unwrap();
+
+    // A branch at the first revision, with a third on top of it: a chain
+    // of two along the new branch, which shares its root with main.
+    let third = write(
+        &db,
+        author,
+        Push {
+            design: &design,
+            branch: "experiment",
+            parent: Some(first),
+            expected: None,
+            files: &boards[2..],
+            message: Some("on a branch"),
+        },
+    )
+    .await
+    .expect("a new branch");
+
+    let on_branch = design::show_at(&db, handle.as_str(), "fork", At::Branch("experiment"))
+        .await
+        .unwrap()
+        .expect("the branch");
+    assert_eq!(on_branch.revision.hash, third);
+    assert_eq!((on_branch.ordinal, on_branch.behind), (2, 0));
+    assert_eq!(
+        on_branch
+            .branches
+            .iter()
+            .map(|branch| (branch.name.as_str(), branch.head))
+            .collect::<Vec<_>>(),
+        [("experiment", third), (DEFAULT_BRANCH, second)],
+        "every branch with its head, by name"
+    );
+    let shared_root = design::show_at(&db, handle.as_str(), "fork", At::Revision(first))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        shared_root.branch.as_str(),
+        DEFAULT_BRANCH,
+        "a revision on several branches is shown in the default branch's context"
+    );
+    assert_eq!((shared_root.ordinal, shared_root.behind), (1, 1));
+    let history = design::history(&db, design.id, "experiment", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .map(|entry| (entry.ordinal, entry.revision.hash))
+            .collect::<Vec<_>>(),
+        [(2, third), (1, first)]
+    );
+
+    // The name is taken: the compare-and-set that makes a branch fails.
+    let mut tx = db.begin().await.unwrap();
+    let taken = design::set_head(&mut tx, design.id, "experiment", None, second)
+        .await
+        .expect_err("the branch exists");
+    assert!(
+        matches!(taken, Error::Refused(Refusal::BranchTaken { ref branch }) if branch == "experiment"),
+        "{taken}"
+    );
+    drop(tx);
+    assert!(design::reaches(&db, design.id, third).await.unwrap());
+    assert!(
+        !design::reaches(
+            &db,
+            design.id,
+            RevisionHash::from_bytes(&[9u8; 32]).unwrap()
+        )
+        .await
+        .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_push_whose_head_moved_under_it_is_refused_at_the_compare_and_set() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (owner, handle) = person(&db).await;
+    let design = new_design(&db, owner, "race", "Race").await;
+    let author = (owner, &handle);
+    let boards = three_boards();
+    let first = push_to(
+        &db,
+        author,
+        &design,
+        DEFAULT_BRANCH,
+        None,
+        &boards[..1],
+        None,
+    )
+    .await
+    .unwrap();
+
+    // The slow upload reads the head, then a quick one lands on it.
+    let mut slow = db.begin().await.unwrap();
+    let seen = design::head(&mut slow, design.id, DEFAULT_BRANCH)
+        .await
+        .unwrap();
+    assert_eq!(seen, Some(first));
+    let quick = push_to(
+        &db,
+        author,
+        &design,
+        DEFAULT_BRANCH,
+        Some(first),
+        &boards[1..2],
+        Some("quick"),
+    )
+    .await
+    .expect("the quick push lands");
+
+    design::record_blob(&mut slow, &boards[2].blob, boards[2].size)
+        .await
+        .unwrap();
+    let tree = design::record_tree(&mut slow, &boards[2..]).await.unwrap();
+    let time = design::now_text(&mut slow).await.unwrap();
+    let draft = RevisionDraft {
+        tree,
+        parent: seen,
+        author: &handle,
+        time: &time,
+        message: Some("slow"),
+    };
+    let stale = design::record_revision(&mut slow, &draft, owner, None)
+        .await
+        .unwrap();
+    let moved = design::set_head(&mut slow, design.id, DEFAULT_BRANCH, seen, stale)
+        .await
+        .expect_err("the head moved");
+    assert!(
+        matches!(moved, Error::Refused(Refusal::HeadMoved { ref branch }) if branch == DEFAULT_BRANCH),
+        "{moved}"
+    );
+    drop(slow);
+    let shown = design::show(&db, handle.as_str(), "race")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(shown.revision.hash, quick, "the quick push is the head");
+    assert_eq!(shown.ordinal, 2);
 }
 
 #[tokio::test]

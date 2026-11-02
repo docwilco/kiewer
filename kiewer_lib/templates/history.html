@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ name }} history - kiewer</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 1em; }
+  table { border-collapse: collapse; }
+  td, th { text-align: left; vertical-align: top; padding: 0.3em 0.8em 0.3em 0; }
+  /* The thumbnail's place until thumbnails exist (#25): a box the size
+     one will take, so the rows keep their height when they arrive. */
+  .thumb { display: inline-block; width: 64px; height: 48px; background: #ddd; border-radius: 2px; }
+  .hash { font-family: monospace; }
+  .metadata { opacity: 0.7; }
+</style>
+</head>
+<body>
+<nav><a href="/">kiewer</a> · <a href="/{{ handle }}">{{ handle }}</a> / <a href="/{{ handle }}/{{ slug }}">{{ slug }}</a></nav>
+<h1>{{ name }}: history of {{ branch }}</h1>
+<p>Branch:
+  {% for (name, url) in branches %}
+  {% if name.as_str() == branch.as_str() %}<strong>{{ name }}</strong>{% else %}<a href="{{ url }}">{{ name }}</a>{% endif %}
+  {% endfor %}
+  · <a href="{{ head_url }}">view the head</a>
+</p>
+<table>
+  <thead><tr><th></th><th>rev</th><th>hash</th><th>author</th><th>time</th><th>message</th></tr></thead>
+  <tbody>
+  {% for row in rows %}
+  <tr>
+    <td><span class="thumb" aria-hidden="true"></span></td>
+    <td>rev {{ row.ordinal }}</td>
+    <td><a class="hash" href="{{ row.url }}">{{ row.short }}</a></td>
+    <td>{{ row.author }}</td>
+    <td><time datetime="{{ row.created_at }}">{{ row.created_at }}</time></td>
+    <td>{% if let Some(message) = row.message %}{{ message }}{% endif %}{% if !row.metadata.is_empty() %}<br><span class="metadata">{{ row.metadata }}</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p hidden><small>{{ build }}</small></p>
+</body>
+</html>

@@ -23,7 +23,7 @@ use tokio::time::Instant;
 
 use crate::account::{AccountId, Handle};
 use crate::blob::{BlobHash, BlobStore};
-use crate::design::{self, Design, Slug};
+use crate::design::{self, BranchName, Design, Slug};
 use crate::error::{Error, Refusal, Result};
 use crate::revision::{Metadata, RevisionDraft, RevisionHash, TreeEntry, TreePath};
 use crate::roles::{self, Role};
@@ -286,18 +286,44 @@ pub struct Author {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     /// A new design of the author's, named `name` or after the project
-    /// folder's file, with a slug from the name.
+    /// folder's file, with a slug from the name; the revision is the root
+    /// of its default branch.
     New { name: Option<String> },
-    /// The head of the default branch of the design at `/{owner}/{slug}`,
-    /// which the author has at least the collaborator role on
-    /// (`roles::require`).
-    Existing { owner: Handle, slug: Slug },
+    /// The design at `/{owner}/{slug}`, which the author has at least the
+    /// collaborator role on (`roles::require`), on `branch`.
+    Existing {
+        owner: Handle,
+        slug: Slug,
+        branch: BranchTarget,
+    },
+}
+
+/// Which branch of an existing design a push lands on (docs/v1-scope.md,
+/// Push).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchTarget {
+    /// Onto the head of the design's default branch: what a form that
+    /// names no branch means, and where a new design's first revision
+    /// goes.
+    Default,
+    /// Onto the head of this branch: the parent is the head at write
+    /// time, moved by compare-and-set.
+    Head(BranchName),
+    /// A new branch named `name`, whose first revision is this one, built
+    /// on `from` (a revision the design reaches: the one the page the
+    /// form was opened from showed) or on nothing.
+    New {
+        name: BranchName,
+        from: Option<RevisionHash>,
+    },
 }
 
 /// What a push made.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pushed {
     pub design: Design,
+    /// The branch the revision is the head of.
+    pub branch: BranchName,
     pub revision: RevisionHash,
     /// Whether the design is new.
     pub created: bool,
@@ -487,9 +513,9 @@ struct Rows<'a> {
 }
 
 /// The rows of the revision, as one outcome: the blobs' sizes, the design
-/// (found and locked, or made), the quota against them, the tree, the
-/// revision on the branch's head, the head moved by compare-and-set, and
-/// the design's index of its revisions.
+/// (found, or made), the quota against them, the tree, the revision on
+/// the branch's head, the head moved by compare-and-set, and the design's
+/// index of its revisions.
 async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Pushed> {
     let Rows {
         author,
@@ -503,8 +529,12 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Push
     for entry in entries {
         design::record_blob(&mut tx, &entry.blob, entry.size).await?;
     }
-    let (design, created) = match target {
-        Target::Existing { owner, slug } => {
+    let (design, branch, created) = match target {
+        Target::Existing {
+            owner,
+            slug,
+            branch,
+        } => {
             let design = design::find_at(&mut *tx, &owner, &slug)
                 .await?
                 .ok_or_else(|| {
@@ -512,8 +542,10 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Push
                         slug: format!("{owner}/{slug}"),
                     })
                 })?;
+            // A collaborator may push to a branch and make one (GLOSSARY,
+            // Collaborator): one role covers every branch target.
             roles::require(&mut *tx, design.id, author.account_id, Role::Collaborator).await?;
-            (design, false)
+            (design, branch, false)
         }
         Target::New { name } => {
             let name = name
@@ -521,10 +553,8 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Push
                 .filter(|name| !name.is_empty())
                 .unwrap_or(stem);
             let slug = Slug::suggest(&name);
-            (
-                design::create(&mut tx, author.account_id, &slug, &name).await?,
-                true,
-            )
+            let design = design::create(&mut tx, author.account_id, &slug, &name).await?;
+            (design, BranchTarget::Default, true)
         }
     };
     let hashes: Vec<BlobHash> = entries.iter().map(|entry| entry.blob).collect();
@@ -536,7 +566,39 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Push
         .into());
     }
     let tree = design::record_tree(&mut tx, entries).await?;
-    let parent = design::head(&mut tx, design.id, &design.default_branch).await?;
+    // The parent, and what the compare-and-set expects the head to be:
+    // the head read now for a push onto a branch, nothing for a branch
+    // being made (whose first revision's parent is where it starts).
+    let (branch, parent, expected) = match branch {
+        BranchTarget::Default | BranchTarget::Head(_) => {
+            let name = match branch {
+                BranchTarget::Head(name) => name,
+                _ => design.default_branch.parse()?,
+            };
+            let head = design::head(&mut tx, design.id, name.as_str()).await?;
+            // The default branch of a design with no revision yet (a new
+            // design, or one whose first push was refused after the row)
+            // is made by this push.
+            if head.is_none() && name.as_str() != design.default_branch {
+                return Err(Refusal::NoSuchBranch {
+                    branch: name.to_string(),
+                }
+                .into());
+            }
+            (name, head, head)
+        }
+        BranchTarget::New { name, from } => {
+            if let Some(from) = from
+                && !design::reaches(&mut *tx, design.id, from).await?
+            {
+                return Err(Refusal::NoSuchRevision {
+                    hash: from.to_string(),
+                }
+                .into());
+            }
+            (name, from, None)
+        }
+    };
     let time = design::now_text(&mut tx).await?;
     let draft = RevisionDraft {
         tree,
@@ -546,11 +608,12 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Push
         message: message.map(str::trim).filter(|message| !message.is_empty()),
     };
     let revision = design::record_revision(&mut tx, &draft, author.account_id, metadata).await?;
-    design::set_head(&mut tx, design.id, &design.default_branch, parent, revision).await?;
+    design::set_head(&mut tx, design.id, branch.as_str(), expected, revision).await?;
     design::record_design_revision(&mut tx, design.id, revision).await?;
     tx.commit().await?;
     tracing::info!(
         design = %design.slug,
+        %branch,
         %revision,
         files = entries.len(),
         created,
@@ -558,6 +621,7 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Push
     );
     Ok(Pushed {
         design,
+        branch,
         revision,
         created,
     })

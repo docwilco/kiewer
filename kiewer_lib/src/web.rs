@@ -4,8 +4,9 @@
 //! in `web/viewer.rs`; the renderer beacon in `web/beacon.rs`; the about
 //! page in `web/about.rs`; the design page and the upload in
 //! `web/design.rs`; the blob route in `web/blob.rs`; the schematic page
-//! in `web/schematic.rs`; the people page in `web/people.rs`; a person's
-//! page in `web/person.rs`; the design settings form in
+//! in `web/schematic.rs`; the branch, revision and history pages in
+//! `web/history.rs`; the people page in `web/people.rs`; a person's page
+//! in `web/person.rs`; the design settings form in
 //! `web/design_settings.rs`.
 
 mod about;
@@ -14,6 +15,7 @@ pub mod beacon;
 pub mod blob;
 mod design;
 pub mod design_settings;
+pub mod history;
 mod people;
 mod person;
 pub mod schematic;
@@ -65,6 +67,7 @@ pub fn router(state: AppState) -> Router {
         .merge(viewer::routes())
         .merge(beacon::routes())
         .merge(schematic::routes())
+        .merge(history::routes())
         .merge(people::routes())
         .merge(design_settings::routes())
         // The upload's body may hold a revision's worth of files; every

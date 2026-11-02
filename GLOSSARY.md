@@ -19,7 +19,7 @@ One immutable snapshot of a design's files, with its parent revision, author, ti
 _Avoid_: commit, version, snapshot, upload
 
 **Branch**:
-A named pointer to the latest revision in one line of work. A branch is always a linear chain.
+A named pointer to the latest revision in one line of work. A branch is always a linear chain. Named with ASCII letters, digits, hyphens, underscores and dots, up to 64 characters, not starting with a hyphen or a dot: one URL segment.
 
 **Default branch**:
 The branch a bare design URL shows. Named `main` unless renamed.

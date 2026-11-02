@@ -8,26 +8,44 @@
 
 use askama::Template;
 use axum::extract::multipart::{Field, Multipart, MultipartError};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::http::header::LOCATION;
 use axum::response::{Html, IntoResponse, Redirect, Response};
+use serde::Deserialize;
 
 use super::auth::{Settled, personal};
 use super::design_settings::SettingsView;
-use super::viewer::{DesignView, FileView, Page};
-use super::{AppState, blob, schematic};
+use super::viewer::{BranchView, DesignView, FileView, Page, RecentView};
+use super::{AppState, blob, history, schematic};
 use crate::account::Handle;
 use crate::description::{self, Description};
-use crate::design::{self, DesignHead, Slug};
+use crate::design::{self, At, BranchName, DesignHead, Slug};
 use crate::error::{Error, Refusal, Result};
+use crate::revision::RevisionHash;
 use crate::roles::{self, Membership};
 use crate::slug;
-use crate::upload::{self, Author, Incoming, Limits, Target};
+use crate::upload::{self, Author, BranchTarget, Incoming, Limits, Target};
 
 /// The URL of a design's page.
 fn design_url(handle: &Handle, slug: &Slug) -> String {
     format!("/{handle}/{slug}")
+}
+
+/// The upload form opened from a design page: for `branch` (`None` for a
+/// new branch) at `revision`, the parent a new branch starts from. The
+/// handle, the slug and the branch name are their own characters; the
+/// hash is hex.
+fn upload_url(
+    handle: &Handle,
+    slug: &Slug,
+    branch: Option<&str>,
+    revision: RevisionHash,
+) -> String {
+    format!(
+        "/upload?design={handle}/{slug}&branch={}&at={revision}",
+        branch.unwrap_or_default()
+    )
 }
 
 /// The URL of a design's people page.
@@ -35,10 +53,11 @@ pub(super) fn people_url(handle: &Handle, slug: &Slug) -> String {
     format!("/{handle}/{slug}/people")
 }
 
-/// The design page for `shown`: the viewer at the head with the
-/// revision's details, the design's `description`, and `settings` as
-/// its settings block. Rendered here for the page and for the settings
-/// form's refusal, which shows the page again with the reason.
+/// The design page for `shown`: the viewer at the revision shown, in the
+/// context of its branch, with the revision's details, the design's
+/// `description`, and `settings` as its settings block. Rendered here for
+/// the page, the branch and revision routes (`web/history.rs`) and the
+/// settings form's refusal, which shows the page again with the reason.
 pub(super) fn design_page(
     shown: &DesignHead,
     description: &Description,
@@ -48,10 +67,48 @@ pub(super) fn design_page(
     let schematic_url = shown
         .schematic()
         .map(|_| schematic::url(&shown.owner, &shown.design.slug));
+    let at_branch = |name: &str| history::branch_url(&shown.owner, &shown.design, name);
+    let recent_view = |ordinal: u32, revision: &design::Revision| RecentView {
+        ordinal,
+        short: revision.hash.short(),
+        url: history::revision_url(&shown.owner, &shown.design.slug, revision.hash),
+        created_at: revision.created_at.clone(),
+        current: revision.hash == shown.revision.hash,
+    };
+    let mut recent: Vec<RecentView> = shown
+        .recent
+        .iter()
+        .map(|entry| recent_view(entry.ordinal, &entry.revision))
+        .collect();
+    // A revision older than the last ten is still the one shown: it joins
+    // the list at the end, so the dropdown has it selected.
+    if !recent.iter().any(|entry| entry.current) {
+        recent.push(recent_view(shown.ordinal, &shown.revision));
+    }
     let view = DesignView {
         handle: shown.owner.to_string(),
         slug: shown.design.slug.to_string(),
-        branch: shown.branch.clone(),
+        branches: shown
+            .branches
+            .iter()
+            .map(|branch| BranchView {
+                name: branch.name.to_string(),
+                url: at_branch(branch.name.as_str()),
+            })
+            .collect(),
+        recent,
+        ordinal: shown.ordinal,
+        behind: shown.behind,
+        head_url: at_branch(shown.branch.as_str()),
+        history_url: history::history_url(&shown.owner, &shown.design.slug, shown.branch.as_str()),
+        upload_url: upload_url(
+            &shown.owner,
+            &shown.design.slug,
+            Some(shown.branch.as_str()),
+            shown.revision.hash,
+        ),
+        new_branch_url: upload_url(&shown.owner, &shown.design.slug, None, shown.revision.hash),
+        branch: shown.branch.to_string(),
         revision: shown.revision.hash.to_string(),
         short: shown.revision.hash.short(),
         author: shown.revision.author.clone(),
@@ -96,11 +153,29 @@ pub(super) async fn page(
     State(state): State<AppState>,
     Path((handle, slug)): Path<(String, String)>,
 ) -> Result<Response> {
+    show(&state, &handle, &slug, At::Default).await
+}
+
+/// The design `/{handle}/{slug}` shown at `at`, as [`design_page`]
+/// renders it, or 404 when there is no such design, branch or reachable
+/// revision; the branch and revision routes (`web/history.rs`) land here
+/// too. The slug redirect is the design page's alone: a branch or
+/// revision URL under an old slug is 404, since the links a page carries
+/// are under the slug it was rendered at.
+pub(super) async fn show(
+    state: &AppState,
+    handle: &str,
+    slug: &str,
+    at: At<'_>,
+) -> Result<Response> {
     let not_found = || (StatusCode::NOT_FOUND, "no such design\n").into_response();
     let (Ok(handle), Ok(slug)) = (handle.parse::<Handle>(), slug.parse::<Slug>()) else {
         return Ok(not_found());
     };
-    let Some(shown) = design::show(&state.db, handle.as_str(), slug.as_str()).await? else {
+    let Some(shown) = design::show_at(&state.db, handle.as_str(), slug.as_str(), at).await? else {
+        if at != At::Default {
+            return Ok(not_found());
+        }
         let moved = slug::redirect(&state.db, handle.as_str(), slug.as_str()).await?;
         return Ok(match moved {
             Some(current) => (
@@ -116,6 +191,20 @@ pub(super) async fn page(
     Ok(Html(design_page(&shown, &description, settings)?).into_response())
 }
 
+/// Where the upload form was opened from (`/upload?design=&branch=&at=`,
+/// the design page's links): the design to preselect, the branch of that
+/// page (empty for a new branch), and the revision it showed, which a new
+/// branch starts from.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct Opened {
+    #[serde(default)]
+    design: String,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    at: String,
+}
+
 #[derive(Template)]
 #[template(path = "upload.html")]
 struct UploadPage {
@@ -123,6 +212,15 @@ struct UploadPage {
     /// The designs the person may push to, newest first: the targets
     /// besides a new one.
     designs: Vec<Membership>,
+    /// The path (`handle/slug`) to preselect, or empty for a new design.
+    design: String,
+    /// The branches the selector offers: the preselected design's, or the
+    /// default branch's name alone when no design is in context.
+    branches: Vec<String>,
+    /// The branch to preselect, or empty for a new branch.
+    branch: String,
+    /// The revision a new branch starts from, or empty.
+    from: String,
     /// Why the last attempt was refused, or none.
     error: Option<String>,
     file_mb: u64,
@@ -132,11 +230,30 @@ struct UploadPage {
 async fn upload_page(
     state: &AppState,
     settled: Settled,
+    opened: &Opened,
     status: StatusCode,
     error: Option<String>,
 ) -> Result<Response> {
+    let designs = roles::designs_of(&state.db, settled.account_id).await?;
+    let selected = designs.iter().find(|member| member.path() == opened.design);
+    let branches = match selected {
+        Some(selected) => design::branches(&state.db, selected.design.id)
+            .await?
+            .into_iter()
+            .map(|branch| branch.name.to_string())
+            .collect(),
+        None => vec![design::DEFAULT_BRANCH.to_owned()],
+    };
+    let branch = match &opened.branch {
+        Some(branch) if branches.contains(branch) || branch.is_empty() => branch.clone(),
+        _ => branches[0].clone(),
+    };
     let page = UploadPage {
-        designs: roles::designs_of(&state.db, settled.account_id).await?,
+        design: selected.map(Membership::path).unwrap_or_default(),
+        designs,
+        branches,
+        branch,
+        from: opened.at.clone(),
         handle: settled.handle,
         error,
         file_mb: Limits::DEFAULT.file_mb(),
@@ -145,12 +262,14 @@ async fn upload_page(
     Ok(personal(settled.jar, (status, Html(page.render()?))))
 }
 
-/// `GET /upload`: the form.
+/// `GET /upload`: the form, opened for the design, branch and revision
+/// the query names, if any.
 pub(super) async fn upload_form(
     State(state): State<AppState>,
     settled: Settled,
+    Query(opened): Query<Opened>,
 ) -> Result<Response> {
-    upload_page(&state, settled, StatusCode::OK, None).await
+    upload_page(&state, settled, &opened, StatusCode::OK, None).await
 }
 
 /// The status a refusal is answered with: too large is 413, a file the
@@ -166,11 +285,14 @@ fn status(refusal: &Refusal) -> StatusCode {
         | Refusal::DoesNotParse { .. }
         | Refusal::ParseTimeout { .. }
         | Refusal::Blocked { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-        Refusal::SlugTaken { .. } | Refusal::SlugMoved { .. } | Refusal::HeadMoved { .. } => {
-            StatusCode::CONFLICT
-        }
-        Refusal::NoSuchDesign { .. } => StatusCode::NOT_FOUND,
-        Refusal::Unreadable { .. } => StatusCode::BAD_REQUEST,
+        Refusal::SlugTaken { .. }
+        | Refusal::SlugMoved { .. }
+        | Refusal::HeadMoved { .. }
+        | Refusal::BranchTaken { .. } => StatusCode::CONFLICT,
+        Refusal::NoSuchDesign { .. }
+        | Refusal::NoSuchBranch { .. }
+        | Refusal::NoSuchRevision { .. } => StatusCode::NOT_FOUND,
+        Refusal::Unreadable { .. } | Refusal::BadBranchName { .. } => StatusCode::BAD_REQUEST,
     }
 }
 
@@ -198,7 +320,86 @@ fn unreadable(error: &MultipartError) -> Error {
 struct Fields {
     design: Option<String>,
     name: Option<String>,
+    /// The branch selected, or empty for a new one.
+    branch: Option<String>,
+    /// The new branch's name.
+    new_branch: Option<String>,
+    /// The revision a new branch starts from.
+    from: Option<String>,
     message: Option<String>,
+}
+
+impl Fields {
+    /// Where the upload goes, as the fields say: a new design without a
+    /// path; else the design at the path (`handle/slug`, as the options
+    /// carry it), on the branch selected (the default branch when the
+    /// form names none), or, with the empty option, on a new branch named
+    /// in `new_branch` starting from `from`.
+    fn target(&self) -> Result<Target> {
+        let (owner, slug) = match self.design.as_deref().map(str::trim) {
+            Some(path) if !path.is_empty() => design_path(path).ok_or_else(|| {
+                Error::Refused(Refusal::NoSuchDesign {
+                    slug: path.to_owned(),
+                })
+            })?,
+            _ => {
+                return Ok(Target::New {
+                    name: self.name.clone(),
+                });
+            }
+        };
+        let branch = match self.branch.as_deref().map(str::trim) {
+            None => BranchTarget::Default,
+            Some(name) if !name.is_empty() => {
+                BranchTarget::Head(name.parse::<BranchName>().map_err(|_| {
+                    Error::Refused(Refusal::NoSuchBranch {
+                        branch: name.to_owned(),
+                    })
+                })?)
+            }
+            Some(_) => {
+                let name = self
+                    .new_branch
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default();
+                let name = name.parse::<BranchName>().map_err(|error| {
+                    Error::Refused(Refusal::BadBranchName {
+                        reason: if name.is_empty() {
+                            "a new branch needs a name".to_owned()
+                        } else {
+                            error.to_string()
+                        },
+                    })
+                })?;
+                let from = match self.from.as_deref().map(str::trim) {
+                    Some(hash) if !hash.is_empty() => {
+                        Some(hash.parse::<RevisionHash>().map_err(|_| {
+                            Error::Refused(Refusal::NoSuchRevision {
+                                hash: hash.to_owned(),
+                            })
+                        })?)
+                    }
+                    _ => None,
+                };
+                BranchTarget::New { name, from }
+            }
+        };
+        Ok(Target::Existing {
+            owner,
+            slug,
+            branch,
+        })
+    }
+
+    /// The form as it was filled, for showing it again with a refusal.
+    fn opened(&self) -> Opened {
+        Opened {
+            design: self.design.clone().unwrap_or_default(),
+            branch: self.branch.clone(),
+            at: self.from.clone().unwrap_or_default(),
+        }
+    }
 }
 
 /// Read every part into `incoming` and `fields`; a refusal is the
@@ -217,6 +418,9 @@ async fn receive(
         match field.name() {
             Some("design") => fields.design = Some(text(field).await?),
             Some("name") => fields.name = Some(text(field).await?),
+            Some("branch") => fields.branch = Some(text(field).await?),
+            Some("new_branch") => fields.new_branch = Some(text(field).await?),
+            Some("from") => fields.from = Some(text(field).await?),
             Some("message") => fields.message = Some(text(field).await?),
             Some("files") => receive_file(field, incoming).await?,
             _ => drain(field).await?,
@@ -261,39 +465,20 @@ pub(super) async fn upload(
     let mut incoming = Incoming::new(Limits::DEFAULT)?;
     let mut fields = Fields::default();
     let received = receive(&mut multipart, &mut incoming, &mut fields).await;
-    let target = match fields.design.as_deref().map(str::trim) {
-        Some(path) if !path.is_empty() => match existing(path) {
-            Some(target) => target,
-            None => {
-                return upload_page(
-                    &state,
-                    settled,
-                    StatusCode::NOT_FOUND,
-                    Some(
-                        Refusal::NoSuchDesign {
-                            slug: path.to_owned(),
-                        }
-                        .to_string(),
-                    ),
-                )
-                .await;
-            }
-        },
-        _ => Target::New { name: fields.name },
-    };
     let author = Author {
         account_id: settled.account_id,
         handle: settled.handle.clone(),
     };
+    let target = received.and_then(|()| fields.target());
     // The design's URL is under its owner's handle, which is the author's
     // only for a new design: a collaborator's push lands on the owner's
     // page.
     let owner = match &target {
-        Target::Existing { owner, .. } => owner.clone(),
-        Target::New { .. } => author.handle.clone(),
+        Ok(Target::Existing { owner, .. }) => owner.clone(),
+        _ => author.handle.clone(),
     };
-    let committed = match received {
-        Ok(()) => {
+    let committed = match target {
+        Ok(target) => {
             upload::push(
                 &state.db,
                 state.blobs.as_ref(),
@@ -309,18 +494,26 @@ pub(super) async fn upload(
     };
     match committed {
         Ok(committed) => {
-            let next = design_url(&owner, &committed.design.slug);
+            let next = history::branch_url(&owner, &committed.design, committed.branch.as_str());
             Ok(personal(settled.jar, Redirect::to(&next)))
         }
         Err(Error::Refused(refusal)) => {
             tracing::info!(%refusal, "upload refused");
-            upload_page(&state, settled, status(&refusal), Some(refusal.to_string())).await
+            upload_page(
+                &state,
+                settled,
+                &fields.opened(),
+                status(&refusal),
+                Some(refusal.to_string()),
+            )
+            .await
         }
         Err(error @ Error::Forbidden { .. }) => {
             tracing::info!(%error, "upload refused");
             upload_page(
                 &state,
                 settled,
+                &fields.opened(),
                 StatusCode::FORBIDDEN,
                 Some(error.to_string()),
             )
@@ -330,12 +523,9 @@ pub(super) async fn upload(
     }
 }
 
-/// The target the form's `design` field names, `handle/slug` as the
+/// The design the form's `design` field names, `handle/slug` as the
 /// options carry it, or `None` for text that is not a design's path.
-fn existing(path: &str) -> Option<Target> {
+fn design_path(path: &str) -> Option<(Handle, Slug)> {
     let (owner, slug) = path.split_once('/')?;
-    Some(Target::Existing {
-        owner: owner.parse().ok()?,
-        slug: slug.parse().ok()?,
-    })
+    Some((owner.parse().ok()?, slug.parse().ok()?))
 }
