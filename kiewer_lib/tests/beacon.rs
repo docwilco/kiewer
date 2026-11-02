@@ -292,3 +292,28 @@ async fn only_post_is_served() {
     let (status, _) = http::get(addr, BEACON_PATH).await;
     assert_eq!(status, 405);
 }
+
+#[tokio::test]
+async fn the_viewer_page_sends_the_beacon_and_keeps_a_panic_for_it() {
+    let (addr, _dir) = start().await;
+    let (status, body) = http::get(addr, "/viewer").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("navigator.sendBeacon"), "{body}");
+    assert!(body.contains(BEACON_PATH), "{body}");
+    assert!(
+        body.contains("\"gpu\" in navigator"),
+        "the page says whether WebGPU existed: {body}"
+    );
+    assert!(body.contains("adapter_vendor()"), "{body}");
+    let hook = body
+        .find("panicked at")
+        .expect("the panic hook reads the hook's message");
+    let module = body
+        .find("<script type=\"module\">")
+        .expect("the module script");
+    assert!(
+        hook < module,
+        "the panic hook runs before the module, so a panic in init is kept"
+    );
+    assert!(body.contains("kiewer-panic"), "{body}");
+}

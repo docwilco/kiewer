@@ -168,6 +168,51 @@ impl Config {
     }
 }
 
+/// The log's shape, as `LOG_FORMAT` chooses it (`json` or `text`) and,
+/// unset, as stdout does: a terminal reads text, anything else (a pipe,
+/// Cloud Run's log agent) gets JSON. The executable applies it; the
+/// library only names it, so the variable is listed with the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFormat {
+    /// One JSON object per event with its fields flattened: what Cloud
+    /// Logging reads into `jsonPayload` and the renderer beacon's metric
+    /// counts (`infra/logging.tf`).
+    Json,
+    /// One line per event for a person reading a terminal.
+    Text,
+}
+
+impl LogFormat {
+    /// The format from the process environment, with `terminal` saying
+    /// whether stdout is one.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Env`] when `LOG_FORMAT` is set to anything but `json` or
+    /// `text`.
+    pub fn from_env(terminal: bool) -> Result<Self> {
+        Self::from_vars(|name| std::env::var(name).ok(), terminal)
+    }
+
+    /// The format from any source of variables.
+    ///
+    /// # Errors
+    ///
+    /// As [`LogFormat::from_env`].
+    pub fn from_vars(var: impl Fn(&str) -> Option<String>, terminal: bool) -> Result<Self> {
+        match var("LOG_FORMAT").filter(|value| !value.is_empty()) {
+            None if terminal => Ok(LogFormat::Text),
+            None => Ok(LogFormat::Json),
+            Some(value) if value == "json" => Ok(LogFormat::Json),
+            Some(value) if value == "text" => Ok(LogFormat::Text),
+            Some(value) => Err(Error::Env {
+                name: "LOG_FORMAT",
+                reason: format!("is {value:?}, not json or text"),
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +440,44 @@ mod tests {
         ]))
         .expect_err("not a port");
         assert!(matches!(err, Error::Env { name: "PORT", .. }), "{err}");
+    }
+
+    #[test]
+    fn the_log_format_follows_the_variable_then_the_terminal() {
+        assert_eq!(
+            LogFormat::from_vars(vars(&[("LOG_FORMAT", "json")]), true).expect("valid"),
+            LogFormat::Json
+        );
+        assert_eq!(
+            LogFormat::from_vars(vars(&[("LOG_FORMAT", "text")]), false).expect("valid"),
+            LogFormat::Text
+        );
+        assert_eq!(
+            LogFormat::from_vars(vars(&[]), true).expect("valid"),
+            LogFormat::Text,
+            "a terminal reads text"
+        );
+        assert_eq!(
+            LogFormat::from_vars(vars(&[]), false).expect("valid"),
+            LogFormat::Json,
+            "a pipe or Cloud Run gets JSON"
+        );
+        assert_eq!(
+            LogFormat::from_vars(vars(&[("LOG_FORMAT", "")]), false).expect("valid"),
+            LogFormat::Json,
+            "empty is unset"
+        );
+        let err =
+            LogFormat::from_vars(vars(&[("LOG_FORMAT", "yaml")]), true).expect_err("not a format");
+        assert!(
+            matches!(
+                err,
+                Error::Env {
+                    name: "LOG_FORMAT",
+                    ..
+                }
+            ),
+            "{err}"
+        );
     }
 }

@@ -60,6 +60,25 @@
 {% if !embedded %}
 <p id="not-built">{{ not_built }}</p>
 {% endif %}
+<script>
+// A wasm panic reaches the page as a bare "unreachable" trap; its message
+// goes through console_error_panic_hook to console.error first. This
+// classic script runs before the module below, so a panic inside
+// Viewer.create or load_board is kept too; the beacon block at the end of
+// the module reads kiewerPanic and listens for kiewer-panic.
+(function () {
+  window.kiewerPanic = "";
+  var original = console.error.bind(console);
+  console.error = function () {
+    var text = Array.prototype.map.call(arguments, String).join(" ");
+    if (text.startsWith("panicked at")) {
+      window.kiewerPanic = text.split("\n\nStack:")[0];
+      window.dispatchEvent(new Event("kiewer-panic"));
+    }
+    original.apply(console, arguments);
+  };
+})();
+</script>
 <script type="module">
 // The page owns the listeners and hands each gesture to the wasm in
 // device pixels; the camera (f64) and the drawing are Rust. The bindings
@@ -217,6 +236,55 @@ try {
   schedule();
 } catch (e) {
   fail(e && e.message ? e.message : e);
+}
+
+// Telemetry (docs/v1-scope.md, Telemetry; the server side is
+// kiewer_lib/src/web/beacon.rs): one beacon per page load, after the
+// adapter init above, with the backend, whether navigator.gpu existed, the
+// outcome and the adapter vendor; a wasm panic sends one more with its
+// message. sendBeacon queues the POST and returns at once, so nothing here
+// waits on the network or runs before the first frame is scheduled. No
+// identifiers, no cookie: the body is the five fields below.
+const BEACON_PATH = "/api/beacon";
+const MAX_REASON = 1024;
+const MAX_VENDOR = 64;
+let panicSent = false;
+function sendBeacon(outcome, reason, vendor) {
+  if (!navigator.sendBeacon) return;
+  const body = JSON.stringify({
+    backend: viewer ? viewer.backend() : "none",
+    webgpu_present: "gpu" in navigator,
+    outcome: outcome,
+    reason: String(reason || "").slice(0, MAX_REASON),
+    vendor: String(vendor || "").toLowerCase().slice(0, MAX_VENDOR),
+  });
+  try { navigator.sendBeacon(BEACON_PATH, body); } catch (e) { /* telemetry never fails the page */ }
+}
+function sendPanic() {
+  if (panicSent) return;
+  panicSent = true;
+  sendBeacon("panic", window.kiewerPanic, viewer ? viewer.adapter_vendor() : "");
+}
+// wgpu names the vendor on WebGL2 from the browser's vendor string and
+// not yet on WebGPU (kiewer_viewer/src/web.rs, vendor_name), where the
+// browser's own adapter info says it when the browser exposes one.
+async function vendor() {
+  let name = viewer.adapter_vendor();
+  if (!name && viewer.backend() === "webgpu" && navigator.gpu) {
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      name = adapter && adapter.info ? adapter.info.vendor : "";
+    } catch (e) { name = ""; }
+  }
+  return name;
+}
+window.addEventListener("kiewer-panic", sendPanic);
+if (window.kiewerPanic) {
+  sendPanic();
+} else if (viewer) {
+  sendBeacon("ok", "", await vendor());
+} else {
+  sendBeacon("failed", errorBox.textContent, "");
 }
 </script>
 </body>

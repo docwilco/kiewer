@@ -26,8 +26,11 @@ answers.
 `kiewer_lib::config` is the list of variables the server reads and their
 defaults; the blob store writes under `blobs/` (git-ignored) unless
 `BLOB_BUCKET` names a GCS bucket, which makes it the GCS store (with
-`KIEWER_GCS_EMULATOR` beside it, on the emulator below). Ctrl-c or SIGTERM
-stops it after the requests in flight.
+`KIEWER_GCS_EMULATOR` beside it, on the emulator below). The log is text
+on a terminal and JSON lines anywhere else (Cloud Run reads those into
+`jsonPayload`; the renderer beacon's metric in `infra/logging.tf` counts
+them); `LOG_FORMAT=json` or `text` overrides. Ctrl-c or SIGTERM stops it
+after the requests in flight.
 
 The tests that need Postgres (`kiewer_lib/tests/db.rs`, `accounts.rs`,
 `sign_in.rs`) run when `DATABASE_URL` is exported and skip when it is not,

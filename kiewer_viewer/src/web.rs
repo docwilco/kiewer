@@ -31,6 +31,8 @@ pub struct Viewer {
     scene: Option<Scene>,
     backend: Backend,
     fallback: Vec<String>,
+    /// The adapter's vendor as [`vendor_name`] read it, for the beacon.
+    vendor: String,
     /// The scale the board was last fitted at, 0 before a board: the
     /// zoom the page shows is relative to it.
     fit_scale: f64,
@@ -137,6 +139,31 @@ async fn webgl2(canvas: HtmlCanvasElement, mut reasons: Vec<String>) -> Result<G
     })
 }
 
+/// The vendor `info` names, lowercased, for the renderer beacon
+/// (docs/v1-scope.md, Telemetry): the PCI vendor id mapped to its name,
+/// the id in hex for one outside the list, empty when nothing is known.
+/// On WebGL2 the id comes from the browser's vendor string, which
+/// Firefox masks to Mozilla (empty here) and Chrome exposes; on WebGPU
+/// wgpu 30 maps only the description and leaves the id 0
+/// (gfx-rs/wgpu#8819), so the page asks `navigator.gpu` itself when this
+/// is empty.
+fn vendor_name(info: &wgpu::AdapterInfo) -> String {
+    // The ids wgpu-hal's own table knows (auxil/db.rs).
+    match info.vendor {
+        0 => String::new(),
+        0x1002 => "amd".to_owned(),
+        0x1010 => "imgtec".to_owned(),
+        0x10DE => "nvidia".to_owned(),
+        0x13B5 => "arm".to_owned(),
+        0x5143 => "qualcomm".to_owned(),
+        0x8086 => "intel".to_owned(),
+        0x14E4 => "broadcom".to_owned(),
+        0x106B => "apple".to_owned(),
+        0x10005 => "mesa".to_owned(),
+        other => format!("{other:#x}"),
+    }
+}
+
 async fn request_gpu(canvas: HtmlCanvasElement) -> Result<Gpu> {
     let mut reasons = Vec::new();
     if let Some(gpu) = webgpu(&canvas, &mut reasons).await {
@@ -187,6 +214,7 @@ impl Viewer {
         } else {
             1
         };
+        let vendor = vendor_name(&gpu.adapter.get_info());
         let renderer = Renderer::new(&gpu.device, config.format, samples);
         let camera = Camera::new(Size {
             width: f64::from(config.width),
@@ -202,6 +230,7 @@ impl Viewer {
             scene: None,
             backend: gpu.backend,
             fallback: gpu.fallback,
+            vendor,
             fit_scale: 0.0,
         })
     }
@@ -235,6 +264,13 @@ impl Viewer {
     #[must_use]
     pub fn fallback_reasons(&self) -> String {
         self.fallback.join("; ")
+    }
+
+    /// The adapter's vendor, lowercased (`nvidia`, `intel`, `apple`, ...),
+    /// or empty when the browser exposes none; see [`vendor_name`].
+    #[must_use]
+    pub fn adapter_vendor(&self) -> String {
+        self.vendor.clone()
     }
 
     /// Samples per pixel the frame is drawn with: 4 with multisampling, 1

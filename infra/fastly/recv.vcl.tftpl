@@ -12,6 +12,13 @@ unset req.http.X-Http-Method-Override;
 # sent it would have a Cloud Run page cached for a year as if it were a
 # blob, so whatever arrives under that name is dropped first.
 unset req.http.X-Kiewer-Origin;
+# Fastly's own Fastly-Client-IP is a copy of client.ip that a client may
+# have sent first, so it is written here from the connection on the first
+# visit to this service; the server keys the renderer beacon's rate limit
+# on it (kiewer_lib/src/web/beacon.rs) and reads nothing else from it.
+if (fastly.ff.visits_this_service == 0 && req.restarts == 0) {
+  set req.http.Fastly-Client-IP = client.ip;
+}
 
 declare local var.bucket STRING;
 

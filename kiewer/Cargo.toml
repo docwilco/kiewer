@@ -13,4 +13,7 @@ workspace = true
 kiewer_lib = { path = "../kiewer_lib" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt"] }
+# json: the one-object-per-event format the server logs with when stdout
+# is not a terminal (LOG_FORMAT), which Cloud Logging reads into
+# jsonPayload; ansi and fmt for the terminal's text.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt", "json"] }
