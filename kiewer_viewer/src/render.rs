@@ -131,6 +131,12 @@ impl Rgb {
         [channel(self.0), channel(self.1), channel(self.2), 1.0]
     }
 
+    /// The colour as CSS writes it: `#f0c030`.
+    #[must_use]
+    pub fn to_css(self) -> String {
+        format!("#{:02x}{:02x}{:02x}", self.0, self.1, self.2)
+    }
+
     /// The colour as a clear value for a target of `format`.
     #[must_use]
     pub fn clear_for_format(self, format: wgpu::TextureFormat) -> wgpu::Color {
@@ -580,5 +586,7 @@ mod tests {
         assert!((r - 0.024_158).abs() < 1e-4, "{r}");
         let clear = Rgb(255, 0, 0).clear_for_format(wgpu::TextureFormat::Bgra8UnormSrgb);
         assert!((clear.r - 1.0).abs() < 1e-9 && clear.g == 0.0 && clear.b == 0.0);
+        assert_eq!(Rgb(0xf0, 0xc0, 0x30).to_css(), "#f0c030");
+        assert_eq!(Rgb(0, 1, 255).to_css(), "#0001ff");
     }
 }

@@ -32,12 +32,22 @@
   #fonts p { margin: 0.3em 0; }
   #fonts select, #fonts input { font: inherit; max-width: 100%; }
   #fonts .absent { opacity: 0.7; }
+  /* The views and the layer panel (docs/v1-scope.md, Rendering, Views):
+     the view select in the header, the layers folded at the stage's top
+     left, the top of the stack first, a checkbox and an opacity each. */
+  header select { font: inherit; max-width: 40vw; }
+  #layers { position: absolute; left: 0.8em; top: 0.8em; max-height: calc(100% - 3em); overflow: auto; padding: 0.3em 0.6em; background: rgba(43, 43, 43, 0.9); border: 1px solid #444; border-radius: 4px; font-size: 13px; }
+  #layers summary { cursor: pointer; }
+  #layers label { display: grid; grid-template-columns: auto auto 1fr 6em; gap: 0.4em; align-items: center; margin: 0.2em 0; }
+  #layers .swatch { width: 0.8em; height: 0.8em; border-radius: 2px; border: 1px solid #666; }
+  #layers input[type=range] { width: 6em; margin: 0; }
+  #warning { margin: 0.3em 0; padding: 0.3em 0.5em; background: #4a3f1e; border-radius: 4px; }
 </style>
 </head>
 <body>
 <header>
   <h1><a href="/">kiewer</a> / {{ title }}</h1>
-  <span>Edge.Cuts + F.Cu + F.SilkS</span>
+  <select id="view" title="View"></select>
   <button id="fit" type="button" title="Home">Fit</button>
   <span id="status"></span>
 </header>
@@ -46,6 +56,13 @@
   <p id="error" hidden></p>
   <p id="hint">wheel zooms, ctrl+wheel and shift+wheel pan, middle or right drag pans, + and - zoom, Home fits</p>
   <p id="zoom"></p>
+  <div id="layers" hidden>
+    <details>
+      <summary>Layers</summary>
+      <p id="warning" hidden></p>
+      <div id="layer-list"></div>
+    </details>
+  </div>
   <div id="fonts" hidden></div>
 </div>
 {% if let Some(design) = design %}
@@ -535,6 +552,97 @@ window.addEventListener("kiewer-board", function (e) {
   fontsViewer = e.detail.viewer;
   fontsSchedule = e.detail.schedule;
   try { setup(); } catch (e2) { console.warn("kiewer: font picker: " + e2); }
+});
+</script>
+<script type="module">
+// The views and the layer panel (docs/v1-scope.md, Rendering, Views). The
+// views, the layers and the state are the wasm's (kiewer_viewer/src/view.rs);
+// this block mirrors the state into the select, the checkboxes and the
+// sliders, sends every change back, and keeps the URL fragment equal to
+// viewer.fragment() so the address bar is always a link to what is shown.
+// It wakes on kiewer-board, which the main module script sends once the
+// board is loaded, with the viewer and the frame scheduler.
+const layersPanel = document.getElementById("layers");
+const layerList = document.getElementById("layer-list");
+const viewSelect = document.getElementById("view");
+const warningBox = document.getElementById("warning");
+let layersViewer = null;
+let scheduleFrame = null;
+
+function syncFragment() {
+  const fragment = "#" + layersViewer.fragment();
+  if (location.hash !== fragment) history.replaceState(null, "", fragment);
+}
+function buildViews() {
+  viewSelect.replaceChildren();
+  layersViewer.views().forEach(function (title, index) {
+    const option = document.createElement("option");
+    option.value = String(index + 1);
+    option.textContent = (index + 1) + ". " + title;
+    viewSelect.append(option);
+  });
+}
+// One row per layer, the top of the stack first: a checkbox, the colour
+// the view gives the layer, its name, and its opacity.
+function buildLayers() {
+  layerList.replaceChildren();
+  for (const key of layersViewer.layers().reverse()) {
+    const row = document.createElement("label");
+    const shown = document.createElement("input");
+    shown.type = "checkbox";
+    shown.checked = layersViewer.layer_shown(key);
+    const swatch = document.createElement("span");
+    swatch.className = "swatch";
+    swatch.style.background = layersViewer.layer_color(key);
+    const name = document.createElement("span");
+    name.textContent = key;
+    const opacity = document.createElement("input");
+    opacity.type = "range";
+    opacity.min = "0";
+    opacity.max = "1";
+    opacity.step = "0.01";
+    opacity.value = String(layersViewer.layer_opacity(key));
+    opacity.title = "opacity";
+    const apply = function () {
+      layersViewer.set_layer(key, shown.checked, Number(opacity.value));
+      syncFragment();
+      scheduleFrame();
+    };
+    shown.addEventListener("change", apply);
+    opacity.addEventListener("input", apply);
+    row.append(shown, swatch, name, opacity);
+    layerList.append(row);
+  }
+}
+function refreshPanel() {
+  viewSelect.value = String(layersViewer.view());
+  buildLayers();
+  const warnings = layersViewer.warnings();
+  warningBox.hidden = warnings.length === 0;
+  warningBox.textContent = warnings.join(" ");
+  layersPanel.hidden = false;
+}
+function applyHash() {
+  layersViewer.apply_fragment(location.hash);
+  refreshPanel();
+  syncFragment();
+  scheduleFrame();
+}
+viewSelect.addEventListener("change", function () {
+  if (!layersViewer) return;
+  layersViewer.set_view(Number(viewSelect.value));
+  refreshPanel();
+  syncFragment();
+  scheduleFrame();
+});
+window.addEventListener("hashchange", function () {
+  if (layersViewer) applyHash();
+});
+window.addEventListener("kiewer-board", function (e) {
+  layersViewer = e.detail.viewer;
+  scheduleFrame = e.detail.schedule;
+  buildViews();
+  applyHash();
 });
 </script>
 </body>

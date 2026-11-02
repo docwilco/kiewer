@@ -20,7 +20,7 @@ The decisions behind v1, settled in the design grilling of 2026-10-30, grouped b
 - wgpu, one code path at the WebGL2 floor, WebGPU when present. See ADR 0001. (S3)
 - Tessellation in the browser at load with lyon: arcs, round-capped tracks, zones with holes, stroke-font glyphs. (Q18)
 - Zone fills: stored fills only; an unfilled zone draws its outline hatched and the design page shows a warning. (Q19)
-- Views: the eight stacks from the hand-off README as presets, free per-layer toggles and opacity on top, state in the URL fragment. Per-design presets later. (Q37)
+- Views: the eight stacks from the hand-off README as presets, free per-layer toggles and opacity on top, state in the URL fragment. Per-design presets later. (Q37) Built as #6: the layers, the views per board (one per copper layer, the front and the mirrored back as built, both sides either way up: the eight for a four-layer board) and the fragment (`view=5&F.Cu=0.5&F.SilkS=off`) are `kiewer_viewer/src/view.rs`; every layer is one slice of one scene (`scene.rs`) coloured per draw (`render.rs`), so a toggle never re-tessellates; the mask overlay is a polygon boolean in `kicad_core/src/tessellate.rs`, not a stencil pass; the panel is the layers block of `kiewer_lib/templates/viewer.html`. A new layer or view starts in `view.rs` and lands in those.
 - Schematic: sheet list in a side panel, click on a hierarchical sheet symbol enters it, sheet path in the URL fragment. (Q38)
 - Net interaction: hover names the net and dims everything else; click pins the highlight and lists the net's pads; Escape or a click on empty space clears. Same for wires and labels on the schematic. (Q45)
 - Search box: reference designator pans to the footprint or symbol. No measure, ruler or BOM tools. (Q46)

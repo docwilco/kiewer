@@ -394,6 +394,19 @@ impl Viewer {
         f64::from(self.layer_state(key).unwrap_or(1.0))
     }
 
+    /// The colour the layer `key` names draws in under the view in force,
+    /// as CSS writes it (`#f0c030`), for the panel's swatch; empty for an
+    /// unknown layer or before a board.
+    #[must_use]
+    pub fn layer_color(&self, key: &str) -> String {
+        let (Some(scene), Some(view), Some(layer)) =
+            (&self.scene, self.current_view(), Layer::parse(key))
+        else {
+            return String::new();
+        };
+        view.color(&scene.stack, &layer).to_css()
+    }
+
     /// Show the layer `key` names at `opacity`, or hide it: a toggle on
     /// top of the view in force.
     pub fn set_layer(&mut self, key: &str, shown: bool, opacity: f64) {
