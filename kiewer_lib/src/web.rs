@@ -4,13 +4,16 @@
 //! in `web/viewer.rs`; the renderer beacon in `web/beacon.rs`; the about
 //! page in `web/about.rs`; the design page and the upload in
 //! `web/design.rs`; the blob route in `web/blob.rs`; the schematic page
-//! in `web/schematic.rs`.
+//! in `web/schematic.rs`; the people page in `web/people.rs`; a person's
+//! page in `web/person.rs`.
 
 mod about;
 mod auth;
 pub mod beacon;
 pub mod blob;
 mod design;
+mod people;
+mod person;
 pub mod schematic;
 mod settings;
 pub mod viewer;
@@ -60,6 +63,7 @@ pub fn router(state: AppState) -> Router {
         .merge(viewer::routes())
         .merge(beacon::routes())
         .merge(schematic::routes())
+        .merge(people::routes())
         // The upload's body may hold a revision's worth of files; every
         // other route keeps axum's default limit. Static routes above win
         // over the design page's two segments (axum 0.8 matches the most
@@ -71,6 +75,7 @@ pub fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(crate::upload::BODY_LIMIT)),
         )
         .route("/blob/{hash}", get(blob::serve))
+        .route("/{handle}", get(person::page))
         .route("/{handle}/{slug}", get(design::page))
         .with_state(state)
 }
@@ -128,12 +133,16 @@ struct Index {
     /// configuration, the same for everyone, so the page stays cacheable
     /// (ADR 0003).
     providers: Vec<crate::auth::Provider>,
+    /// The public designs pushed to most recently (`listing`): the same
+    /// for everyone too, since no listing reads the session.
+    recent: Vec<crate::listing::Listed>,
 }
 
 async fn index(State(state): State<AppState>) -> Result<Html<String>> {
     let page = Index {
         build: crate::build::line(),
         providers: state.auth.providers(),
+        recent: crate::listing::recent_public(&state.db).await?,
     };
     Ok(Html(page.render()?))
 }

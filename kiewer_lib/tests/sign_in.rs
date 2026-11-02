@@ -1087,7 +1087,13 @@ async fn sign_in_with_an_unregistered_provider_is_not_found(provider: &str) {
 
 #[tokio::test]
 async fn the_front_page_offers_no_sign_in_without_a_provider() {
+    // The front page lists recent public designs (#21), so it reads the
+    // database: a real pool, with no provider registered.
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
     let (state, _dir) = anonymous_state();
+    let state = AppState { db, ..state };
     let addr = http::serve_on_free_port(state).await;
     let (status, body) = http::get(addr, "/").await;
     assert_eq!(status, 200);

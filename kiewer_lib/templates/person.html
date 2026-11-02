@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ handle }} - kiewer</title>
+</head>
+<body>
+<nav><a href="/">kiewer</a></nav>
+<h1>{{ handle }}</h1>
+{% if designs.is_empty() %}
+<p>No public designs yet.</p>
+{% else %}
+<ul id="designs">
+{% for design in designs %}
+  <li><a href="{{ design.url() }}">{{ design.name }}</a> <small>{{ design.slug }}, <time datetime="{{ design.updated_at }}">{{ design.updated_at }}</time></small></li>
+{% endfor %}
+</ul>
+{% endif %}
+</body>
+</html>

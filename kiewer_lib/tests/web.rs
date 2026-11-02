@@ -29,18 +29,12 @@ async fn start() -> (SocketAddr, TempDir) {
 }
 
 #[tokio::test]
-async fn the_front_page_says_kiewer() {
-    let (addr, _dir) = start().await;
-    let (status, body) = http::get(addr, "/").await;
-    assert_eq!(status, 200);
-    assert!(body.contains("<title>kiewer</title>"), "{body}");
-    assert!(body.contains("kiewer"), "{body}");
-}
-
-#[tokio::test]
 async fn an_unknown_path_is_not_found() {
     let (addr, _dir) = start().await;
-    let (status, _) = http::get(addr, "/nothing-here").await;
+    // A segment no handle can be (a dot): the person route answers before
+    // any lookup, so the closed-port pool is never touched. A segment that
+    // is a handle is looked up, and `tests/roles.rs` covers that.
+    let (status, _) = http::get(addr, "/not-a-page.txt").await;
     assert_eq!(status, 404);
 }
 

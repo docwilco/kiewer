@@ -16,6 +16,16 @@
 </nav>
 <h1>kiewer</h1>
 <p>A site for uploading and sharing KiCad designs, rendered in the browser.</p>
+<h2>Recent designs</h2>
+{% if recent.is_empty() %}
+<p>Nothing public yet.</p>
+{% else %}
+<ul id="recent">
+{% for design in recent %}
+  <li><a href="{{ design.url() }}">{{ design.name }}</a> by <a href="/{{ design.handle }}">{{ design.handle }}</a>, <time datetime="{{ design.updated_at }}">{{ design.updated_at }}</time></li>
+{% endfor %}
+</ul>
+{% endif %}
 <p><small>{{ build }}</small></p>
 <script>
 fetch("/api/me", { credentials: "same-origin", cache: "no-store" })

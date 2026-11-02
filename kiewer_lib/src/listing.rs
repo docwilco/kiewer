@@ -1,0 +1,100 @@
+//! The listings (docs/v1-scope.md, Pages and URLs): the home page's
+//! recent public designs and a person's public designs. Only a public
+//! design with a head is listed: an unlisted one opens by its link and
+//! appears here never, and a design without a revision has no page to
+//! open. Both reads are the same for everyone, so the pages that show
+//! them stay cacheable (ADR 0003).
+
+use sqlx::PgPool;
+
+use crate::account::AccountId;
+use crate::error::Result;
+
+/// How many designs the home page lists.
+pub const RECENT: i64 = 20;
+
+/// One design as a listing shows it.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct Listed {
+    /// The owner's handle: the first segment of the design's URL.
+    pub handle: String,
+    pub slug: String,
+    pub name: String,
+    /// When the default branch's head last moved, UTC, ISO 8601 to the
+    /// second.
+    pub updated_at: String,
+}
+
+impl Listed {
+    /// The design's page.
+    #[must_use]
+    pub fn url(&self) -> String {
+        format!("/{}/{}", self.handle, self.slug)
+    }
+}
+
+/// The columns a listing selects, under [`Listed`]'s names, from a
+/// `design d`, its owner `a` and its default branch `b`.
+const LISTED_COLUMNS: &str = r#"a.handle, d.slug, d.name,
+    to_char(b.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at"#;
+
+/// The public designs whose default branch moved most recently, newest
+/// first, at most [`RECENT`].
+///
+/// # Errors
+///
+/// [`Error::Db`](crate::Error::Db) when Postgres refuses.
+pub async fn recent_public(db: &PgPool) -> Result<Vec<Listed>> {
+    // One read on the pool: a page's listing, part of no write. Walks
+    // branch by its updated_at index, newest first, and stops at the
+    // limit; the joins are by primary key.
+    Ok(sqlx::query_as(&format!(
+        "SELECT {LISTED_COLUMNS}
+         FROM branch b
+         JOIN design d ON d.id = b.design_id AND d.default_branch = b.name
+         JOIN account a ON a.id = d.owner_id
+         WHERE d.visibility = 'public'
+         ORDER BY b.updated_at DESC, d.id DESC
+         LIMIT $1"
+    ))
+    .bind(RECENT)
+    .fetch_all(db)
+    .await?)
+}
+
+/// The account behind `handle`, or `None`: whether a person's page
+/// exists.
+///
+/// # Errors
+///
+/// [`Error::Db`](crate::Error::Db) when Postgres refuses.
+pub async fn account_at(db: &PgPool, handle: &str) -> Result<Option<AccountId>> {
+    Ok(
+        sqlx::query_scalar("SELECT id FROM account WHERE handle = $1")
+            .bind(handle)
+            .fetch_optional(db)
+            .await?,
+    )
+}
+
+/// `owner`'s public designs, the most recently pushed first.
+///
+/// # Errors
+///
+/// [`Error::Db`](crate::Error::Db) when Postgres refuses.
+pub async fn public_of(db: &PgPool, owner: AccountId) -> Result<Vec<Listed>> {
+    // One read on the pool: a page's listing, part of no write. The
+    // owner's designs by the (owner_id, slug) index, each's default
+    // branch by primary key.
+    Ok(sqlx::query_as(&format!(
+        "SELECT {LISTED_COLUMNS}
+         FROM design d
+         JOIN account a ON a.id = d.owner_id
+         JOIN branch b ON b.design_id = d.id AND b.name = d.default_branch
+         WHERE d.owner_id = $1 AND d.visibility = 'public'
+         ORDER BY b.updated_at DESC, d.id DESC"
+    ))
+    .bind(owner)
+    .fetch_all(db)
+    .await?)
+}

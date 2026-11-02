@@ -9,6 +9,7 @@ pub mod db;
 pub mod design;
 pub mod error;
 mod hex;
+pub mod listing;
 pub mod revision;
 pub mod roles;
 pub mod server;

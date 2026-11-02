@@ -238,3 +238,512 @@ async fn a_push_to_someone_elses_design_needs_the_collaborator_role(
     assert_eq!(missing.status, 404, "{}", missing.body);
     assert!(missing.body.contains("no design"), "{}", missing.body);
 }
+
+/// The handles with each role on `design`, as the people page lists
+/// them: the owner first, then admins, then collaborators, by handle.
+async fn listed(db: &PgPool, design: &Design) -> Vec<(String, Role)> {
+    roles::people(db, design.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|person| (person.handle.to_string(), person.role))
+        .collect()
+}
+
+/// `handle` given `role` on `design`, as the people page's form does it.
+async fn set(db: &PgPool, design: &Design, handle: &Handle, role: Role) -> roles::Changed {
+    roles::set_role(db, design.id, handle, role).await.unwrap()
+}
+
+#[tokio::test]
+async fn people_are_added_changed_and_removed_and_the_owner_is_exactly_one() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (owner, owner_handle) = person(&db).await;
+    let (_, admin) = person(&db).await;
+    let (_, collaborator) = person(&db).await;
+    let design = new_design(&db, owner, "team").await;
+    assert_eq!(
+        set(&db, &design, &admin, Role::Admin).await,
+        roles::Changed::Done
+    );
+    assert_eq!(
+        set(&db, &design, &collaborator, Role::Admin).await,
+        roles::Changed::Done
+    );
+    assert_eq!(
+        set(&db, &design, &collaborator, Role::Collaborator).await,
+        roles::Changed::Done,
+        "a role is changed by setting it again"
+    );
+    assert_eq!(
+        set(&db, &design, &owner_handle, Role::Admin).await,
+        roles::Changed::TheOwner,
+        "the owner's role is not set from the people page"
+    );
+    let nobody: Handle = fresh("nobody").parse().unwrap();
+    assert_eq!(
+        set(&db, &design, &nobody, Role::Admin).await,
+        roles::Changed::NoSuchPerson
+    );
+    let mut expected = vec![
+        (owner_handle.to_string(), Role::Owner),
+        (admin.to_string(), Role::Admin),
+        (collaborator.to_string(), Role::Collaborator),
+    ];
+    assert_eq!(listed(&db, &design).await, expected);
+
+    assert_eq!(
+        roles::remove_role(&db, design.id, &admin).await.unwrap(),
+        roles::Changed::Done
+    );
+    assert_eq!(
+        roles::remove_role(&db, design.id, &admin).await.unwrap(),
+        roles::Changed::Done,
+        "removing someone not on the design is already done"
+    );
+    assert_eq!(
+        roles::remove_role(&db, design.id, &owner_handle)
+            .await
+            .unwrap(),
+        roles::Changed::TheOwner
+    );
+    assert_eq!(
+        roles::remove_role(&db, design.id, &nobody).await.unwrap(),
+        roles::Changed::NoSuchPerson
+    );
+    expected.remove(1);
+    assert_eq!(listed(&db, &design).await, expected);
+
+    let owner_row = sqlx::query(
+        "INSERT INTO design_role (design_id, account_id, role) VALUES ($1, $2, 'owner')",
+    )
+    .bind(design.id)
+    .bind(owner)
+    .execute(&db)
+    .await
+    .expect_err("the schema holds no owner row: the owner is the design's column");
+    assert!(owner_row.to_string().contains("check"), "{owner_row}");
+}
+
+#[tokio::test]
+async fn a_transfer_moves_the_owner_and_demotes_the_previous_one_to_admin() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (owner, owner_handle) = person(&db).await;
+    let (heir, heir_handle) = person(&db).await;
+    let design = new_design(&db, owner, "estate").await;
+    roles::set_role(&db, design.id, &heir_handle, Role::Collaborator)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        roles::transfer(&db, design.id, &owner_handle)
+            .await
+            .unwrap(),
+        roles::Changed::TheOwner,
+        "a transfer to the owner moves nothing"
+    );
+    assert_eq!(
+        roles::transfer(&db, design.id, &"nobody-at-all".parse().unwrap())
+            .await
+            .unwrap(),
+        roles::Changed::NoSuchPerson
+    );
+    assert_eq!(
+        roles::transfer(&db, design.id, &heir_handle).await.unwrap(),
+        roles::Changed::Done
+    );
+    assert_eq!(
+        listed(&db, &design).await,
+        [
+            (heir_handle.to_string(), Role::Owner),
+            (owner_handle.to_string(), Role::Admin),
+        ],
+        "the heir owns, the previous owner is an admin, the heir's old row is gone"
+    );
+    assert_eq!(
+        roles::role_of(&db, design.id, heir).await.unwrap(),
+        Some(Role::Owner)
+    );
+    assert_eq!(
+        roles::role_of(&db, design.id, owner).await.unwrap(),
+        Some(Role::Admin)
+    );
+    assert!(
+        design::show(&db, owner_handle.as_str(), "estate")
+            .await
+            .unwrap()
+            .is_none()
+            && design::find_owned(
+                &mut db.acquire().await.unwrap(),
+                heir,
+                &"estate".parse().unwrap()
+            )
+            .await
+            .unwrap()
+            .is_some(),
+        "the design's URL moved under the new owner's handle"
+    );
+
+    // Back the other way is refused while the previous owner has a design
+    // at the slug already.
+    new_design(&db, owner, "estate").await;
+    assert_eq!(
+        roles::transfer(&db, design.id, &owner_handle)
+            .await
+            .unwrap(),
+        roles::Changed::SlugTaken
+    );
+    assert_eq!(
+        listed(&db, &design).await[0],
+        (heir_handle.to_string(), Role::Owner),
+        "the refused transfer moved nothing"
+    );
+}
+
+/// A design of `owner` with one revision, its people page's URL, and a
+/// browser for `granted` on it (a stranger for `None`).
+async fn people_page(
+    db: &PgPool,
+    addr: SocketAddr,
+    granted: Option<Role>,
+) -> (http::Browser, Handle, String, Design) {
+    let (mut owner, owner_id, owner_handle) = signed_in(db, addr).await;
+    uploaded(&mut owner, "team").await;
+    let design = design::by_owner(db, owner_id).await.unwrap().remove(0);
+    let url = format!("/{owner_handle}/team/people");
+    let browser = match granted {
+        Some(Role::Owner) => owner,
+        Some(role) => {
+            let (member, _, member_handle) = signed_in(db, addr).await;
+            roles::set_role(db, design.id, &member_handle, role)
+                .await
+                .unwrap();
+            member
+        }
+        None => {
+            let (stranger, _, _) = signed_in(db, addr).await;
+            stranger
+        }
+    };
+    (browser, owner_handle, url, design)
+}
+
+#[test_case(None, 403; "a stranger")]
+#[test_case(Some(Role::Collaborator), 403; "a collaborator")]
+#[test_case(Some(Role::Admin), 200; "an admin")]
+#[test_case(Some(Role::Owner), 200; "the owner")]
+#[tokio::test]
+async fn the_people_page_is_for_admins_and_the_owner(granted: Option<Role>, status: u16) {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut browser, owner_handle, url, _) = people_page(&db, addr, granted).await;
+    let page = browser.get(&url).await;
+    assert_eq!(page.status, status, "{}", page.body);
+    assert_eq!(page.header("cache-control"), Some("private, no-store"));
+    if status != 200 {
+        assert!(page.body.contains("admin"), "{}", page.body);
+        return;
+    }
+    assert!(
+        page.body
+            .contains(&format!(r#"<a href="/{owner_handle}">{owner_handle}</a>"#)),
+        "the owner is listed: {}",
+        page.body
+    );
+    assert!(page.body.contains("Add a person"), "{}", page.body);
+    assert_eq!(
+        page.body.contains("Transfer ownership") && page.body.contains("Visibility"),
+        granted == Some(Role::Owner),
+        "the owner's forms are the owner's: {}",
+        page.body
+    );
+    let signed_out = http::request(addr, "GET", &url, &[], "").await;
+    assert_eq!(
+        signed_out.status, 303,
+        "a stranger without a session goes home"
+    );
+}
+
+#[test_case(Some(Role::Collaborator), 403; "a collaborator may not")]
+#[test_case(Some(Role::Admin), 303; "an admin may")]
+#[test_case(Some(Role::Owner), 303; "the owner may")]
+#[tokio::test]
+async fn adding_changing_and_removing_a_person_needs_the_admin_role(
+    granted: Option<Role>,
+    status: u16,
+) {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut browser, owner_handle, url, design) = people_page(&db, addr, granted).await;
+    let (_, newcomer) = person(&db).await;
+    let added = browser
+        .post_form(
+            &format!("{url}/role"),
+            &format!("handle={newcomer}&role=collaborator"),
+        )
+        .await;
+    assert_eq!(added.status, status, "{}", added.body);
+    if status != 303 {
+        assert!(
+            roles::people(&db, design.id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|person| person.handle != newcomer),
+            "nothing was added"
+        );
+        return;
+    }
+    assert_eq!(added.header("location"), Some(url.as_str()));
+    let page = browser.get(&url).await;
+    assert!(
+        page.body.contains(&format!(
+            r#"<input type="hidden" name="handle" value="{newcomer}"><select name="role"><option value="collaborator" selected>"#
+        )),
+        "the newcomer is listed with their role selected: {}",
+        page.body
+    );
+    let changed = browser
+        .post_form(
+            &format!("{url}/role"),
+            &format!("handle={newcomer}&role=admin"),
+        )
+        .await;
+    assert_eq!(changed.status, 303, "{}", changed.body);
+    assert!(
+        roles::people(&db, design.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|person| person.handle == newcomer && person.role == Role::Admin)
+    );
+
+    let owner_role = browser
+        .post_form(
+            &format!("{url}/role"),
+            &format!("handle={owner_handle}&role=admin"),
+        )
+        .await;
+    assert_eq!(owner_role.status, 409, "{}", owner_role.body);
+    assert!(
+        owner_role.body.contains("is the owner"),
+        "{}",
+        owner_role.body
+    );
+    let nobody = browser
+        .post_form(&format!("{url}/role"), "handle=nobody-at-all&role=admin")
+        .await;
+    assert_eq!(nobody.status, 404, "{}", nobody.body);
+    let bad_role = browser
+        .post_form(
+            &format!("{url}/role"),
+            &format!("handle={newcomer}&role=owner"),
+        )
+        .await;
+    assert_eq!(
+        bad_role.status, 422,
+        "the owner is not granted: {}",
+        bad_role.body
+    );
+    let bad_handle = browser
+        .post_form(&format!("{url}/role"), "handle=Not%20A%20Handle&role=admin")
+        .await;
+    assert_eq!(bad_handle.status, 422, "{}", bad_handle.body);
+
+    let removed = browser
+        .post_form(&format!("{url}/remove"), &format!("handle={newcomer}"))
+        .await;
+    assert_eq!(removed.status, 303, "{}", removed.body);
+    assert!(
+        roles::people(&db, design.id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|person| person.handle != newcomer)
+    );
+    let owner_removed = browser
+        .post_form(&format!("{url}/remove"), &format!("handle={owner_handle}"))
+        .await;
+    assert_eq!(owner_removed.status, 409, "{}", owner_removed.body);
+}
+
+#[test_case(Some(Role::Admin), 403; "an admin may not")]
+#[test_case(Some(Role::Owner), 303; "the owner may")]
+#[tokio::test]
+async fn visibility_and_transfer_are_the_owners(granted: Option<Role>, status: u16) {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut browser, owner_handle, url, design) = people_page(&db, addr, granted).await;
+    let design_path = format!("/{owner_handle}/team");
+
+    let unlisted = browser
+        .post_form(&format!("{url}/visibility"), "visibility=unlisted")
+        .await;
+    assert_eq!(unlisted.status, status, "{}", unlisted.body);
+    let page = http::request(addr, "GET", &design_path, &[], "").await;
+    assert_eq!(page.status, 200, "an unlisted design opens by its link");
+    let expected = if status == 303 { "unlisted" } else { "public" };
+    assert!(
+        page.body.contains(&format!(
+            r#"<p id="people">{expected} · <a href="{url}">people</a></p>"#
+        )),
+        "the design page says {expected} and links the people page: {}",
+        page.body
+    );
+    if status == 303 {
+        let bad = browser
+            .post_form(&format!("{url}/visibility"), "visibility=secret")
+            .await;
+        assert_eq!(bad.status, 422, "{}", bad.body);
+    }
+
+    let (_, heir) = person(&db).await;
+    let transferred = browser
+        .post_form(&format!("{url}/transfer"), &format!("handle={heir}"))
+        .await;
+    assert_eq!(transferred.status, status, "{}", transferred.body);
+    let people = listed(&db, &design).await;
+    if status == 303 {
+        assert_eq!(
+            transferred.header("location"),
+            Some(format!("/{heir}/team/people").as_str()),
+            "the people page moved with the design"
+        );
+        assert_eq!(
+            people,
+            [
+                (heir.to_string(), Role::Owner),
+                (owner_handle.to_string(), Role::Admin)
+            ]
+        );
+        let moved = http::request(addr, "GET", &format!("/{heir}/team"), &[], "").await;
+        assert_eq!(moved.status, 200, "the design is at the heir's URL");
+        let old = http::request(addr, "GET", &design_path, &[], "").await;
+        assert_eq!(old.status, 404);
+        let again = browser.get(&url).await;
+        assert_eq!(
+            again.status, 404,
+            "the old URL's people page is gone with it"
+        );
+        let as_admin = browser.get(&format!("/{heir}/team/people")).await;
+        assert_eq!(
+            as_admin.status, 200,
+            "the previous owner, now an admin, still manages people"
+        );
+        assert!(
+            !as_admin.body.contains("Transfer ownership"),
+            "{}",
+            as_admin.body
+        );
+    } else {
+        assert_eq!(people[0], (owner_handle.to_string(), Role::Owner));
+    }
+}
+
+#[tokio::test]
+async fn the_home_page_and_a_persons_page_list_public_designs_and_never_unlisted_ones() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut owner, owner_id, handle) = signed_in(&db, addr).await;
+    uploaded(&mut owner, "shown").await;
+    uploaded(&mut owner, "hidden").await;
+    let hidden = design::by_owner(&db, owner_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|design| design.slug.as_str() == "hidden")
+        .expect("the hidden design");
+    roles::set_visibility(&db, hidden.id, Visibility::Unlisted)
+        .await
+        .unwrap();
+    // A design without a revision has no page to open, so no listing
+    // names it.
+    new_design(&db, owner_id, "empty").await;
+
+    let shown = format!(r#"href="/{handle}/shown""#);
+    let hidden = format!(r#"href="/{handle}/hidden""#);
+    let empty = format!(r#"href="/{handle}/empty""#);
+    let home = http::request(addr, "GET", "/", &[], "").await;
+    assert_eq!(home.status, 200, "{}", home.body);
+    assert!(home.body.contains("Recent designs"), "{}", home.body);
+    assert!(home.body.contains(&shown), "{}", home.body);
+    assert!(!home.body.contains(&hidden), "unlisted: {}", home.body);
+    assert!(!home.body.contains(&empty), "no revision: {}", home.body);
+    assert_eq!(
+        home.header("cache-control"),
+        None,
+        "the same for everyone, so cacheable: {}",
+        home.body
+    );
+
+    let person = http::request(addr, "GET", &format!("/{handle}"), &[], "").await;
+    assert_eq!(person.status, 200, "{}", person.body);
+    assert!(
+        person
+            .body
+            .contains(&format!("<title>{handle} - kiewer</title>")),
+        "{}",
+        person.body
+    );
+    assert!(person.body.contains(&shown), "{}", person.body);
+    assert!(!person.body.contains(&hidden), "unlisted: {}", person.body);
+    assert!(
+        !person.body.contains(&empty),
+        "no revision: {}",
+        person.body
+    );
+    let own = owner.get(&format!("/{handle}")).await;
+    assert!(
+        !own.body.contains(&hidden),
+        "not even to the owner, who finds it on the upload form: {}",
+        own.body
+    );
+
+    let opened = http::request(addr, "GET", &format!("/{handle}/hidden"), &[], "").await;
+    assert_eq!(opened.status, 200, "an unlisted design opens by its link");
+
+    let (_, nobody) = person_without_designs(&db).await;
+    let bare = http::request(addr, "GET", &format!("/{nobody}"), &[], "").await;
+    assert_eq!(bare.status, 200, "{}", bare.body);
+    assert!(bare.body.contains("No public designs yet"), "{}", bare.body);
+    let (status, _) = http::get(addr, "/nobody-has-this-handle").await;
+    assert_eq!(status, 404);
+    let (status, _) = http::get(addr, "/Not%20A%20Handle").await;
+    assert_eq!(status, 404);
+}
+
+/// A person with a handle and nothing uploaded.
+async fn person_without_designs(db: &PgPool) -> (AccountId, Handle) {
+    person(db).await
+}
+
+#[test_case("/about", 200; "the about page")]
+#[test_case("/upload", 303; "the upload form, which sends a stranger home")]
+#[test_case("/settings", 303; "the settings page, the same")]
+#[test_case("/viewer", 200; "the hand-off viewer")]
+#[test_case("/healthz", 200; "the health route")]
+#[tokio::test]
+async fn static_routes_keep_priority_over_a_persons_page(path: &str, status: u16) {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db).await;
+    let (got, body) = http::get(addr, path).await;
+    assert_eq!(got, status, "{path}: {body}");
+    assert!(
+        !body.contains("No public designs"),
+        "{path} is not a person: {body}"
+    );
+}
