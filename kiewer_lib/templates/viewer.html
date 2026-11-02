@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>midi8knob - kiewer</title>
+<title>{{ title }} - kiewer</title>
 <style>
   html, body { margin: 0; height: 100%; background: #2b2b2b; color: #d0d2cd; font: 14px system-ui, sans-serif; }
   body { display: flex; flex-direction: column; }
@@ -19,11 +19,18 @@
   #error { position: absolute; left: 0.8em; right: 0.8em; top: 0.8em; padding: 0.6em 0.8em; background: #5a1e1e; border-radius: 4px; white-space: pre-wrap; }
   #hint { position: absolute; left: 0.8em; bottom: 0.6em; opacity: 0.6; }
   #zoom { position: absolute; right: 0.8em; bottom: 0.6em; opacity: 0.8; font-variant-numeric: tabular-nums; }
+  /* The design's details, folded under the stage; open, at most a third
+     of the page, so the board keeps the room. */
+  #design { padding: 0.4em 0.8em; max-height: 33vh; overflow: auto; border-top: 1px solid #444; }
+  #design summary { cursor: pointer; }
+  #design a { color: inherit; }
+  #design dl { display: grid; grid-template-columns: max-content auto; gap: 0.2em 1em; margin: 0.5em 0; }
+  #design dd { margin: 0; }
 </style>
 </head>
 <body>
 <header>
-  <h1><a href="/">kiewer</a> / midi8knob</h1>
+  <h1><a href="/">kiewer</a> / {{ title }}</h1>
   <span>Edge.Cuts + F.Cu</span>
   <button id="fit" type="button" title="Home">Fit</button>
   <span id="status"></span>
@@ -34,6 +41,21 @@
   <p id="hint">wheel zooms, ctrl+wheel and shift+wheel pan, middle or right drag pans, + and - zoom, Home fits</p>
   <p id="zoom"></p>
 </div>
+{% if let Some(design) = design %}
+<details id="design">
+  <summary><a href="/{{ design.handle }}">{{ design.handle }}</a> / {{ design.slug }}: branch {{ design.branch }}, revision <code title="{{ design.revision }}">{{ design.short }}</code> by {{ design.author }} at <time datetime="{{ design.created_at }}">{{ design.created_at }}</time>{% if let Some(message) = design.message %}, "{{ message }}"{% endif %}</summary>
+  <dl>
+  {% for (label, value) in design.details %}
+    <dt>{{ label }}</dt><dd>{{ value }}</dd>
+  {% endfor %}
+  </dl>
+  <ul>
+  {% for file in design.files %}
+    <li><a href="{{ file.url }}" download="{{ file.name }}">{{ file.path }}</a> ({{ file.size }} bytes)</li>
+  {% endfor %}
+  </ul>
+</details>
+{% endif %}
 <p hidden><small>{{ build }}</small></p>
 {% if !embedded %}
 <p id="not-built">{{ not_built }}</p>
@@ -185,9 +207,13 @@ try {
   status.textContent = viewer.backend() + (samples > 1 ? ", " + samples + "x msaa" : "");
   // On WebGL2, hovering the status says why WebGPU was not used.
   status.title = viewer.fallback_reasons();
-  const response = await fetch("{{ board_path }}");
+{% if let Some(url) = board_url %}
+  const response = await fetch("{{ url }}");
   if (!response.ok) throw new Error("the board: HTTP " + response.status);
   viewer.load_board(await response.text());
+{% else %}
+  status.textContent += ", no board in this revision";
+{% endif %}
   schedule();
 } catch (e) {
   fail(e && e.message ? e.message : e);
