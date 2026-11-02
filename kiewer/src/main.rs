@@ -17,10 +17,7 @@ async fn main() -> ExitCode {
     let terminal = std::io::stdout().is_terminal();
     let format = match LogFormat::from_env(terminal) {
         Ok(format) => format,
-        Err(error) => {
-            eprintln!("error: {error}");
-            return ExitCode::from(error.exit_code().code());
-        }
+        Err(error) => return failed(&error),
     };
     let log = tracing_subscriber::fmt().with_env_filter(
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -34,11 +31,14 @@ async fn main() -> ExitCode {
     }
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("error: {error}");
-            ExitCode::from(error.exit_code().code())
-        }
+        Err(error) => failed(&error),
     }
+}
+
+/// The one line on stderr and the exit code of `error`'s kind.
+fn failed(error: &kiewer_lib::Error) -> ExitCode {
+    eprintln!("error: {error}");
+    ExitCode::from(error.exit_code().code())
 }
 
 async fn run() -> kiewer_lib::Result<()> {

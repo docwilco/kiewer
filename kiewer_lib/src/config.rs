@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use crate::auth::{Credentials, Provider};
 use crate::error::{Error, Result};
@@ -182,6 +183,31 @@ pub enum LogFormat {
     Text,
 }
 
+impl FromStr for LogFormat {
+    type Err = Error;
+
+    /// `json` or `text`, the values `LOG_FORMAT` takes.
+    fn from_str(text: &str) -> Result<Self> {
+        match text {
+            "json" => Ok(LogFormat::Json),
+            "text" => Ok(LogFormat::Text),
+            other => Err(Error::Env {
+                name: "LOG_FORMAT",
+                reason: format!("is {other:?}, not json or text"),
+            }),
+        }
+    }
+}
+
+impl fmt::Display for LogFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            LogFormat::Json => "json",
+            LogFormat::Text => "text",
+        })
+    }
+}
+
 impl LogFormat {
     /// The format from the process environment, with `terminal` saying
     /// whether stdout is one.
@@ -201,14 +227,9 @@ impl LogFormat {
     /// As [`LogFormat::from_env`].
     pub fn from_vars(var: impl Fn(&str) -> Option<String>, terminal: bool) -> Result<Self> {
         match var("LOG_FORMAT").filter(|value| !value.is_empty()) {
+            Some(value) => value.parse(),
             None if terminal => Ok(LogFormat::Text),
             None => Ok(LogFormat::Json),
-            Some(value) if value == "json" => Ok(LogFormat::Json),
-            Some(value) if value == "text" => Ok(LogFormat::Text),
-            Some(value) => Err(Error::Env {
-                name: "LOG_FORMAT",
-                reason: format!("is {value:?}, not json or text"),
-            }),
         }
     }
 }
@@ -479,5 +500,14 @@ mod tests {
             ),
             "{err}"
         );
+        for format in [LogFormat::Json, LogFormat::Text] {
+            assert_eq!(
+                format
+                    .to_string()
+                    .parse::<LogFormat>()
+                    .expect("its own name"),
+                format
+            );
+        }
     }
 }

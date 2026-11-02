@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use kiewer_lib::auth::Auth;
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::web::AppState;
-use kiewer_lib::web::beacon::{BEACON_PATH, LIMIT_PER_MINUTE, MAX_BODY};
+use kiewer_lib::web::beacon::{BEACON_PATH, LIMIT_PER_MINUTE, MAX_BODY, MAX_REASON, MAX_VENDOR};
 use kiewer_test_support::db::fresh;
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use test_case::test_case;
@@ -199,30 +199,29 @@ async fn a_malformed_beacon_is_refused_and_not_logged(body: &str) {
     );
 }
 
+#[test_case("reason", MAX_REASON + 1, 400 ; "a reason over its bound")]
+#[test_case("vendor", MAX_VENDOR + 1, 400 ; "a vendor over its bound")]
+#[test_case("reason", MAX_REASON, 204 ; "a reason at its bound")]
+#[test_case("vendor", MAX_VENDOR, 204 ; "a vendor at its bound")]
 #[tokio::test]
-async fn a_reason_or_a_vendor_over_its_bound_is_refused() {
+async fn a_string_is_accepted_at_its_bound_and_refused_over_it(
+    field: &str,
+    length: usize,
+    status: u16,
+) {
     let (addr, _dir) = start().await;
     let marker = fresh("marker");
-    let long_reason = format!("{marker}{}", "x".repeat(1024));
+    let value = format!("{marker}{}", "x".repeat(length - marker.len()));
     let body = format!(
-        r#"{{"backend":"webgpu","webgpu_present":true,"outcome":"panic","reason":"{long_reason}"}}"#
+        r#"{{"backend":"webgpu","webgpu_present":true,"outcome":"panic","{field}":"{value}"}}"#
     );
-    assert_eq!(send(addr, "203.0.113.21", &body).await.status, 400);
-    let long_vendor = format!("{marker}{}", "v".repeat(64));
+    let response = send(addr, "203.0.113.21", &body).await;
+    assert_eq!(response.status, status, "{}", response.body);
     assert_eq!(
-        send(addr, "203.0.113.21", &beacon(&long_vendor))
-            .await
-            .status,
-        400
+        log_lines_with(&marker).len(),
+        usize::from(status == 204),
+        "logged only when accepted"
     );
-    assert!(log_lines_with(&marker).is_empty());
-    // Exactly at the bound is accepted.
-    let at_bound = format!("{marker}{}", "x".repeat(1024 - marker.len()));
-    let body = format!(
-        r#"{{"backend":"webgpu","webgpu_present":true,"outcome":"panic","reason":"{at_bound}"}}"#
-    );
-    assert_eq!(send(addr, "203.0.113.21", &body).await.status, 204);
-    assert_eq!(log_lines_with(&marker).len(), 1);
 }
 
 #[tokio::test]

@@ -8,7 +8,9 @@
 //! with on Cloud Run makes one `jsonPayload` line and a Cloud Logging
 //! metric counts (`infra/logging.tf`). A refused beacon is a 4xx and no
 //! event. No identifier is read or written: the client's address keys
-//! the limit and goes nowhere else.
+//! the limit and goes nowhere else. The limiter is per process: each
+//! Cloud Run instance counts on its own, so a client's ceiling is the
+//! limit times the instances serving it, which telemetry can bear.
 //!
 //! The body is read as bytes and parsed as JSON whatever its content
 //! type: `sendBeacon` sends a string as `text/plain`, and a `Blob` typed
@@ -329,6 +331,24 @@ mod tests {
         assert_eq!(UserAgentFamily::of(user_agent), family);
     }
 
+    #[test_case(Backend::WebGpu, "webgpu")]
+    #[test_case(Backend::WebGl2, "webgl2")]
+    #[test_case(Backend::None, "none")]
+    fn a_backend_has_one_wire_name(backend: Backend, name: &str) {
+        assert_eq!(backend.to_string(), name, "as the log line writes it");
+        let parsed: Backend = serde_json::from_str(&format!("\"{name}\"")).expect("parses");
+        assert_eq!(parsed, backend, "as the page sends it");
+    }
+
+    #[test_case(Outcome::Ok, "ok")]
+    #[test_case(Outcome::Failed, "failed")]
+    #[test_case(Outcome::Panic, "panic")]
+    fn an_outcome_has_one_wire_name(outcome: Outcome, name: &str) {
+        assert_eq!(outcome.to_string(), name, "as the log line writes it");
+        let parsed: Outcome = serde_json::from_str(&format!("\"{name}\"")).expect("parses");
+        assert_eq!(parsed, outcome, "as the page sends it");
+    }
+
     fn ip(text: &str) -> Client {
         Client::Ip(text.parse().expect("an address literal"))
     }
@@ -370,11 +390,8 @@ mod tests {
         let limiter = Limiter::new(1, Duration::from_secs(60));
         let start = Instant::now();
         for n in 0..MAX_CLIENTS {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "MAX_CLIENTS is 10_000, which fits the u32 an IPv4 address is"
-            )]
-            let client = Client::Ip(IpAddr::from(std::net::Ipv4Addr::from_bits(n as u32)));
+            let address = u32::try_from(n).expect("MAX_CLIENTS fits an IPv4 address");
+            let client = Client::Ip(IpAddr::from(std::net::Ipv4Addr::from_bits(address)));
             assert!(limiter.allows(client, start));
         }
         assert_eq!(limiter.clients(), MAX_CLIENTS);

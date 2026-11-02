@@ -35,8 +35,8 @@ resource "google_logging_metric" "renderer_beacon" {
     }
     labels {
       key         = "webgpu_present"
-      value_type  = "STRING"
-      description = "true when navigator.gpu existed, whatever came of it"
+      value_type  = "BOOL"
+      description = "whether navigator.gpu existed, whatever came of it"
     }
     labels {
       key         = "user_agent_family"
