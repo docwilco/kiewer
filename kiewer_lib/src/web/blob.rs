@@ -4,12 +4,17 @@
 //! and decoded for one that does not, so `Vary: Accept-Encoding`. Content
 //! addressed, so immutable: a year's `max-age` (`crate::cache`). The bytes are checked against the hash before they
 //! leave, so a damaged object is a 500 in the log, never a broken render.
-//! A hash that is not one, that nothing was stored under, or that the
-//! operator has blocked is 404 alike: the route says nothing about which.
+//! A hash that is not one or that nothing was stored under is 404. A
+//! hash the operator has blocked is 410, as the file route answers for
+//! the same blob (`web/files.rs`): #23 chose saying so over the 404 this
+//! route gave at first. Kept briefly, since a takedown can be lifted
+//! ([`Policy::NotFound`]). In production Fastly sends `/blob/{hash}` to
+//! the bucket (infra/fastly/recv.vcl.tftpl), so this check never runs
+//! there and a copy Fastly holds stays: that gap is #71.
 
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
 use axum::http::header::{CONTENT_ENCODING, CONTENT_TYPE, VARY, X_CONTENT_TYPE_OPTIONS};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use super::AppState;
@@ -31,6 +36,16 @@ fn not_found() -> Response {
     cache::not_found("no such blob\n")
 }
 
+/// The answer for a blocked blob, on either route that serves one.
+pub(super) fn taken_down() -> Response {
+    (
+        StatusCode::GONE,
+        [Policy::NotFound.header()],
+        "this file was taken down\n",
+    )
+        .into_response()
+}
+
 /// `GET /blob/{hash}`.
 ///
 /// # Errors
@@ -46,7 +61,7 @@ pub async fn serve(
         return Ok(not_found());
     };
     if design::is_blocked(&state.db, &hash).await? {
-        return Ok(not_found());
+        return Ok(taken_down());
     }
     Ok(stored(&state, hash, &headers)
         .await?

@@ -34,6 +34,14 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// Deleting a blob from the store failed at this path or object.
+    #[display("deleting blob {hash} at {}: {reason}", path.display())]
+    #[from(ignore)]
+    DeleteBlob {
+        hash: BlobHash,
+        path: PathBuf,
+        reason: String,
+    },
     /// GCS refused or failed an operation on a blob: the bucket, the
     /// credentials or the network.
     #[display("{op} blob {hash} in bucket {bucket}: {source}")]
@@ -84,6 +92,11 @@ pub enum Error {
     #[display("handle {_0} is taken")]
     #[from(ignore)]
     HandleTaken(#[error(not(source))] Handle),
+    /// The handle was given up with its account's delete, and nobody may
+    /// take it until the reservation ends (`account::choose_handle`).
+    #[display("handle {_0} is reserved")]
+    #[from(ignore)]
+    HandleReserved(#[error(not(source))] Handle),
     /// A sign-in provider refused the exchange or answered without what
     /// the flow needs.
     #[display("{provider} sign-in: {reason}")]
@@ -276,15 +289,18 @@ impl Error {
     #[must_use]
     pub fn exit_code(&self) -> Exit {
         match self {
-            Error::Io(_) | Error::WriteBlob { .. } | Error::ReadBlob { .. } | Error::Gcs { .. } => {
-                Exit::Io
-            }
+            Error::Io(_)
+            | Error::WriteBlob { .. }
+            | Error::ReadBlob { .. }
+            | Error::DeleteBlob { .. }
+            | Error::Gcs { .. } => Exit::Io,
             Error::CorruptBlob { .. } | Error::Malformed(_) => Exit::Blob,
             Error::Env { .. } | Error::GcsClient { .. } => Exit::Config,
             Error::Db(_) | Error::Migrate(_) => Exit::Db,
             Error::Template(_) => Exit::Template,
             Error::Failed { .. }
             | Error::HandleTaken(_)
+            | Error::HandleReserved(_)
             | Error::Refused(_)
             | Error::Forbidden { .. }
             | Error::Render(_) => Exit::Failed,

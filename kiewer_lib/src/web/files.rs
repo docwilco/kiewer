@@ -163,12 +163,7 @@ async fn serve(
         return Ok(not_found());
     };
     if design::is_blocked(&state.db, &entry.blob).await? {
-        return Ok((
-            StatusCode::GONE,
-            [Policy::NotFound.header()],
-            "this file was taken down\n",
-        )
-            .into_response());
+        return Ok(blob::taken_down());
     }
     let Some(mut response) = blob::stored(&state, entry.blob, &headers).await? else {
         return Err(Error::ReadBlob {

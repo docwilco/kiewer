@@ -81,6 +81,39 @@ pub async fn reports_a_missing_blob(store: &dyn BlobStore) {
     assert!(store.get(&hash).await.expect("get").is_none());
 }
 
+/// A deleted blob is gone, the blob beside it stays, and deleting what
+/// is not there succeeds, since a collector cut short deletes again; the
+/// same bytes put afterwards are stored anew.
+///
+/// # Panics
+///
+/// When the store misbehaves: that is the assertion.
+pub async fn deletes_a_blob(store: &dyn BlobStore) {
+    let bytes = b"(kicad_sch (version 20250116))".as_slice();
+    let hash = store.put(bytes).await.expect("put").hash;
+    let other = store
+        .put(b"(kicad_sch (version 20250117))")
+        .await
+        .expect("other put")
+        .hash;
+
+    store.delete(&hash).await.expect("delete");
+    assert!(!store.exists(&hash).await.expect("exists"));
+    assert!(store.get(&hash).await.expect("get").is_none());
+    assert!(
+        store.exists(&other).await.expect("exists"),
+        "the other stays"
+    );
+
+    store.delete(&hash).await.expect("a second delete");
+    store
+        .delete(&BlobHash::of(b"never put"))
+        .await
+        .expect("a delete of what was never there");
+
+    assert_eq!(store.put(bytes).await.expect("put").outcome, Put::Stored);
+}
+
 /// A blob is named by the SHA-256 of its uncompressed bytes (ADR 0002),
 /// so a hash computed anywhere else finds it. The literal is
 /// `printf kiewer | sha256sum`.

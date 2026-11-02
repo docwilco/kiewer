@@ -91,7 +91,14 @@ impl Policy {
 ///   every design holding the revision, as a visibility change does,
 ///   since listings and Open Graph tags show it;
 /// - a handle chosen: the handle, since its page starts to exist;
-/// - a role change: nothing, since no cacheable page shows roles.
+/// - a role change: nothing, since no cacheable page shows roles;
+/// - a design's delete: [`of_design`], and its forks' pages with it,
+///   since they carry its key;
+/// - an account's delete: every design it owned, its handle, and the
+///   home page when one of them was public (`crate::delete::account`);
+/// - a collector run: nothing, since no branch reaches what it removes;
+///   a fork's forked-from line losing a removed revision's hash catches
+///   up within the hour ([`Policy::Page`]).
 ///
 /// A design's pages carry its design key alone, so one push does not
 /// clear everything its owner has; a fork's also carry its source's,

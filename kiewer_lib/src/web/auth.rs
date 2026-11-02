@@ -8,14 +8,15 @@
 use askama::Template;
 use axum::Form;
 use axum::extract::{FromRequestParts, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Json, Redirect, Response};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
-use crate::account::{self, AccountId, Handle, Linked};
+use crate::account::{self, AccountId, Handle, Linked, RESERVED_DAYS};
 use crate::auth::Provider;
 use crate::cache::{self, Key, Policy};
 use crate::error::{Error, Result};
@@ -139,6 +140,21 @@ pub(super) async fn current(
 /// `private, no-store`.
 pub(super) fn personal(jar: CookieJar, response: impl IntoResponse) -> Response {
     (jar, [Policy::Personal.header()], response).into_response()
+}
+
+/// Whether the request comes from who the server's internal routes take
+/// (`crate::thumbnail::TaskAuth`): the thumbnail retry and the collector's
+/// run. Reads a bearer token and no session.
+///
+/// # Errors
+///
+/// [`crate::thumbnail::TaskAuth::allows`]'s.
+pub(super) async fn task_caller(state: &AppState, headers: &HeaderMap) -> Result<bool> {
+    let bearer = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    state.thumbnails.allows_task(bearer).await
 }
 
 /// A signed-in person with a handle, as the settings pages
@@ -410,7 +426,8 @@ pub struct HandleForm {
 }
 
 /// `POST /welcome`: the person's choice. A malformed handle comes back as
-/// 422 and a taken one as 409, each with the form again and the reason.
+/// 422, and a taken one or one reserved after its account's delete as
+/// 409, each with the form again and the reason.
 pub async fn choose_handle(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -447,6 +464,13 @@ pub async fn choose_handle(
             jar,
             StatusCode::CONFLICT,
             format!("handle {attempt:?} is taken; pick another"),
+        ),
+        Err(Error::HandleReserved(_)) => refused(
+            jar,
+            StatusCode::CONFLICT,
+            format!(
+                "handle {attempt:?} belonged to a deleted account and is held back for {RESERVED_DAYS} days; pick another"
+            ),
         ),
         Err(error) => Err(error),
     }

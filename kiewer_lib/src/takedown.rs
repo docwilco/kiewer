@@ -5,7 +5,7 @@
 
 use sqlx::PgExecutor;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Refusal, Result};
 use crate::revision::{TreeHash, TreePath};
 
 /// The path of a blocked blob in `tree`, the first by path when there
@@ -34,4 +34,20 @@ pub async fn blocked_in<'c>(db: impl PgExecutor<'c>, tree: TreeHash) -> Result<O
             .map_err(|error: Error| Error::Malformed(format!("a tree's path: {error}")))
     })
     .transpose()
+}
+
+/// [`blocked_in`] as a refusal, for a write that stops there.
+///
+/// # Errors
+///
+/// [`Error::Refused`] with [`Refusal::Blocked`] naming the file, and
+/// [`blocked_in`]'s own.
+pub async fn refuse_blocked<'c>(db: impl PgExecutor<'c>, tree: TreeHash) -> Result<()> {
+    match blocked_in(db, tree).await? {
+        Some(path) => Err(Refusal::Blocked {
+            path: path.to_string(),
+        }
+        .into()),
+        None => Ok(()),
+    }
 }

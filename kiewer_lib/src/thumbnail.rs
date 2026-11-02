@@ -47,9 +47,9 @@ use serde::Deserialize;
 use sqlx::PgPool;
 
 use crate::blob::{BlobHash, BlobStore, blocking};
-use crate::design;
 use crate::error::{Error, Result};
 use crate::revision::{RevisionHash, TreeEntry};
+use crate::{collector, design};
 
 /// The render budget: how long the upload request waits for the
 /// thumbnail before saving the revision without one and queueing a
@@ -353,15 +353,17 @@ impl TaskQueue for CloudTasks {
 /// it refuses.
 const TOKENINFO: &str = "https://oauth2.googleapis.com/tokeninfo";
 
-/// What the retry path asks of its caller: the token Cloud Tasks mints
-/// in production, nothing in development and tests.
+/// What the server's internal routes ask of their caller, the thumbnail
+/// retry and the collector: the token Cloud Tasks or Cloud Scheduler
+/// mints as the runtime service account in production, nothing in
+/// development and tests.
 #[derive(Debug, Clone)]
 pub enum TaskAuth {
-    /// Anyone may POST the retry path. Development and tests, over
+    /// Anyone may POST an internal route. Development and tests, over
     /// `http`: nothing else can reach a dev box's server.
     Open,
     /// Nobody may: a deployment without a queue has no token to check,
-    /// and a render is too much work to give strangers.
+    /// and a render or a collector run is too much to give strangers.
     Closed,
     /// A bearer token that Google's token endpoint says is an ID token
     /// for `audience` issued to `account`.
@@ -397,7 +399,7 @@ impl TokenInfo {
 }
 
 impl TaskAuth {
-    /// The retry path of a server with no queue at `public_url`:
+    /// The internal routes of a server with no queue at `public_url`:
     /// [`TaskAuth::Closed`] over `https`, which is every deployment,
     /// else [`TaskAuth::Open`], a dev box.
     #[must_use]
@@ -427,7 +429,7 @@ impl TaskAuth {
     }
 
     /// Whether a caller presenting `bearer` (the token after `Bearer `,
-    /// or none) may run a retry.
+    /// or none) may call an internal route.
     ///
     /// # Errors
     ///
@@ -458,7 +460,7 @@ impl TaskAuth {
                     .map_err(reqwest::Error::without_url)?;
                 let status = response.status();
                 if status == reqwest::StatusCode::BAD_REQUEST {
-                    tracing::warn!("thumbnail: the retry's token was refused");
+                    tracing::warn!("an internal route's token was refused");
                     return Ok(false);
                 }
                 if !status.is_success() {
@@ -648,8 +650,8 @@ impl Thumbnails {
         self
     }
 
-    /// Whether a caller of the retry path presenting `bearer` may run it
-    /// ([`TaskAuth::allows`]).
+    /// Whether a caller of an internal route presenting `bearer` may
+    /// run it ([`TaskAuth::allows`]).
     ///
     /// # Errors
     ///
@@ -758,15 +760,11 @@ async fn store(
     pngs: &Pngs,
 ) -> Result<()> {
     // The store writes are the slow part and idempotent (content
-    // addressed), so they come before the transaction opens.
-    let large = blobs.put(&pngs.large).await?.hash;
-    let small = blobs.put(&pngs.small).await?.hash;
-    // The two blob rows and the thumbnail row are one outcome: a
-    // thumbnail names blobs that have rows, so the three go together. A
-    // thumbnail already there (two retries racing) is left as it is.
-    let mut tx = db.begin().await?;
-    design::record_blob(&mut tx, &large, pngs.large.len() as u64).await?;
-    design::record_blob(&mut tx, &small, pngs.small.len() as u64).await?;
+    // addressed), and each claims its blob's row, so the rows are there
+    // for this one statement, which is the outcome. A thumbnail already
+    // there (two retries racing) is left as it is.
+    let large = collector::store(db, blobs, &pngs.large).await?.hash;
+    let small = collector::store(db, blobs, &pngs.small).await?.hash;
     sqlx::query(
         "INSERT INTO thumbnail (revision_hash, large_hash, small_hash) VALUES ($1, $2, $3)
          ON CONFLICT (revision_hash) DO NOTHING",
@@ -774,9 +772,8 @@ async fn store(
     .bind(revision.as_bytes())
     .bind(large.as_bytes())
     .bind(small.as_bytes())
-    .execute(&mut *tx)
+    .execute(db)
     .await?;
-    tx.commit().await?;
     Ok(())
 }
 

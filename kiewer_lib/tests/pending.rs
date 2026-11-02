@@ -161,6 +161,10 @@ impl BlobStore for Gate {
     async fn exists(&self, hash: &BlobHash) -> Result<bool> {
         self.inner.exists(hash).await
     }
+
+    async fn delete(&self, hash: &BlobHash) -> Result<()> {
+        self.inner.delete(hash).await
+    }
 }
 
 /// Two uploads to one branch that truly overlap, the slower one paused

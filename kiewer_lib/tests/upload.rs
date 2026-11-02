@@ -403,7 +403,7 @@ async fn an_upload_without_a_kicad_file_or_with_a_malformed_one_is_refused_with_
 }
 
 #[tokio::test]
-async fn a_blob_nobody_stored_is_not_found_and_a_blocked_one_is_too() {
+async fn a_blob_nobody_stored_is_not_found_and_a_blocked_one_is_gone() {
     let Some(db) = pool_from_env().await else {
         return;
     };
@@ -432,7 +432,7 @@ async fn a_blob_nobody_stored_is_not_found_and_a_blocked_one_is_too() {
         .await
         .unwrap();
     let (status, _) = http::get(addr, &format!("/blob/{hash}")).await;
-    assert_eq!(status, 404, "blocked: not served");
+    assert_eq!(status, 410, "blocked: not served");
     let again = browser
         .post_multipart(
             "/upload",

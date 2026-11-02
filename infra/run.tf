@@ -3,6 +3,9 @@
 # its Tasks queue, and the right to call itself (the queue delivers
 # thumbnail retries to the service as that account, ADR 0004).
 #
+# Cloud Scheduler calls the collector each night the same way (the job at
+# the end of this file).
+#
 # Terraform owns the service's shape: the account, the environment, the
 # Cloud SQL mount, scaling. CI owns the image: every push to main deploys
 # a new revision to kiewer-staging with `gcloud run deploy --image`, a
@@ -233,4 +236,38 @@ resource "google_cloud_run_v2_service_iam_member" "run_invokes_itself" {
   location = var.region
   role     = "roles/run.invoker"
   member   = google_service_account.run[each.key].member
+}
+
+# The collector (ADR 0002): one authenticated POST a night. The token is
+# minted as the runtime account for the public URL, which is what the
+# server's check takes (kiewer_lib::thumbnail::TaskAuth), so this route
+# and the thumbnail retry share one caller. The URL is the run.app host and
+# not the public one: the handler answers when the run ends, and Fastly's
+# first byte timeout (fastly.tf) is well short of the service's. The run is
+# idempotent, and one cut short by the deadline, the service's own timeout,
+# leaves its work for the retry or the next night.
+resource "google_cloud_scheduler_job" "collector" {
+  for_each = local.environments
+
+  name             = "${each.value.service}-collector"
+  region           = var.region
+  schedule         = "0 3 * * *"
+  time_zone        = "Etc/UTC"
+  attempt_deadline = "300s"
+
+  retry_config {
+    retry_count = 1
+  }
+
+  http_target {
+    http_method = "POST"
+    uri         = "https://${local.run_host[each.key]}/api/collector"
+
+    oidc_token {
+      service_account_email = google_service_account.run[each.key].email
+      audience              = "https://${each.value.hostname}"
+    }
+  }
+
+  depends_on = [google_project_service.apis]
 }

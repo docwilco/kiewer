@@ -89,6 +89,15 @@ pub trait BlobStore: Send + Sync {
     ///
     /// When the store cannot read.
     async fn get_gzip(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>>;
+
+    /// Remove the blob under this hash. A blob the store does not hold
+    /// is no failure: a run of the collector cut short deletes again
+    /// (`crate::collector`).
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot delete.
+    async fn delete(&self, hash: &BlobHash) -> Result<()>;
 }
 
 /// The stored form of a blob: one gzip member of the bytes.

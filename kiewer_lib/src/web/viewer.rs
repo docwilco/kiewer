@@ -223,6 +223,8 @@ pub struct DesignView {
     /// The settings block: the form's values and a refusal's reason
     /// (`web/design_settings.rs`).
     pub settings: super::design_settings::SettingsView,
+    /// The delete block inside the settings block (`web/delete.rs`).
+    pub delete: super::delete::DeleteView,
     /// The fork form: where it posts and the branch choice
     /// (`web/fork.rs`).
     pub fork: super::fork::ForkView,

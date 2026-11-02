@@ -21,6 +21,7 @@ use axum::response::{Html, Redirect, Response};
 use serde::Deserialize;
 
 use super::auth::{Settled, personal};
+use super::delete::DeleteView;
 use super::design_settings::SettingsView;
 use super::fork::{ForkView, ForkedFromView};
 use super::open_graph::{self, OpenGraph};
@@ -151,6 +152,7 @@ pub(super) fn design_page(
         people_url: people_url(&shown.owner, &shown.design.slug),
         description_html: description.html.clone(),
         settings,
+        delete: DeleteView::of(&shown.owner, &shown.design),
         fork: ForkView::of(&shown.owner, &shown.design, shown.branches.len()),
         forked_from: forked_from.map(ForkedFromView::of),
     };

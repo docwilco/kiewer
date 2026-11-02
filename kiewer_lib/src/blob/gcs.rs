@@ -15,7 +15,9 @@ use std::fmt;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use axum::http::Extensions;
 use bytes::Bytes;
+use google_cloud_auth::credentials::{CacheableResource, Credentials};
 use google_cloud_storage::builder::storage::ClientBuilder;
 use google_cloud_storage::client::Storage;
 use google_cloud_storage::model_ext::ReadRange;
@@ -47,6 +49,8 @@ impl fmt::Display for BlobOp {
 const PRECONDITION_FAILED: u16 = 412;
 /// The status GCS answers for an object that is not there.
 const NOT_FOUND: u16 = 404;
+/// Where the JSON API is, unless an emulator stands in for it.
+const JSON_API: &str = "https://storage.googleapis.com";
 
 /// Blobs in one bucket. Cheap to clone: the client is shared.
 #[derive(Debug, Clone)]
@@ -55,6 +59,12 @@ pub struct GcsBlobStore {
     /// The bucket as the client names it: `projects/_/buckets/<bucket>`.
     resource: String,
     client: Storage,
+    /// The JSON API's origin, for the delete: the client's data plane
+    /// reads and writes only, and its control client speaks gRPC, which
+    /// an emulator lacks.
+    api: String,
+    credentials: Credentials,
+    http: reqwest::Client,
 }
 
 impl GcsBlobStore {
@@ -67,7 +77,12 @@ impl GcsBlobStore {
     /// configuration is refused. The bucket itself is not touched until the
     /// first operation.
     pub async fn new(bucket: &str) -> Result<Self> {
-        Self::build(bucket, Storage::builder()).await
+        let credentials = google_cloud_auth::credentials::Builder::default()
+            .build()
+            .map_err(|source| Error::Failed {
+                reason: format!("the GCS store for bucket {bucket}: no credentials: {source}"),
+            })?;
+        Self::build(bucket, Storage::builder(), JSON_API, credentials).await
     }
 
     /// A store on this bucket of a GCS emulator (fake-gcs-server) at
@@ -81,11 +96,16 @@ impl GcsBlobStore {
         let anonymous = google_cloud_auth::credentials::anonymous::Builder::new().build();
         let builder = Storage::builder()
             .with_endpoint(endpoint)
-            .with_credentials(anonymous);
-        Self::build(bucket, builder).await
+            .with_credentials(anonymous.clone());
+        Self::build(bucket, builder, endpoint, anonymous).await
     }
 
-    async fn build(bucket: &str, builder: ClientBuilder) -> Result<Self> {
+    async fn build(
+        bucket: &str,
+        builder: ClientBuilder,
+        api: &str,
+        credentials: Credentials,
+    ) -> Result<Self> {
         let client = builder.build().await.map_err(|source| Error::GcsClient {
             bucket: bucket.to_owned(),
             source,
@@ -94,6 +114,9 @@ impl GcsBlobStore {
             bucket: bucket.to_owned(),
             resource: format!("projects/_/buckets/{bucket}"),
             client,
+            api: api.trim_end_matches('/').to_owned(),
+            credentials,
+            http: reqwest::Client::new(),
         })
     }
 
@@ -227,6 +250,45 @@ impl BlobStore for GcsBlobStore {
             Ok(_) => Ok(true),
             Err(source) if source.http_status_code() == Some(NOT_FOUND) => Ok(false),
             Err(source) => Err(self.failed(BlobOp::Exists, *hash, source)),
+        }
+    }
+
+    async fn delete(&self, hash: &BlobHash) -> Result<()> {
+        let failed = |reason: String| Error::DeleteBlob {
+            hash: *hash,
+            path: self.url_of(&object_name(hash)),
+            reason,
+        };
+        let headers = self
+            .credentials
+            .headers(Extensions::new())
+            .await
+            .map_err(|source| failed(format!("no credentials: {source}")))?;
+        let CacheableResource::New { data: headers, .. } = headers else {
+            return Err(failed(
+                "the credentials gave no headers without an entity tag".to_owned(),
+            ));
+        };
+        // The object's name is one path segment of this URL, so its slash
+        // is escaped.
+        let url = format!(
+            "{}/storage/v1/b/{}/o/{}",
+            self.api,
+            self.bucket,
+            object_name(hash).replace('/', "%2F")
+        );
+        let response = self
+            .http
+            .delete(&url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|source| failed(source.to_string()))?;
+        let status = response.status();
+        if status.is_success() || status.as_u16() == NOT_FOUND {
+            Ok(())
+        } else {
+            Err(failed(format!("GCS answered {status}")))
         }
     }
 }

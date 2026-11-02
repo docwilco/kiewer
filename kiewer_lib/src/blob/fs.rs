@@ -94,6 +94,19 @@ impl FsBlobStore {
         verified(hash, bytes).map(Some)
     }
 
+    fn delete_sync(&self, hash: &BlobHash) -> Result<()> {
+        let path = self.path_of(hash);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(Error::DeleteBlob {
+                hash: *hash,
+                path,
+                reason: source.to_string(),
+            }),
+        }
+    }
+
     fn exists_sync(&self, hash: &BlobHash) -> Result<bool> {
         let path = self.path_of(hash);
         match std::fs::metadata(&path) {
@@ -133,5 +146,11 @@ impl BlobStore for FsBlobStore {
         let store = self.clone();
         let hash = *hash;
         blocking(move || store.get_gzip_sync(&hash)).await
+    }
+
+    async fn delete(&self, hash: &BlobHash) -> Result<()> {
+        let store = self.clone();
+        let hash = *hash;
+        blocking(move || store.delete_sync(&hash)).await
     }
 }

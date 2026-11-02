@@ -283,8 +283,9 @@ pub async fn now_text(tx: &mut PgConnection) -> Result<String> {
     .await?)
 }
 
-/// The blob row for `hash`, `size` uncompressed bytes; one already there
-/// is left as it is.
+/// The blob row for `hash`, `size` uncompressed bytes, within a caller's
+/// transaction; one already there is left as it is. The row alone, with
+/// no object: the server's own blobs go in through `collector::store`.
 ///
 /// # Errors
 ///
@@ -299,8 +300,9 @@ pub async fn record_blob(tx: &mut PgConnection, hash: &BlobHash, size: u64) -> R
 }
 
 /// The tree of `entries` and its hash; a tree already there (the same
-/// files uploaded again) is left as it is, since its entries are the same
-/// by construction.
+/// files uploaded again) keeps its entries, which are the same by
+/// construction, and is claimed afresh, so the collector leaves it
+/// alone (`crate::collector`).
 ///
 /// # Errors
 ///
@@ -308,12 +310,16 @@ pub async fn record_blob(tx: &mut PgConnection, hash: &BlobHash, size: u64) -> R
 /// Postgres refuses.
 pub async fn record_tree(tx: &mut PgConnection, entries: &[TreeEntry]) -> Result<TreeHash> {
     let hash = tree_hash(entries)?;
-    let inserted = sqlx::query("INSERT INTO tree (hash) VALUES ($1) ON CONFLICT (hash) DO NOTHING")
-        .bind(hash.as_bytes())
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    if inserted == 1 {
+    // xmax tells an insert from the conflict arm's update.
+    let inserted: bool = sqlx::query_scalar(
+        "INSERT INTO tree (hash) VALUES ($1)
+         ON CONFLICT (hash) DO UPDATE SET claimed_at = now()
+         RETURNING (xmax = 0)",
+    )
+    .bind(hash.as_bytes())
+    .fetch_one(&mut *tx)
+    .await?;
+    if inserted {
         for entry in entries {
             sqlx::query("INSERT INTO tree_entry (tree_hash, path, blob_hash) VALUES ($1, $2, $3)")
                 .bind(hash.as_bytes())
@@ -575,7 +581,8 @@ pub async fn record_design_revision(
 /// How many bytes `owner`'s designs hold (every distinct blob a revision
 /// of theirs names, uncompressed), and how many `adding` these blobs would
 /// add: the ones among them no design of theirs names yet. Read within
-/// the upload's transaction after [`record_blob`], so the sizes are there.
+/// the upload's transaction, where `collector::store` has written the
+/// sizes.
 ///
 /// # Errors
 ///

@@ -145,6 +145,10 @@ impl BlobStore for Unreadable {
         self.0.exists(hash).await
     }
 
+    async fn delete(&self, hash: &BlobHash) -> Result<()> {
+        self.0.delete(hash).await
+    }
+
     async fn get_gzip(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
         self.0.get_gzip(hash).await
     }

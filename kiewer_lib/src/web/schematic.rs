@@ -220,7 +220,8 @@ async fn schematic() -> Response {
 /// revision read from the store and parsed off the runtime's threads,
 /// the tree built below the root sheet. A sheet that does not parse (the
 /// upload refuses one, so only a damaged blob) is left out with a line
-/// in the log, and its node is a leaf without a file.
+/// in the log, and its node is a leaf without a file; a blocked sheet is
+/// left out the same way, unread.
 async fn sheets_of(state: &AppState, shown: &DesignHead) -> Result<Vec<SheetView>> {
     let Some(root) = shown.schematic() else {
         return Ok(Vec::new());
@@ -233,6 +234,9 @@ async fn sheets_of(state: &AppState, shown: &DesignHead) -> Result<Vec<SheetView
         .iter()
         .filter(|entry| entry.path.extension().as_deref() == Some("kicad_sch"))
     {
+        if design::is_blocked(&state.db, &entry.blob).await? {
+            continue;
+        }
         if let Some(bytes) = state.blobs.get(&entry.blob).await? {
             texts.push((entry.path.to_string(), bytes));
             urls.insert(entry.path.to_string(), blob::url(&entry.blob));

@@ -392,6 +392,24 @@ async fn a_route_names_its_policy_and_its_keys(
     );
 }
 
+#[test_case("{path}/delete", "confirm=not-the-name"; "a design's delete")]
+#[test_case("/settings/delete", "confirm=not-the-handle"; "an account's delete")]
+#[tokio::test]
+async fn a_delete_form_answers_for_the_person_alone(template: &str, body: &str) {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let mut site = Site::up(db).await;
+    let url = site.url(template);
+    let refused = site.owner.post_form(&url, body).await;
+    assert_eq!(refused.status, 422, "{url}: {}", refused.body);
+    assert_eq!(
+        caching(&refused),
+        (Some(Policy::Personal.value()), None),
+        "{url}"
+    );
+}
+
 #[tokio::test]
 async fn a_slug_redirect_is_cached_under_the_handle_and_a_schematic_redirect_under_the_design() {
     let Some(db) = pool_from_env().await else {
@@ -463,7 +481,7 @@ async fn a_blocked_blob_is_kept_briefly_so_a_cleared_takedown_comes_back() {
         .await
         .unwrap();
     let blocked = http::request(addr, "GET", &format!("/blob/{hash}"), &[], "").await;
-    assert_eq!(blocked.status, 404);
+    assert_eq!(blocked.status, 410);
     assert_eq!(
         caching(&blocked),
         (Some(Policy::NotFound.value()), None),

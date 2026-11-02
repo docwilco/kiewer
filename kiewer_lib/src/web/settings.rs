@@ -13,8 +13,9 @@ use serde::Deserialize;
 
 use super::AppState;
 use super::auth::{Settled, personal, session_cookie_removal};
-use crate::account::{self, Handle, Identity};
+use crate::account::{self, Handle, Identity, RESERVED_DAYS};
 use crate::auth::Provider;
+use crate::delete;
 use crate::error::Result;
 use crate::session::{self, ListedSession, SessionKey};
 
@@ -30,6 +31,11 @@ struct AccountPage {
     /// The provider whose identity was just refused because it signs in
     /// to another account, from the callback's redirect.
     refused: Option<Provider>,
+    /// The names of the person's designs with other people on them,
+    /// which an account delete takes from those people too.
+    shared: Vec<String>,
+    /// How long the handle stays reserved after the delete.
+    reserved_days: i32,
 }
 
 /// The settings page's query: `?refused=<provider>` after a link the
@@ -39,7 +45,8 @@ pub struct AccountQuery {
     refused: Option<Provider>,
 }
 
-/// `GET /settings`: the account's handle and sign-in methods.
+/// `GET /settings`: the account's handle and sign-in methods, and the
+/// form that deletes it (`web/delete.rs`).
 pub async fn account(
     State(state): State<AppState>,
     Query(query): Query<AccountQuery>,
@@ -57,10 +64,12 @@ pub async fn account(
         })
         .collect();
     let page = AccountPage {
+        shared: delete::shared_designs(&state.db, settled.account_id).await?,
         handle: settled.handle,
         identities,
         linkable,
         refused: query.refused,
+        reserved_days: RESERVED_DAYS,
     };
     Ok(personal(
         settled.jar,

@@ -77,6 +77,10 @@ The box a page shows where a revision's thumbnail goes until it is drawn.
 A person's unique name on kiewer, chosen once at first sign-in. The first segment of a design URL.
 _Avoid_: username, login
 
+**Reserved handle**:
+A handle whose account was deleted, which nobody may take for 90 days, its former holder included.
+_Avoid_: retired handle, tombstone
+
 **Slug**:
 A design's name in its URL, unique per owner: suggested by the name when the design is made, editable by owner or admin. A slug the design left redirects to it until another design of the same owner takes the slug.
 _Avoid_: path, short name, id

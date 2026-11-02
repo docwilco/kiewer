@@ -8,7 +8,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use crate::auth::{Provider, ProviderUser};
 use crate::error::{Error, Result};
@@ -331,31 +331,79 @@ pub async fn suggested_handle(db: &PgPool, account: AccountId) -> Result<Option<
     Ok(login.as_deref().and_then(Handle::suggest))
 }
 
-/// Give `account` its handle, once: the first sign-in's choice.
+/// How long a deleted account's handle stays out of reach
+/// (docs/v1-scope.md, Storage and history, Q35), so a link to the person
+/// does not become a link to a stranger the next day.
+pub const RESERVED_DAYS: i32 = 90;
+
+/// Keep `handle` from anyone for [`RESERVED_DAYS`], within the
+/// transaction that ends the account holding it. A row an earlier
+/// account's end left past its time is replaced.
 ///
 /// # Errors
 ///
-/// [`Error::HandleTaken`] when another account has it; [`Error::Failed`]
-/// when the account already has one (no rename in v1); [`Error::Db`] when
-/// Postgres refuses otherwise.
+/// [`Error::Db`] when Postgres refuses.
+pub(crate) async fn reserve(tx: &mut PgConnection, handle: &Handle) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO reserved_handle (handle, reserved_until)
+         VALUES ($1, now() + make_interval(days => $2))
+         ON CONFLICT (handle) DO UPDATE SET reserved_until = EXCLUDED.reserved_until",
+    )
+    .bind(handle.as_str())
+    .bind(RESERVED_DAYS)
+    .execute(tx)
+    .await?;
+    Ok(())
+}
+
+/// Give `account` its handle, once: the first sign-in's choice. The one
+/// path that sets a handle; any other (v1 has no rename) has to read
+/// `reserved_handle` the same way.
+///
+/// # Errors
+///
+/// [`Error::HandleTaken`] when another account has it;
+/// [`Error::HandleReserved`] when a deleted account gave it up within
+/// [`RESERVED_DAYS`]; [`Error::Failed`] when the account already has one
+/// (no rename in v1); [`Error::Db`] when Postgres refuses otherwise.
 pub async fn choose_handle(db: &PgPool, account: AccountId, handle: &Handle) -> Result<()> {
-    // One statement: the read (is the handle still free, is this account
-    // still without one) is the write's own condition and constraint.
+    // The write first: the read (is the handle still free, is this
+    // account still without one) is its own condition and constraint. The
+    // reservation is read after it, by a statement of its own: an account
+    // delete under way holds the unique index, so the update waits for it,
+    // and only a read that starts after that wait sees the reservation
+    // that delete committed. Refused, the transaction rolls back.
+    let mut tx = db.begin().await?;
     let result = sqlx::query("UPDATE account SET handle = $2 WHERE id = $1 AND handle IS NULL")
         .bind(account)
         .bind(handle.as_str())
-        .execute(db)
+        .execute(&mut *tx)
         .await;
     match result {
-        Ok(done) if done.rows_affected() == 1 => Ok(()),
-        Ok(_) => Err(Error::Failed {
-            reason: format!("account {} already has a handle", account.0),
-        }),
-        Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
-            Err(Error::HandleTaken(handle.clone()))
+        Ok(done) if done.rows_affected() == 1 => {}
+        Ok(_) => {
+            return Err(Error::Failed {
+                reason: format!("account {} already has a handle", account.0),
+            });
         }
-        Err(error) => Err(error.into()),
+        Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+            return Err(Error::HandleTaken(handle.clone()));
+        }
+        Err(error) => return Err(error.into()),
     }
+    let reserved: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM reserved_handle WHERE handle = $1 AND reserved_until > now()
+         )",
+    )
+    .bind(handle.as_str())
+    .fetch_one(&mut *tx)
+    .await?;
+    if reserved {
+        return Err(Error::HandleReserved(handle.clone()));
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 #[cfg(test)]

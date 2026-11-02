@@ -11,13 +11,17 @@
 //! thumbnail route and the render retry in `web/thumbnail.rs`; the
 //! Open Graph tags in `web/open_graph.rs`; a file's download in
 //! `web/files.rs`; the branches page in `web/branches.rs`; the choice a
-//! pending revision waits for in `web/pending.rs`.
+//! pending revision waits for in `web/pending.rs`; the design and account
+//! delete forms in `web/delete.rs`; the collector's run in
+//! `web/collector.rs`.
 
 mod about;
 mod auth;
 pub mod beacon;
 pub mod blob;
 pub mod branches;
+mod collector;
+pub mod delete;
 mod design;
 pub mod design_settings;
 pub mod files;
@@ -115,6 +119,8 @@ pub fn router(state: AppState) -> Router {
         .merge(branches::routes())
         .merge(pending::routes())
         .merge(thumbnail::routes())
+        .merge(delete::routes())
+        .merge(collector::routes())
         // The upload's body may hold a revision's worth of files; every
         // other route keeps axum's default limit. Static routes above win
         // over the design page's two segments (axum 0.8 matches the most

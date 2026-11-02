@@ -42,6 +42,12 @@ async fn hands_out_the_stored_gzip_form() {
     suite::hands_out_the_stored_gzip_form(&store).await;
 }
 
+#[tokio::test]
+async fn deletes_a_blob() {
+    let (store, _dir) = store();
+    suite::deletes_a_blob(&store).await;
+}
+
 /// The store's own invariant beyond the trait: the bytes on disk are
 /// gzip under the hash (ADR 0002), one file per blob, so a second put
 /// writes nothing.

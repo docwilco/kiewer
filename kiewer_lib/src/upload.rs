@@ -6,7 +6,8 @@
 //! stores its bytes as a blob, and writes the tree, revision, branch and
 //! `design_revision` rows in one transaction. Nothing slow happens inside
 //! that transaction: the parsing and the blob writes are done before it
-//! opens, and a blob a refused upload leaves behind is the collector's.
+//! opens, and a blob a refused upload leaves behind is the collector's,
+//! which is why a blob goes in through `collector::store`.
 //!
 //! The head an upload is built on is the one its form saw when that is
 //! on the branch, or else the one [`push`] reads before the slow part;
@@ -48,9 +49,9 @@ use crate::blob::{BlobHash, BlobStore};
 use crate::design::{self, BranchName, Design, DesignId, Slug};
 use crate::error::{Error, Refusal, Result};
 use crate::pending::{self, Held, PendingId};
-use crate::rate_limit;
 use crate::revision::{Metadata, RevisionDraft, RevisionHash, TreeEntry, TreeHash, TreePath};
 use crate::roles::{self, Role};
+use crate::{collector, rate_limit, takedown};
 
 /// The caps an upload is measured against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -779,7 +780,7 @@ async fn parse_and_store(
             }
             .into());
         }
-        blobs.put(&bytes).await?;
+        collector::store(db, blobs, &bytes).await?;
         entries.push(TreeEntry {
             path: file.path,
             blob: hash,
@@ -804,12 +805,12 @@ struct Rows<'a> {
     warnings: Vec<String>,
 }
 
-/// The rows of the revision, as one outcome: the blobs' sizes, the design
-/// (held, or made), the quota against them, the tree, then either the
-/// revision on the branch's head with the head moved by compare-and-set
-/// and the design's index of its revisions, or, when the head is no
-/// longer the one the upload was built on, the pending row in their
-/// place.
+/// The rows of the revision, as one outcome, the blobs' rows being
+/// there from `collector::store`: the design (held, or made), the quota
+/// against them, the tree, then either the revision on the branch's head
+/// with the head moved by compare-and-set and the design's index of its
+/// revisions, or, when the head is no longer the one the upload was
+/// built on, the pending row in their place.
 async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Outcome> {
     let Rows {
         author,
@@ -822,9 +823,6 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Outc
         warnings,
     } = rows;
     let mut tx = db.begin().await?;
-    for entry in entries {
-        design::record_blob(&mut tx, &entry.blob, entry.size).await?;
-    }
     let (design, branch, created) = match target {
         Target::Existing {
             owner,
@@ -856,6 +854,8 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Outc
     let hashes: Vec<BlobHash> = entries.iter().map(|entry| entry.blob).collect();
     check_account_cap(&mut tx, limits, author.account_id, &hashes).await?;
     let tree = design::record_tree(&mut tx, entries).await?;
+    // A block made since the file passed the check in parse_and_store.
+    takedown::refuse_blocked(&mut *tx, tree).await?;
     let message = message.map(str::trim).filter(|message| !message.is_empty());
     let (branch, parent, expected) =
         match resolve_branch(&mut tx, &design, branch, started_at).await? {
@@ -914,7 +914,7 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Outc
 }
 
 /// Refused when `blobs` would take `account` over its cap, within the
-/// transaction that will name them, after [`design::record_blob`].
+/// transaction that will name them.
 pub(crate) async fn check_account_cap(
     tx: &mut PgConnection,
     limits: &Limits,

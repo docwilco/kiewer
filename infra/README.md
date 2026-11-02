@@ -1,6 +1,6 @@
 # Infrastructure
 
-The GCP and Fastly side of kiewer as Terraform, applied by hand from a workstation. CI never applies; it deploys Cloud Run revisions with the identity `ci.tf` defines. One file per concern, each with the reasoning in its header comment: `registry.tf` (Artifact Registry and its cleanup policy), `storage.tf` (the blob buckets and Fastly's HMAC key), `database.tf` (Cloud SQL), `secrets.tf` (Secret Manager), `run.tf` (the two services, their accounts and Tasks queues), `ci.tf` (Workload Identity Federation and the deploy account), `fastly.tf` with `fastly/` (the service and its VCL), `outputs.tf` (what CI reads).
+The GCP and Fastly side of kiewer as Terraform, applied by hand from a workstation. CI never applies; it deploys Cloud Run revisions with the identity `ci.tf` defines. One file per concern, each with the reasoning in its header comment: `registry.tf` (Artifact Registry and its cleanup policy), `storage.tf` (the blob buckets and Fastly's HMAC key), `database.tf` (Cloud SQL), `secrets.tf` (Secret Manager), `run.tf` (the two services, their accounts and Tasks queues, the nightly collector job), `ci.tf` (Workload Identity Federation and the deploy account), `fastly.tf` with `fastly/` (the service and its VCL), `outputs.tf` (what CI reads).
 
 ## Prerequisites
 
@@ -65,13 +65,23 @@ What `run.tf` gives each service, the names `kiewer_lib::config` reads. Secret-b
 | `DATABASE_URL` | secret: `postgres://<role>:<password>@/<database>?host=/cloudsql/<connection name>` |
 | `BLOB_BUCKET` | the environment's blob bucket, which makes the GCS store the blob store; objects at `<first two hex>/<hash>.gz` |
 | `THUMBNAIL_QUEUE` | the environment's Cloud Tasks queue, as `projects/…/locations/…/queues/…` |
-| `THUMBNAIL_TASK_ACCOUNT` | the runtime service account's email: the queue's tasks carry an OIDC token minted as it, which the server's retry path checks |
+| `THUMBNAIL_TASK_ACCOUNT` | the runtime service account's email: the queue's tasks and the scheduler's collector job carry an OIDC token minted as it, which the server's internal routes check; without it they refuse everyone |
 | `FASTLY_SERVICE_ID` | the service to purge on |
 | `FASTLY_API_TOKEN` | secret: the token to purge with; only once given |
 | `OAUTH_<GITHUB,DISCORD,GOOGLE>_CLIENT_ID` | the registration's client id; only once registered |
 | `OAUTH_<GITHUB,DISCORD,GOOGLE>_CLIENT_SECRET` | secret: the registration's client secret; only once registered |
 
 Cloud Run sets `PORT`. A retired variable is a breaking Release (AGENTS.md, Deploy).
+
+## A takedown
+
+A row in `blocked_blob` refuses a hash site-wide; deleting the row lifts it. Run this against the environment's database, with the 64 hex characters of the hash:
+
+```sql
+INSERT INTO blocked_blob (hash, reason) VALUES (decode('<hash>', 'hex'), '<why>');
+```
+
+From then on an upload holding the bytes is refused, the origin answers 410 on `/blob/{hash}` and on the file route, and every thumbnail of a revision holding them is off the pages. The row stops only the origin: in production Fastly sends `/blob/{hash}` straight to the bucket, and copies Fastly holds stay until they expire, so a takedown is not complete until #71 is settled. The object stays in the bucket while a tree names it, and the block outlives the collector removing it.
 
 ## What the state holds
 

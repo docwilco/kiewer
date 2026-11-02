@@ -13,12 +13,13 @@
 
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
+use axum::http::header::{CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 
 use super::AppState;
+use super::auth::task_caller;
 use crate::account::Handle;
 use crate::cache::{self, Key, Policy};
 use crate::design::{self, Slug};
@@ -92,11 +93,7 @@ async fn retry(
     Path(hash): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response> {
-    let bearer = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    if !state.thumbnails.allows_task(bearer).await? {
+    if !task_caller(&state, &headers).await? {
         return Ok((
             StatusCode::UNAUTHORIZED,
             [Policy::Personal.header()],

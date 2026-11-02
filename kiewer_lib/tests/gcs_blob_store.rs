@@ -141,6 +141,14 @@ async fn hands_out_the_stored_gzip_form() {
     suite::hands_out_the_stored_gzip_form(&f.store).await;
 }
 
+#[tokio::test]
+async fn deletes_a_blob() {
+    let Some(f) = fresh("deletes_a_blob").await else {
+        return;
+    };
+    suite::deletes_a_blob(&f.store).await;
+}
+
 /// The store's own invariant beyond the trait: one object per blob at
 /// `<first two hex>/<hash>.gz`, the layout the filesystem store and the
 /// Fastly rewrite (infra/fastly/recv.vcl.tftpl) spell, holding gzip bytes

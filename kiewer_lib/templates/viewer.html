@@ -50,6 +50,7 @@
   #settings input { width: 100%; max-width: 30em; box-sizing: border-box; }
   #settings textarea { width: 100%; max-width: 60em; box-sizing: border-box; }
   #settings .error { padding: 0.3em 0.5em; background: #5a1e1e; border-radius: 4px; }
+  #delete-design { margin-top: 0.8em; border-top: 1px solid #444; padding-top: 0.4em; }
   #design select { font: inherit; }
   /* Off the head of the branch in context: one line above the details. */
   #off-head { margin: 0; padding: 0.4em 0.8em; background: #4a3f1e; border-top: 1px solid #444; }
@@ -173,6 +174,14 @@
     <label>Description, in Markdown <textarea name="description" rows="8">{{ design.settings.description }}</textarea></label>
     <button type="submit">Save</button>
   </form>
+  <details id="delete-design">
+    <summary>Delete this design</summary>
+    <p>This takes effect at once and cannot be undone: the design, its branches and the people on it go. Forks of it keep working, and their pages say it was deleted.</p>
+    <form method="post" action="{{ design.delete.action }}" data-name="{{ design.delete.name }}">
+      <label>Type the name, <strong>{{ design.delete.name }}</strong>, to confirm <input name="confirm" autocomplete="off" required></label>
+      <button type="submit" disabled>Delete this design for good</button>
+    </form>
+  </details>
 </details>
 {% endif %}
 <p hidden><small>{{ build }}</small></p>
@@ -954,6 +963,16 @@ window.addEventListener("kiewer-board", function (e) {
 // hidden, and this block shows it once /api/me says the person is the
 // design's owner; the POST checks the right for itself. A refused save
 // comes back with the block open and the reason, without this.
+// The delete block inside it: the button stays off until the design's
+// name is typed out; web/delete.rs checks again.
+const deleteForm = document.querySelector("#delete-design form");
+if (deleteForm) {
+  const typed = deleteForm.elements.confirm;
+  const button = deleteForm.querySelector("button");
+  typed.addEventListener("input", function () {
+    button.disabled = typed.value.trim() !== deleteForm.dataset.name;
+  });
+}
 const settingsBlock = document.getElementById("settings");
 if (settingsBlock && settingsBlock.hidden) {
   fetch("/api/me", { credentials: "same-origin" })
