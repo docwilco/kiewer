@@ -71,6 +71,7 @@ The decisions behind v1, settled in the design grilling of 2026-10-30, grouped b
 - Fastly per ADR 0003: two origins, identical pages, `/api/me`, `Surrogate-Key` purges (design id, handle), `private, no-store` for settings and upload pages. (Q24, Q25, Q26)
 - Static assets: content hash in the filename, `Cache-Control: public, max-age=31536000, immutable`, brotli and gzip prebuilt. (Q39)
 - The server also serves `/blob/*` from its store so development works without Fastly; in production Fastly answers first. (N6)
+- Built as #26: `kiewer_lib/src/cache.rs` holds the policies and which write purges which keys (its `Key` doc). Every response names a `Policy`, a page goes through `cache::page` with its keys, and a write ends with `cache::after_write`. A new handler follows that, and the session byte test in `kiewer_lib/tests/cache.rs` lists every cacheable page, so a new one joins that list. A cacheable page reads nothing of the session.
 
 ## Operations
 

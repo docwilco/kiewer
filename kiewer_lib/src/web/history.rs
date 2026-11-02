@@ -13,8 +13,7 @@
 use askama::Template;
 use axum::Router;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, Response};
 use axum::routing::get;
 use serde::Deserialize;
 
@@ -22,6 +21,7 @@ use super::open_graph::{OpenGraph, metadata_line};
 use super::viewer::BranchView;
 use super::{AppState, design};
 use crate::account::Handle;
+use crate::cache::{self, Key};
 use crate::design::{self as designs, At, BranchName, Design, Slug};
 use crate::error::Result;
 use crate::revision::RevisionHash;
@@ -69,8 +69,9 @@ pub fn history_url(handle: &Handle, slug: &Slug, branch: &BranchName) -> String 
     format!("/{handle}/{slug}/b/{branch}/history")
 }
 
-fn not_found(what: &str) -> Response {
-    (StatusCode::NOT_FOUND, format!("no such {what}\n")).into_response()
+/// The 404 under `handle`, the first segment as the URL has it.
+fn not_found(handle: &str, what: &str) -> Response {
+    cache::not_found(&cache::handle_key(handle), format!("no such {what}\n"))
 }
 
 /// `GET /{handle}/{slug}/b/{branch}`: the viewer at the branch's head;
@@ -81,7 +82,7 @@ async fn at_branch(
     Query(linked): Query<Linked>,
 ) -> Result<Response> {
     let Ok(branch) = branch.parse::<BranchName>() else {
-        return Ok(not_found("branch"));
+        return Ok(not_found(&handle, "branch"));
     };
     design::show(&state, &handle, &slug, At::Branch(&branch), linked.stays()).await
 }
@@ -116,7 +117,7 @@ async fn at_revision(
     Query(linked): Query<Linked>,
 ) -> Result<Response> {
     let Ok(hash) = hash.parse::<RevisionHash>() else {
-        return Ok(not_found("revision"));
+        return Ok(not_found(&handle, "revision"));
     };
     let stay = linked.stays();
     let branch = linked.b.and_then(|name| name.parse::<BranchName>().ok());
@@ -166,10 +167,11 @@ struct HistoryPage {
 /// newest first, or 404 when there is no such design or branch.
 async fn history(
     State(state): State<AppState>,
-    Path((handle, slug, branch)): Path<(String, String, String)>,
+    Path((text, slug, branch)): Path<(String, String, String)>,
 ) -> Result<Response> {
+    let not_found = |what| not_found(&text, what);
     let (Ok(handle), Ok(slug), Ok(branch)) = (
-        handle.parse::<Handle>(),
+        text.parse::<Handle>(),
         slug.parse::<Slug>(),
         branch.parse::<BranchName>(),
     ) else {
@@ -197,6 +199,7 @@ async fn history(
         let path = thumbnail::url(owner.as_str(), design.slug.as_str(), *head, Size::Large);
         og = og.with_thumbnail(public_url, &path);
     }
+    let keys = [Key::Design(design.id)];
     let page = HistoryPage {
         build: crate::build::line(),
         handle: owner.to_string(),
@@ -238,5 +241,5 @@ async fn history(
         branch: branch.to_string(),
         og,
     };
-    Ok(Html(page.render()?).into_response())
+    Ok(cache::page(&keys, Html(page.render()?)))
 }

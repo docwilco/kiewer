@@ -15,7 +15,6 @@ use kiewer_lib::blob::BlobHash;
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::cache::Policy;
 use kiewer_lib::session;
-use kiewer_lib::web::blob::IMMUTABLE;
 use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
@@ -115,7 +114,10 @@ async fn the_hand_off_board_downloads_under_its_name_with_immutable_headers() {
         gzipped.header("content-disposition"),
         Some(r#"attachment; filename="midi8knob.kicad_pcb""#)
     );
-    assert_eq!(gzipped.header("cache-control"), Some(IMMUTABLE));
+    assert_eq!(
+        gzipped.header("cache-control"),
+        Some(Policy::Immutable.value())
+    );
     assert_eq!(gzipped.header("vary"), Some("Accept-Encoding"));
     assert_eq!(
         gzipped.header("content-type"),
@@ -127,7 +129,10 @@ async fn the_hand_off_board_downloads_under_its_name_with_immutable_headers() {
     let plain = get(addr, &route, &[]).await;
     assert_eq!(plain.status, 200);
     assert_eq!(plain.header("content-encoding"), None);
-    assert_eq!(plain.header("cache-control"), Some(IMMUTABLE));
+    assert_eq!(
+        plain.header("cache-control"),
+        Some(Policy::Immutable.value())
+    );
     assert_eq!(plain.body.as_bytes(), BOARD);
 }
 

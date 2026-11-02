@@ -682,7 +682,7 @@ async fn the_home_page_and_a_persons_page_list_public_designs_and_never_unlisted
     assert!(!home.body.contains(&empty), "no revision: {}", home.body);
     assert_eq!(
         home.header("cache-control"),
-        None,
+        Some(kiewer_lib::cache::Policy::Page.value()),
         "the same for everyone, so cacheable: {}",
         home.body
     );

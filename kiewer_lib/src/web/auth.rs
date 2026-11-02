@@ -9,7 +9,6 @@ use askama::Template;
 use axum::Form;
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::StatusCode;
-use axum::http::header::CACHE_CONTROL;
 use axum::http::request::Parts;
 use axum::response::{Html, IntoResponse, Json, Redirect, Response};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -18,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::AppState;
 use crate::account::{self, AccountId, Handle, Linked};
 use crate::auth::Provider;
+use crate::cache::Policy;
 use crate::error::{Error, Result};
 use crate::session::{self, LIFETIME_DAYS, Session, SessionId};
 
@@ -27,10 +27,6 @@ pub const SESSION_COOKIE: &str = "kiewer_session";
 /// The cookie a sign-in under way keeps its state and PKCE verifier in,
 /// under `/auth` only, for ten minutes.
 const OAUTH_COOKIE: &str = "kiewer_oauth";
-
-/// The value every response here carries: a shared cache never keeps it
-/// (ADR 0003).
-const NO_STORE: (axum::http::HeaderName, &str) = (CACHE_CONTROL, "private, no-store");
 
 /// The session cookie for `id`, with the full lifetime: set at sign-in
 /// and again whenever a use slides the row's expiry, so the browser and
@@ -142,7 +138,7 @@ pub(super) async fn current(
 /// A response that depends on this browser: the jar's changes and
 /// `private, no-store`.
 pub(super) fn personal(jar: CookieJar, response: impl IntoResponse) -> Response {
-    (jar, [NO_STORE], response).into_response()
+    (jar, [Policy::Personal.header()], response).into_response()
 }
 
 /// A signed-in person with a handle, as the settings pages
@@ -194,7 +190,12 @@ impl FromRequestParts<AppState> for Settled {
 const SIGN_IN_FIRST: &str = "sign in first, then link the provider from settings\n";
 
 fn not_found(what: &str) -> Response {
-    (StatusCode::NOT_FOUND, [NO_STORE], format!("{what}\n")).into_response()
+    (
+        StatusCode::NOT_FOUND,
+        [Policy::Personal.header()],
+        format!("{what}\n"),
+    )
+        .into_response()
 }
 
 /// The provider a path segment names; `None` is a 404.

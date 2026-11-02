@@ -17,6 +17,7 @@ use super::AppState;
 use super::auth::{Settled, personal};
 use super::design::people_url;
 use crate::account::Handle;
+use crate::cache::{self, Key};
 use crate::design::{self, Design, Slug};
 use crate::error::{Error, Result};
 use crate::roles::{self, Changed, Role, Visibility};
@@ -328,6 +329,15 @@ async fn transfer(
     };
     let changed = roles::transfer(&state.db, access.design.id, &person).await?;
     tracing::info!(design = %access.design.slug, to = %person, ?changed, "transfer");
+    if changed == Changed::Done {
+        let keys = [
+            Key::Design(access.design.id),
+            Key::Handle(access.owner.clone()),
+            Key::Handle(person.clone()),
+            Key::Home,
+        ];
+        cache::after_write(state.purge.as_ref(), &keys).await;
+    }
     match changed {
         Changed::Done => Ok(personal(
             access.settled.jar,
@@ -368,5 +378,11 @@ async fn set_visibility(
     };
     roles::set_visibility(&state.db, access.design.id, visibility).await?;
     tracing::info!(design = %access.design.slug, %visibility, "visibility set");
+    let keys = [
+        Key::Design(access.design.id),
+        Key::Handle(access.owner.clone()),
+        Key::Home,
+    ];
+    cache::after_write(state.purge.as_ref(), &keys).await;
     Ok(done(access))
 }

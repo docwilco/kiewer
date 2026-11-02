@@ -16,10 +16,10 @@ use kiewer_lib::account::{self, AccountId, Handle};
 use kiewer_lib::auth::{Provider, ProviderUser};
 use kiewer_lib::blob::BlobHash;
 use kiewer_lib::blob::fs::FsBlobStore;
+use kiewer_lib::cache::Policy;
 use kiewer_lib::error::Refusal;
 use kiewer_lib::session;
 use kiewer_lib::upload::{self, Author, Incoming, Limits, Target};
-use kiewer_lib::web::blob::IMMUTABLE;
 use kiewer_lib::{Error, Result};
 use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
@@ -182,7 +182,10 @@ async fn assert_blob_route(addr: SocketAddr, board_hash: &BlobHash) {
     .await;
     assert_eq!(gzipped.status, 200);
     assert_eq!(gzipped.header("content-encoding"), Some("gzip"));
-    assert_eq!(gzipped.header("cache-control"), Some(IMMUTABLE));
+    assert_eq!(
+        gzipped.header("cache-control"),
+        Some(Policy::Immutable.value())
+    );
     assert_eq!(gzipped.header("vary"), Some("Accept-Encoding"));
     assert_eq!(
         gzipped.header("content-type"),

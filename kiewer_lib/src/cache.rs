@@ -15,12 +15,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::http::header::{CACHE_CONTROL, HeaderName};
-use axum::http::{HeaderMap, HeaderValue};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use crate::account::Handle;
 use crate::design::DesignId;
 use crate::error::{Error, Result};
+use crate::roles::Visibility;
 
 /// The header Fastly reads the keys from and strips before the client.
 pub const SURROGATE_KEY: HeaderName = HeaderName::from_static("surrogate-key");
@@ -34,15 +35,19 @@ pub enum Policy {
     /// view. The hour bounds a page nothing purges (the about page, the
     /// hand-off viewer) after a deploy, and a purge that was lost.
     Page,
-    /// A response that depends on the session or the browser: a settings
-    /// or upload page, `/api/me`, a redirect after a write. No cache
-    /// keeps it.
+    /// A response no cache may keep: one that depends on the session or
+    /// the browser (a settings or upload page, `/api/me`, a redirect
+    /// after a write), and one that must not outlive the moment (a 500, a
+    /// thumbnail not rendered yet).
     Personal,
     /// Bytes addressed by their content: a blob, a hashed asset. A year,
     /// and `immutable` so the browser never revalidates.
     Immutable,
-    /// A 404 for a design, a person or a blob that may exist soon: kept a
-    /// minute at Fastly, so a new design is reachable within one.
+    /// A 404 for a design, a person or a blob that may exist soon, and
+    /// the answer for a blocked blob, which a cleared takedown must be
+    /// able to undo: kept a minute at Fastly, never immutable. A 404
+    /// under a handle carries that handle's key ([`not_found`]), so the
+    /// push that creates the design clears it at once.
     NotFound,
 }
 
@@ -69,13 +74,20 @@ impl Policy {
 /// key drops every page that carried it. A page carries the key of each
 /// thing it shows, and a write purges the keys of what it changed:
 ///
-/// - a push: the design (its pages, their dropdowns and banners), the
-///   owner's handle (the person page's listing) and the home page;
-/// - a visibility change: the same three;
+/// - a push, a fork, or the settings form (name, slug, description):
+///   [`of_design`], the design, the owner's handle, and the home page
+///   when the design is public; a fork's source's pages do not change;
+/// - a visibility change: the design, the owner's handle and the home
+///   page, whichever way it went;
 /// - a transfer: the design, both handles and the home page;
-/// - the settings form (name, slug, description): the design, the
-///   owner's handle and the home page;
+/// - a thumbnail that arrives after the push (the Cloud Tasks retry):
+///   every design holding the revision, as a visibility change does,
+///   since listings and Open Graph tags show it;
 /// - a role change: nothing, since no cacheable page shows roles.
+///
+/// A design's pages carry its design key alone, so one push does not
+/// clear everything its owner has; a fork's also carry its source's,
+/// since the forked-from line reads the source's handle and slug.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Key {
     /// The home page's recent list.
@@ -107,17 +119,49 @@ pub fn surrogate_key(keys: &[Key]) -> String {
         .join(" ")
 }
 
-/// `response` as a cacheable page about `keys`: [`Policy::Page`] and the
-/// `Surrogate-Key` header. The page itself must be the same for everyone
-/// (ADR 0003): nothing a handler puts in it may come from the session.
-pub fn page(keys: &[Key], response: impl IntoResponse) -> Response {
-    let mut response = ([Policy::Page.header()], response).into_response();
+/// What a push or the settings form purges for the design `id` of
+/// `owner`: the design, the owner's handle (their page lists it, and a
+/// cached 404 under the handle may be this design), and the home page
+/// when the design is public.
+#[must_use]
+pub fn of_design(id: DesignId, owner: &Handle, visibility: Visibility) -> Vec<Key> {
+    let mut keys = vec![Key::Design(id), Key::Handle(owner.clone())];
+    if visibility == Visibility::Public {
+        keys.push(Key::Home);
+    }
+    keys
+}
+
+/// The key of the handle a URL's first segment names, or none for text
+/// that is not a handle: what a 404 under that segment carries.
+#[must_use]
+pub fn handle_key(segment: &str) -> Vec<Key> {
+    segment.parse().map(Key::Handle).into_iter().collect()
+}
+
+/// `response` with `policy` and `keys`.
+fn with_keys(policy: Policy, keys: &[Key], response: impl IntoResponse) -> Response {
+    let mut response = ([policy.header()], response).into_response();
     if !keys.is_empty()
         && let Ok(value) = HeaderValue::from_str(&surrogate_key(keys))
     {
         response.headers_mut().insert(SURROGATE_KEY, value);
     }
     response
+}
+
+/// `response` as a cacheable page about `keys`: [`Policy::Page`] and the
+/// `Surrogate-Key` header. The page itself must be the same for everyone
+/// (ADR 0003): nothing a handler puts in it may come from the session.
+pub fn page(keys: &[Key], response: impl IntoResponse) -> Response {
+    with_keys(Policy::Page, keys, response)
+}
+
+/// A 404 saying `body`: [`Policy::NotFound`], and `keys` so the write
+/// that makes the page exist clears it.
+pub fn not_found(keys: &[Key], body: impl Into<String>) -> Response {
+    let response = (StatusCode::NOT_FOUND, body.into());
+    with_keys(Policy::NotFound, keys, response)
 }
 
 /// What purges keys at the edge.
@@ -205,6 +249,10 @@ impl Purge for Recorder {
 /// Where Fastly's API is.
 pub const FASTLY_API: &str = "https://api.fastly.com";
 
+/// The most keys one purge call takes, as Fastly's purging reference
+/// says.
+pub const MAX_KEYS: usize = 256;
+
 /// How long one purge call may take: the edge answers in well under a
 /// second, and a write's response waits on it.
 const PURGE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -212,8 +260,9 @@ const PURGE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The purge-by-key call of Fastly's API: `POST
 /// /service/{service id}/purge` with the token in `Fastly-Key` and the
 /// keys in a `Surrogate-Key` request header, which drops them across
-/// every POP at once. At most 256 keys go in one call; a write has four
-/// at most.
+/// every POP at once. A late thumbnail on a much-forked revision can
+/// name more keys than one call takes, so they go in [`MAX_KEYS`] at a
+/// time.
 #[derive(Clone)]
 pub struct Fastly {
     service_id: String,
@@ -273,28 +322,25 @@ impl Fastly {
 #[async_trait]
 impl Purge for Fastly {
     async fn purge(&self, keys: &[Key]) -> Result<()> {
-        if keys.is_empty() {
-            return Ok(());
-        }
         let url = format!("{}/service/{}/purge", self.api, self.service_id);
-        let response = self
-            .http
-            .post(&url)
-            .header("Fastly-Key", &self.token)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header(SURROGATE_KEY, surrogate_key(keys))
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(Error::Failed {
-                reason: format!(
-                    "Fastly answered {status} to the purge of {}",
-                    surrogate_key(keys)
-                ),
-            });
+        for batch in keys.chunks(MAX_KEYS) {
+            let batch = surrogate_key(batch);
+            let response = self
+                .http
+                .post(&url)
+                .header("Fastly-Key", &self.token)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .header(SURROGATE_KEY, &batch)
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(Error::Failed {
+                    reason: format!("Fastly answered {status} to the purge of {batch}"),
+                });
+            }
+            tracing::info!(keys = %batch, "purged");
         }
-        tracing::info!(keys = %surrogate_key(keys), "purged");
         Ok(())
     }
 }
@@ -418,6 +464,28 @@ mod tests {
             keyless.headers().get(SURROGATE_KEY).is_none(),
             "a page about nothing purgeable carries no header"
         );
+    }
+
+    #[test]
+    fn a_404_is_kept_briefly_and_carries_the_handle_it_is_under() {
+        let response = not_found(&handle_key("ada"), "no such design\n");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get(CACHE_CONTROL).unwrap(),
+            "public, max-age=0, s-maxage=60"
+        );
+        assert_eq!(response.headers().get(SURROGATE_KEY).unwrap(), "handle-ada");
+        assert_eq!(handle_key("Not A Handle"), [], "not a handle: no key");
+    }
+
+    #[test_case(Visibility::Public, true; "a public design is on the home page")]
+    #[test_case(Visibility::Unlisted, false; "an unlisted one is not")]
+    fn a_design_purges_the_home_page_only_when_public(visibility: Visibility, home: bool) {
+        let id = DesignId::for_test(9);
+        let ada = handle("ada");
+        let keys = of_design(id, &ada, visibility);
+        assert_eq!(keys[..2], [Key::Design(id), Key::Handle(ada)]);
+        assert_eq!(keys.contains(&Key::Home), home);
     }
 
     #[tokio::test]

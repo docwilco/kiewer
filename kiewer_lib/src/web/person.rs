@@ -5,11 +5,11 @@
 
 use askama::Template;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, Response};
 
 use super::AppState;
 use crate::account::Handle;
+use crate::cache::{self, Key};
 use crate::error::Result;
 use crate::listing::{self, Listed};
 
@@ -30,16 +30,17 @@ pub(super) async fn page(
     State(state): State<AppState>,
     Path(handle): Path<String>,
 ) -> Result<Response> {
-    let not_found = || (StatusCode::NOT_FOUND, "no such person\n").into_response();
+    let not_found = || cache::not_found(&[], "no such person\n");
     let Ok(handle) = handle.parse::<Handle>() else {
         return Ok(not_found());
     };
     let Some(account) = listing::account_at(&state.db, handle.as_str()).await? else {
         return Ok(not_found());
     };
+    let keys = [Key::Handle(handle.clone())];
     let page = PersonPage {
         designs: listing::public_of(&state.db, account).await?,
         handle,
     };
-    Ok(Html(page.render()?).into_response())
+    Ok(cache::page(&keys, Html(page.render()?)))
 }

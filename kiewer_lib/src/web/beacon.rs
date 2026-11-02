@@ -24,14 +24,15 @@ use std::time::{Duration, Instant};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::header::{CACHE_CONTROL, RETRY_AFTER, USER_AGENT};
-use axum::http::{HeaderMap, HeaderName, StatusCode};
+use axum::http::header::{RETRY_AFTER, USER_AGENT};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use derive_more::Display;
 use serde::Deserialize;
 
 use super::AppState;
+use crate::cache::Policy;
 use crate::error::{Error, Result};
 
 /// Where the page posts to.
@@ -60,8 +61,6 @@ pub const LIMIT_PER_MINUTE: u32 = 30;
 pub const MAX_CLIENTS: usize = 10_000;
 
 const WINDOW: Duration = Duration::from_secs(60);
-
-const NO_STORE: (HeaderName, &str) = (CACHE_CONTROL, "private, no-store");
 
 /// The beacon's routes with their own limiter, merged into the server's
 /// router. One limiter per router, so one per process.
@@ -288,13 +287,21 @@ async fn receive(State(limiter): State<Arc<Limiter>>, headers: HeaderMap, body: 
         let retry_after = WINDOW.as_secs().to_string();
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            [NO_STORE, (RETRY_AFTER, retry_after.as_str())],
+            [
+                Policy::Personal.header(),
+                (RETRY_AFTER, retry_after.as_str()),
+            ],
             "too many beacons\n",
         )
             .into_response();
     }
     let Ok(beacon) = Beacon::parse(&body) else {
-        return (StatusCode::BAD_REQUEST, [NO_STORE], "malformed beacon\n").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            [Policy::Personal.header()],
+            "malformed beacon\n",
+        )
+            .into_response();
     };
     let family = headers
         .get(USER_AGENT)
@@ -309,7 +316,7 @@ async fn receive(State(limiter): State<Arc<Limiter>>, headers: HeaderMap, body: 
         user_agent_family = %family,
         "renderer beacon"
     );
-    (StatusCode::NO_CONTENT, [NO_STORE]).into_response()
+    (StatusCode::NO_CONTENT, [Policy::Personal.header()]).into_response()
 }
 
 #[cfg(test)]
@@ -414,7 +421,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         for (name, value) in pairs {
             headers.append(
-                HeaderName::from_bytes(name.as_bytes()).expect("a header name"),
+                axum::http::HeaderName::from_bytes(name.as_bytes()).expect("a header name"),
                 value.parse().expect("a header value"),
             );
         }

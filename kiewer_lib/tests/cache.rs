@@ -1,12 +1,15 @@
 //! The caching policy over HTTP (#26, ADR 0003): every cacheable page
 //! renders the same bytes with a session as without one, the Fastly
 //! purge client sends the keys to the API's purge-by-key call (a fake
-//! of it on loopback, so no network is touched). The Postgres tests skip
-//! without `DATABASE_URL`, like `tests/db.rs`; the Fastly fake needs none.
+//! of it on loopback, so no network is touched), every kind of route
+//! names its policy and its keys, and each write purges the keys of the
+//! pages it changed. The Postgres tests skip without `DATABASE_URL`, like
+//! `tests/db.rs`; the Fastly fake needs none.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -14,8 +17,11 @@ use axum::response::{IntoResponse, Json};
 use axum::routing::post;
 use kiewer_lib::account::{self, AccountId, Handle};
 use kiewer_lib::auth::{Provider, ProviderUser};
+use kiewer_lib::blob::BlobHash;
 use kiewer_lib::blob::fs::FsBlobStore;
-use kiewer_lib::cache::{Fastly, Key, Purge};
+use kiewer_lib::cache::{Fastly, Key, MAX_KEYS, Policy, Purge, Recorder, surrogate_key};
+use kiewer_lib::design::{self, Design};
+use kiewer_lib::roles::{self, Visibility};
 use kiewer_lib::session;
 use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
@@ -97,6 +103,19 @@ async fn the_fastly_client_purges_by_key_with_the_token_and_reports_a_refusal() 
         .await
         .expect("nothing to purge is no call");
     assert_eq!(calls.lock().unwrap().len(), 1);
+
+    calls.lock().unwrap().clear();
+    let many: Vec<Key> = (0..=MAX_KEYS)
+        .map(|n| Key::Handle(format!("person-{n}").parse().unwrap()))
+        .collect();
+    fastly.purge(&many).await.expect("the API took both calls");
+    let keys_per_call: Vec<usize> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|seen| seen.keys.as_deref().unwrap_or("").split(' ').count())
+        .collect();
+    assert_eq!(keys_per_call, [MAX_KEYS, 1], "more than one call takes");
 
     let wrong = Fastly::at(&api, "SU1Z0isxPaozGVKXdv0eY", "another").expect("a client");
     let refused = wrong
@@ -233,6 +252,8 @@ async fn every_cacheable_page_renders_the_same_bytes_with_a_session_as_without()
         format!("{design_path}?design"),
         sheet_only.clone(),
         format!("{sheet_only}?design"),
+        format!("{design_path}/r/{revision}/f/midi8knob.kicad_pcb"),
+        format!("{design_path}/r/{revision}/thumbnail/400x400.png"),
     ];
     for path in &pages {
         let anonymous = http::request(addr, "GET", path, &[], "").await;
@@ -247,4 +268,477 @@ async fn every_cacheable_page_renders_the_same_bytes_with_a_session_as_without()
             "{path} touched the session cookie"
         );
     }
+}
+
+/// The server over `db` with a purge recorder.
+async fn recording_server(db: PgPool) -> (SocketAddr, Arc<Recorder>, TempDir) {
+    let dir = scratch_dir!();
+    let purge = Arc::new(Recorder::default());
+    let state = http::state_with_purge(db, Arc::new(FsBlobStore::new(dir.path())), purge.clone());
+    (http::serve_on_free_port(state).await, purge, dir)
+}
+
+/// The design the browser's person just made.
+async fn only_design(db: &PgPool, owner: AccountId) -> Design {
+    design::by_owner(db, owner)
+        .await
+        .expect("the owner's designs")
+        .remove(0)
+}
+
+/// A response's caching: its `Cache-Control` and `Surrogate-Key`.
+fn caching(response: &http::Response) -> (Option<&str>, Option<&str>) {
+    (
+        response.header("cache-control"),
+        response.header("surrogate-key"),
+    )
+}
+
+#[tokio::test]
+async fn every_kind_of_route_names_its_policy_and_its_keys() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut owner, owner_id, handle) = signed_in(&db, addr).await;
+    let path = uploaded(&mut owner).await;
+    let page = http::request(addr, "GET", &path, &[], "").await;
+    let revision = linked_hash(&page.body, &format!("{path}/r/"));
+    let board = linked_hash(&page.body, "fetch(\"/blob/");
+    let design = only_design(&db, owner_id).await;
+    let on_design = Key::Design(design.id).to_string();
+    let on_handle = Key::Handle(handle.clone()).to_string();
+
+    let cacheable = Some(Policy::Page.value());
+    for (url, key) in [
+        ("/".to_owned(), Some("home")),
+        (format!("/{handle}"), Some(on_handle.as_str())),
+        (path.clone(), Some(on_design.as_str())),
+        (format!("{path}/b/main"), Some(on_design.as_str())),
+        (format!("{path}/r/{revision}"), Some(on_design.as_str())),
+        (format!("{path}/b/main/history"), Some(on_design.as_str())),
+        (format!("{path}/schematic"), Some(on_design.as_str())),
+        ("/about".to_owned(), None),
+        ("/viewer".to_owned(), None),
+        ("/schematic".to_owned(), None),
+    ] {
+        let response = http::request(addr, "GET", &url, &[], "").await;
+        assert_eq!(response.status, 200, "{url}: {}", response.body);
+        assert_eq!(caching(&response), (cacheable, key), "{url}");
+    }
+
+    let brief = Some(Policy::NotFound.value());
+    for (url, key) in [
+        (
+            format!("/{handle}/no-such-design"),
+            Some(on_handle.as_str()),
+        ),
+        (format!("{path}/b/no-such-branch"), Some(on_handle.as_str())),
+        (
+            format!("{path}/b/not..a@name/schematic"),
+            Some(on_handle.as_str()),
+        ),
+        (
+            format!("{path}/r/not-a-hash/schematic"),
+            Some(on_handle.as_str()),
+        ),
+        (format!("{path}/r/not-a-hash"), Some(on_handle.as_str())),
+        (format!("/{}", fresh("nobody")), None),
+        (format!("/blob/{}", "0".repeat(64)), None),
+        ("/a/path/no/route/has/at/all".to_owned(), None),
+    ] {
+        let response = http::request(addr, "GET", &url, &[], "").await;
+        assert_eq!(response.status, 404, "{url}: {}", response.body);
+        assert_eq!(caching(&response), (brief, key), "{url}");
+    }
+
+    let blob = http::request(addr, "GET", &format!("/blob/{board}"), &[], "").await;
+    assert_eq!(blob.status, 200);
+    assert_eq!(caching(&blob), (Some(Policy::Immutable.value()), None));
+
+    let personal = Some(Policy::Personal.value());
+    for url in [
+        "/upload".to_owned(),
+        "/settings".to_owned(),
+        "/settings/sessions".to_owned(),
+        "/api/me".to_owned(),
+        format!("{path}/people"),
+    ] {
+        let response = owner.get(&url).await;
+        assert_eq!(response.status, 200, "{url}: {}", response.body);
+        assert_eq!(caching(&response), (personal, None), "{url}");
+    }
+    let health = http::request(addr, "GET", "/healthz", &[], "").await;
+    assert_eq!(caching(&health), (personal, None), "the health route");
+}
+
+#[tokio::test]
+async fn a_slug_redirect_is_cached_under_the_handle_and_a_schematic_redirect_under_the_design() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut owner, owner_id, handle) = signed_in(&db, addr).await;
+    let path = uploaded(&mut owner).await;
+    let moved = owner
+        .post_form(
+            &format!("{path}/settings"),
+            "name=Moved&slug=moved&description=",
+        )
+        .await;
+    assert_eq!(moved.status, 303, "{}", moved.body);
+    let redirect = http::request(addr, "GET", &path, &[], "").await;
+    assert_eq!(redirect.status, 301);
+    let on_handle = Key::Handle(handle.clone()).to_string();
+    assert_eq!(
+        caching(&redirect),
+        (Some(Policy::Page.value()), Some(on_handle.as_str())),
+        "a new design taking the slug is a push, which purges the handle"
+    );
+
+    let posted = owner
+        .post_multipart(
+            "/upload",
+            &[
+                Part::text("name", "sheet only"),
+                Part::file("sheet.kicad_sch", SCHEMATIC),
+            ],
+        )
+        .await;
+    assert_eq!(posted.status, 303, "{}", posted.body);
+    let sheet_only = design::by_owner(&db, owner_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|design| design.slug.as_str() == "sheet-only")
+        .expect("the design");
+    let opens = http::request(addr, "GET", &format!("/{handle}/sheet-only"), &[], "").await;
+    assert_eq!(opens.status, 303);
+    let on_design = Key::Design(sheet_only.id).to_string();
+    assert_eq!(
+        caching(&opens),
+        (Some(Policy::Page.value()), Some(on_design.as_str()))
+    );
+}
+
+#[tokio::test]
+async fn a_blocked_blob_is_kept_briefly_so_a_cleared_takedown_comes_back() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut owner, _, _) = signed_in(&db, addr).await;
+    let bytes = format!("(kicad_sch (version 20250114) (uuid \"{}\"))", fresh("sch"));
+    let hash = BlobHash::of(bytes.as_bytes());
+    let posted = owner
+        .post_multipart(
+            "/upload",
+            &[Part::file("blocked.kicad_sch", bytes.as_bytes())],
+        )
+        .await;
+    assert_eq!(posted.status, 303, "{}", posted.body);
+    sqlx::query("INSERT INTO blocked_blob (hash, reason) VALUES ($1, 'test')")
+        .bind(hash.as_bytes())
+        .execute(&db)
+        .await
+        .unwrap();
+    let blocked = http::request(addr, "GET", &format!("/blob/{hash}"), &[], "").await;
+    assert_eq!(blocked.status, 404);
+    assert_eq!(
+        caching(&blocked),
+        (Some(Policy::NotFound.value()), None),
+        "never immutable: the edge asks again within a minute"
+    );
+    sqlx::query("DELETE FROM blocked_blob WHERE hash = $1")
+        .bind(hash.as_bytes())
+        .execute(&db)
+        .await
+        .unwrap();
+    let cleared = http::request(addr, "GET", &format!("/blob/{hash}"), &[], "").await;
+    assert_eq!(
+        cleared.status, 200,
+        "the takedown cleared, the blob is back"
+    );
+}
+
+#[tokio::test]
+async fn a_push_purges_the_design_the_owner_and_the_home_page_only_while_public() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, purge, _dir) = recording_server(db.clone()).await;
+    let (mut owner, owner_id, handle) = signed_in(&db, addr).await;
+    let path = uploaded(&mut owner).await;
+    let design = only_design(&db, owner_id).await;
+    assert_eq!(
+        purge.calls(),
+        [vec![
+            Key::Design(design.id),
+            Key::Handle(handle.clone()),
+            Key::Home
+        ]],
+        "the first push makes the design, and clears a 404 under the handle"
+    );
+
+    purge.clear();
+    let refused = owner
+        .post_multipart("/upload", &[Part::file("notes.txt", b"not kicad")])
+        .await;
+    assert_ne!(refused.status, 303, "{}", refused.body);
+    assert!(purge.calls().is_empty(), "a refused push changes nothing");
+
+    roles::set_visibility(&db, design.id, Visibility::Unlisted)
+        .await
+        .unwrap();
+    let pushed = owner
+        .post_multipart(
+            "/upload",
+            &[
+                Part::text("design", path.trim_start_matches('/')),
+                Part::file("midi8knob.kicad_pcb", BOARD),
+                Part::file("midi8knob.kicad_sch", SCHEMATIC),
+                Part::file("extra.kicad_pro", b"{}"),
+            ],
+        )
+        .await;
+    assert_eq!(pushed.status, 303, "{}", pushed.body);
+    assert_eq!(
+        purge.calls(),
+        [vec![Key::Design(design.id), Key::Handle(handle)]],
+        "an unlisted design is on no home page"
+    );
+}
+
+#[tokio::test]
+async fn a_cached_404_under_a_handle_is_cleared_by_the_push_that_makes_the_design() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, purge, _dir) = recording_server(db.clone()).await;
+    let (mut owner, _, handle) = signed_in(&db, addr).await;
+    let before = http::request(addr, "GET", &format!("/{handle}/midi8knob"), &[], "").await;
+    assert_eq!(before.status, 404);
+    let held = before.header("surrogate-key").expect("the 404's key");
+    uploaded(&mut owner).await;
+    assert!(
+        purge.keys().iter().any(|key| key.to_string() == held),
+        "the push purged {held}: {:?}",
+        purge.keys()
+    );
+}
+
+#[tokio::test]
+async fn the_settings_form_purges_the_design_and_its_listings() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, purge, _dir) = recording_server(db.clone()).await;
+    let (mut owner, owner_id, handle) = signed_in(&db, addr).await;
+    let path = uploaded(&mut owner).await;
+    let design = only_design(&db, owner_id).await;
+    purge.clear();
+    let refused = owner
+        .post_form(
+            &format!("{path}/settings"),
+            "name=&slug=midi8knob&description=",
+        )
+        .await;
+    assert_eq!(refused.status, 422, "{}", refused.body);
+    assert!(purge.calls().is_empty(), "a refused save changes nothing");
+    let saved = owner
+        .post_form(
+            &format!("{path}/settings"),
+            "name=Renamed&slug=renamed&description=words",
+        )
+        .await;
+    assert_eq!(saved.status, 303, "{}", saved.body);
+    assert_eq!(
+        purge.calls(),
+        [vec![Key::Design(design.id), Key::Handle(handle), Key::Home]]
+    );
+}
+
+#[tokio::test]
+async fn visibility_purges_all_three_whichever_way_it_goes() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, purge, _dir) = recording_server(db.clone()).await;
+    let (mut owner, owner_id, handle) = signed_in(&db, addr).await;
+    let path = uploaded(&mut owner).await;
+    let design = only_design(&db, owner_id).await;
+    let all_three = vec![
+        Key::Design(design.id),
+        Key::Handle(handle.clone()),
+        Key::Home,
+    ];
+    for visibility in ["unlisted", "public"] {
+        purge.clear();
+        let set = owner
+            .post_form(
+                &format!("{path}/people/visibility"),
+                &format!("visibility={visibility}"),
+            )
+            .await;
+        assert_eq!(set.status, 303, "{visibility}: {}", set.body);
+        assert_eq!(
+            purge.calls(),
+            std::slice::from_ref(&all_three),
+            "{visibility}"
+        );
+    }
+    purge.clear();
+    let refused = owner
+        .post_form(&format!("{path}/people/visibility"), "visibility=secret")
+        .await;
+    assert_eq!(refused.status, 422, "{}", refused.body);
+    assert!(purge.calls().is_empty(), "a refused change purges nothing");
+}
+
+#[tokio::test]
+async fn a_transfer_purges_both_handles_and_a_refused_one_nothing() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, purge, _dir) = recording_server(db.clone()).await;
+    let (mut owner, owner_id, handle) = signed_in(&db, addr).await;
+    let path = uploaded(&mut owner).await;
+    let design = only_design(&db, owner_id).await;
+    let (_, _, heir) = signed_in(&db, addr).await;
+    purge.clear();
+    let nobody = owner
+        .post_form(&format!("{path}/people/transfer"), "handle=nobody-at-all")
+        .await;
+    assert_eq!(nobody.status, 404, "{}", nobody.body);
+    assert!(purge.calls().is_empty(), "nothing moved");
+    let moved = owner
+        .post_form(
+            &format!("{path}/people/transfer"),
+            &format!("handle={heir}"),
+        )
+        .await;
+    assert_eq!(moved.status, 303, "{}", moved.body);
+    assert_eq!(
+        purge.calls(),
+        [vec![
+            Key::Design(design.id),
+            Key::Handle(handle),
+            Key::Handle(heir),
+            Key::Home
+        ]]
+    );
+}
+
+#[tokio::test]
+async fn a_role_change_purges_nothing_since_no_cached_page_shows_roles() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, purge, _dir) = recording_server(db.clone()).await;
+    let (mut owner, _, _) = signed_in(&db, addr).await;
+    let path = uploaded(&mut owner).await;
+    let (_, _, helper) = signed_in(&db, addr).await;
+    purge.clear();
+    let before = http::request(addr, "GET", &path, &[], "").await;
+    let added = owner
+        .post_form(
+            &format!("{path}/people/role"),
+            &format!("handle={helper}&role=admin"),
+        )
+        .await;
+    assert_eq!(added.status, 303, "{}", added.body);
+    assert!(purge.calls().is_empty(), "{:?}", purge.calls());
+    let after = http::request(addr, "GET", &path, &[], "").await;
+    assert_eq!(after.body, before.body, "the page is what it was");
+}
+
+#[tokio::test]
+async fn a_fork_purges_the_forkers_page_and_leaves_the_source_alone() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, purge, _dir) = recording_server(db.clone()).await;
+    let (mut owner, owner_id, _) = signed_in(&db, addr).await;
+    let path = uploaded(&mut owner).await;
+    let source = only_design(&db, owner_id).await;
+    let (mut forker, forker_id, forker_handle) = signed_in(&db, addr).await;
+    purge.clear();
+    let made = forker
+        .post_form(&format!("{path}/fork"), "take=default")
+        .await;
+    assert_eq!(made.status, 303, "{}", made.body);
+    let fork = only_design(&db, forker_id).await;
+    assert_eq!(
+        purge.calls(),
+        [vec![
+            Key::Design(fork.id),
+            Key::Handle(forker_handle.clone()),
+            Key::Home
+        ]],
+        "the source's pages do not change: {:?}",
+        Key::Design(source.id)
+    );
+
+    // The fork's pages show the source's handle and slug, so they carry
+    // its key; the history page shows neither.
+    let page = http::request(addr, "GET", &format!("/{forker_handle}/midi8knob"), &[], "").await;
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert_eq!(
+        page.header("surrogate-key").map(ToOwned::to_owned),
+        Some(surrogate_key(&[
+            Key::Design(fork.id),
+            Key::Design(source.id)
+        ]))
+    );
+    purge.clear();
+    let moved = owner
+        .post_form(
+            &format!("{path}/settings"),
+            "name=Moved&slug=moved&description=",
+        )
+        .await;
+    assert_eq!(moved.status, 303, "{}", moved.body);
+    assert!(
+        purge.keys().contains(&Key::Design(source.id)),
+        "a source's slug change reaches the fork's page: {:?}",
+        purge.keys()
+    );
+}
+
+/// A purge that always fails: the edge is down.
+#[derive(Debug)]
+struct Unreachable;
+
+#[async_trait]
+impl Purge for Unreachable {
+    async fn purge(&self, _keys: &[Key]) -> kiewer_lib::Result<()> {
+        Err(kiewer_lib::Error::Failed {
+            reason: "the edge is down".to_owned(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_failed_purge_never_fails_the_write() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let dir = scratch_dir!();
+    let state = http::state_with_purge(
+        db.clone(),
+        Arc::new(FsBlobStore::new(dir.path())),
+        Arc::new(Unreachable),
+    );
+    let addr = http::serve_on_free_port(state).await;
+    let (mut owner, _, _) = signed_in(&db, addr).await;
+    let path = uploaded(&mut owner).await;
+    let saved = owner
+        .post_form(
+            &format!("{path}/settings"),
+            "name=Still+saved&slug=midi8knob&description=",
+        )
+        .await;
+    assert_eq!(saved.status, 303, "{}", saved.body);
+    let page = http::request(addr, "GET", &path, &[], "").await;
+    assert!(page.body.contains("Still saved"), "{}", page.body);
 }

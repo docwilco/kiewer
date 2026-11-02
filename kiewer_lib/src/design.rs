@@ -459,6 +459,31 @@ where
     .await?)
 }
 
+/// Every design that reaches `revision`, with its owner's handle: what
+/// a thumbnail arriving after the push changes pages for
+/// (`crate::cache::Key`), forks included. One read on the pool, part of
+/// no write.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses.
+pub async fn holding(db: &PgPool, revision: RevisionHash) -> Result<Vec<(DesignId, Handle)>> {
+    let rows: Vec<(DesignId, String)> = sqlx::query_as(
+        "SELECT d.id, a.handle
+         FROM design_revision dr
+         JOIN design d ON d.id = dr.design_id
+         JOIN account a ON a.id = d.owner_id
+         WHERE dr.revision_hash = $1",
+    )
+    .bind(revision.as_bytes())
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, handle)| (id, Handle::from_row(handle)))
+        .collect())
+}
+
 /// `revision` becomes one `design` may show.
 ///
 /// # Errors

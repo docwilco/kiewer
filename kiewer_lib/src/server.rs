@@ -9,6 +9,7 @@ use crate::auth::Auth;
 use crate::blob::BlobStore;
 use crate::blob::fs::FsBlobStore;
 use crate::blob::gcs::GcsBlobStore;
+use crate::cache::{Fastly, NoPurge, Purge};
 use crate::config::{BlobStoreConfig, Config};
 use crate::error::Result;
 use crate::thumbnail::{CloudTasks, NoTasks, TaskAuth, Thumbnails};
@@ -57,6 +58,23 @@ fn thumbnails(config: &Config) -> Result<Thumbnails> {
     })
 }
 
+/// The purge client the configuration names: Fastly with the pair, else
+/// none, which the log says once at startup so a deployment without its
+/// token is seen.
+///
+/// # Errors
+///
+/// When the HTTP client cannot be built.
+fn purge(config: &Config) -> Result<Arc<dyn Purge>> {
+    Ok(if let Some(fastly) = &config.fastly {
+        tracing::info!(service_id = %fastly.service_id, "purging on Fastly");
+        Arc::new(Fastly::new(&fastly.service_id, &fastly.api_token)?)
+    } else {
+        tracing::info!("no edge to purge: FASTLY_SERVICE_ID and FASTLY_API_TOKEN are not both set");
+        Arc::new(NoPurge)
+    })
+}
+
 /// Connect, migrate, open the blob store, listen on `config.port` and
 /// serve until SIGTERM or ctrl-c.
 ///
@@ -73,6 +91,7 @@ pub async fn run(config: Config) -> Result<()> {
         blobs,
         Arc::new(auth(&config)?),
         Arc::new(thumbnails(&config)?),
+        purge(&config)?,
     );
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
     tracing::info!(

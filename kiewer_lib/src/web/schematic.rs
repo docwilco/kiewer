@@ -17,9 +17,8 @@ use std::collections::BTreeMap;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
 use axum::http::header::CONTENT_TYPE;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, Response};
 use axum::routing::get;
 use kicad_core::schematic::model::Sheet;
 use kicad_core::schematic::sheet_tree::{self, SheetNode, SheetPath};
@@ -30,6 +29,7 @@ use super::viewer::{NOT_BUILT, embedded, script_url};
 use super::{AppState, blob};
 use crate::account::Handle;
 use crate::blob::blocking;
+use crate::cache::{self, Key};
 use crate::description;
 use crate::design::{self, At, BranchName, DesignHead, Slug};
 use crate::error::Result;
@@ -194,7 +194,7 @@ impl Page {
     }
 }
 
-async fn hand_off() -> Result<Html<String>> {
+async fn hand_off() -> Result<Response> {
     let sheets = vec![SheetView {
         index: 0,
         parent: None,
@@ -206,11 +206,14 @@ async fn hand_off() -> Result<Html<String>> {
         url: Some(SCHEMATIC_PATH.to_owned()),
     }];
     let page = Page::new("midi8knob".to_owned(), sheets, None, None);
-    Ok(Html(page.render()?))
+    Ok(cache::page(&[], Html(page.render()?)))
 }
 
-async fn schematic() -> impl IntoResponse {
-    ([(CONTENT_TYPE, "text/plain; charset=utf-8")], SCHEMATIC)
+async fn schematic() -> Response {
+    cache::page(
+        &[],
+        ([(CONTENT_TYPE, "text/plain; charset=utf-8")], SCHEMATIC),
+    )
 }
 
 /// The sheet panel's rows for `shown`: every `.kicad_sch` of the
@@ -263,7 +266,7 @@ async fn sheets_of(state: &AppState, shown: &DesignHead) -> Result<Vec<SheetView
 /// revision holds no schematic. Two segments that are not a handle and a
 /// slug are 404 before any lookup, as on the design page.
 async fn show(state: &AppState, handle: &str, slug: &str, at: At<'_>) -> Result<Response> {
-    let not_found = || (StatusCode::NOT_FOUND, "no such schematic\n").into_response();
+    let not_found = || cache::not_found(&cache::handle_key(handle), "no such schematic\n");
     let (Ok(handle), Ok(slug)) = (handle.parse::<Handle>(), slug.parse::<Slug>()) else {
         return Ok(not_found());
     };
@@ -308,8 +311,9 @@ async fn show(state: &AppState, handle: &str, slug: &str, at: At<'_>) -> Result<
         at,
     );
     let og = open_graph::for_design(state, &shown, &description, &path).await?;
+    let keys = [Key::Design(shown.design.id)];
     let page = Page::new(shown.design.name, sheets, Some(back), Some(og));
-    Ok(Html(page.render()?).into_response())
+    Ok(cache::page(&keys, Html(page.render()?)))
 }
 
 /// `GET /{handle}/{slug}/schematic`: the head of the default branch.
@@ -327,7 +331,10 @@ async fn at_branch(
     Path((handle, slug, branch)): Path<(String, String, String)>,
 ) -> Result<Response> {
     let Ok(branch) = branch.parse::<BranchName>() else {
-        return Ok((StatusCode::NOT_FOUND, "no such branch\n").into_response());
+        return Ok(cache::not_found(
+            &cache::handle_key(&handle),
+            "no such branch\n",
+        ));
     };
     show(&state, &handle, &slug, At::Branch(&branch)).await
 }
@@ -340,7 +347,10 @@ async fn at_revision(
     Query(linked): Query<Linked>,
 ) -> Result<Response> {
     let Ok(hash) = hash.parse::<RevisionHash>() else {
-        return Ok((StatusCode::NOT_FOUND, "no such revision\n").into_response());
+        return Ok(cache::not_found(
+            &cache::handle_key(&handle),
+            "no such revision\n",
+        ));
     };
     let branch = linked.b.and_then(|name| name.parse::<BranchName>().ok());
     let at = At::Revision {

@@ -43,6 +43,7 @@ use sqlx::PgPool;
 use tokio::net::TcpListener;
 
 use crate::blob::BlobStore;
+use crate::cache::{self, Key, Policy, Purge};
 use crate::error::{Error, Result};
 use crate::thumbnail::Thumbnails;
 
@@ -55,6 +56,9 @@ pub struct AppState {
     /// The thumbnail service: the renderer, its budget and the retry
     /// queue (ADR 0004).
     pub thumbnails: Arc<Thumbnails>,
+    /// What a write purges at the edge (`crate::cache`): Fastly in
+    /// production, nothing on a dev box, a recorder in a test.
+    pub purge: Arc<dyn Purge>,
 }
 
 impl AppState {
@@ -67,12 +71,14 @@ impl AppState {
         blobs: Arc<dyn BlobStore>,
         auth: Arc<crate::auth::Auth>,
         thumbnails: Arc<Thumbnails>,
+        purge: Arc<dyn Purge>,
     ) -> Self {
         Self {
             db,
             blobs,
             auth,
             thumbnails,
+            purge,
         }
     }
 }
@@ -117,6 +123,7 @@ pub fn router(state: AppState) -> Router {
         .route("/blob/{hash}", get(blob::serve))
         .route("/{handle}", get(person::page))
         .route("/{handle}/{slug}", get(design::page))
+        .fallback(no_route)
         .with_state(state)
 }
 
@@ -178,13 +185,18 @@ struct Index {
     recent: Vec<crate::listing::Listed>,
 }
 
-async fn index(State(state): State<AppState>) -> Result<Html<String>> {
+/// A path no route has: a 404 kept briefly, like any other.
+async fn no_route() -> Response {
+    cache::not_found(&[], "not found\n")
+}
+
+async fn index(State(state): State<AppState>) -> Result<Response> {
     let page = Index {
         build: crate::build::line(),
         providers: state.auth.providers(),
         recent: crate::listing::recent_public(&state.db).await?,
     };
-    Ok(Html(page.render()?))
+    Ok(cache::page(&[Key::Home], Html(page.render()?)))
 }
 
 /// How long the health route waits for the database before calling it
@@ -192,19 +204,28 @@ async fn index(State(state): State<AppState>) -> Result<Html<String>> {
 /// timeout, and a health check needs its answer sooner than that.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 
+fn unreachable_database() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [Policy::Personal.header()],
+        "database unreachable\n",
+    )
+        .into_response()
+}
+
 /// `ok` when the database answers; 503 when it does not, so a deploy's
 /// health check and a dev box's first run both say which half is up.
 async fn healthz(State(state): State<AppState>) -> Response {
     let ping = sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.db);
     match tokio::time::timeout(HEALTH_TIMEOUT, ping).await {
-        Ok(Ok(_)) => (StatusCode::OK, "ok\n").into_response(),
+        Ok(Ok(_)) => (StatusCode::OK, [Policy::Personal.header()], "ok\n").into_response(),
         Ok(Err(error)) => {
             tracing::warn!(%error, "health: the database did not answer");
-            (StatusCode::SERVICE_UNAVAILABLE, "database unreachable\n").into_response()
+            unreachable_database()
         }
         Err(_) => {
             tracing::warn!(timeout = ?HEALTH_TIMEOUT, "health: the database did not answer in time");
-            (StatusCode::SERVICE_UNAVAILABLE, "database unreachable\n").into_response()
+            unreachable_database()
         }
     }
 }
@@ -214,6 +235,11 @@ async fn healthz(State(state): State<AppState>) -> Response {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         tracing::error!(error = %self, "request failed");
-        (StatusCode::INTERNAL_SERVER_ERROR, "internal error\n").into_response()
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [Policy::Personal.header()],
+            "internal error\n",
+        )
+            .into_response()
     }
 }

@@ -18,6 +18,7 @@ use serde::Deserialize;
 use super::AppState;
 use super::auth::{Settled, personal};
 use crate::account::Handle;
+use crate::cache;
 use crate::design::{Design, ForkSource, Slug};
 use crate::error::{Error, Refusal, Result};
 use crate::fork::{self, Take};
@@ -122,6 +123,8 @@ pub(super) async fn make(
     };
     match fork::fork(&state.db, settled.account_id, &handle, &slug, form.take).await {
         Ok(forked) => {
+            let keys = cache::of_design(forked.id, &settled.handle, forked.visibility);
+            cache::after_write(state.purge.as_ref(), &keys).await;
             let next = format!("/{}/{}", settled.handle, forked.slug);
             Ok(personal(settled.jar, Redirect::to(&next)))
         }

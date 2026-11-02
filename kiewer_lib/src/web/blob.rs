@@ -2,21 +2,21 @@
 //! stored form is one gzip member (ADR 0002), sent as it is with
 //! `Content-Encoding: gzip` to a client that accepts gzip (every browser)
 //! and decoded for one that does not, so `Vary: Accept-Encoding`. Content
-//! addressed, so immutable: a year's `max-age` (the caching policy as a
-//! whole is #26). The bytes are checked against the hash before they
+//! addressed, so immutable: a year's `max-age` (`crate::cache`). The bytes are checked against the hash before they
 //! leave, so a damaged object is a 500 in the log, never a broken render.
 //! A hash that is not one, that nothing was stored under, or that the
 //! operator has blocked is 404 alike: the route says nothing about which.
 
 use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::http::header::{
-    ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_TYPE, VARY, X_CONTENT_TYPE_OPTIONS,
+    ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE, VARY, X_CONTENT_TYPE_OPTIONS,
 };
-use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use super::AppState;
 use crate::blob::{BlobHash, blocking, gunzip, verified};
+use crate::cache::{self, Policy};
 use crate::design;
 use crate::error::{Error, Result};
 
@@ -26,14 +26,11 @@ pub fn url(hash: &BlobHash) -> String {
     format!("/blob/{hash}")
 }
 
-/// What an immutable, content-addressed response says about itself.
-pub const IMMUTABLE: &str = "public, max-age=31536000, immutable";
-
 /// Every blob is one of the three KiCad text files the upload keeps.
 const TEXT: &str = "text/plain; charset=utf-8";
 
 fn not_found() -> Response {
-    (StatusCode::NOT_FOUND, "no such blob\n").into_response()
+    cache::not_found(&[], "no such blob\n")
 }
 
 /// Whether the request takes gzip, which every browser does.
@@ -103,7 +100,7 @@ pub(super) async fn stored(
     let common = [
         (CONTENT_TYPE, TEXT),
         (X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        (CACHE_CONTROL, IMMUTABLE),
+        Policy::Immutable.header(),
         (VARY, "Accept-Encoding"),
     ];
     Ok(Some(if accepts_gzip(headers) {

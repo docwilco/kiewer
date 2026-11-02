@@ -16,7 +16,7 @@ use axum::extract::multipart::{Field, Multipart, MultipartError};
 use axum::extract::{Path, Query, State};
 use axum::http::header::{LOCATION, RETRY_AFTER};
 use axum::http::{HeaderValue, StatusCode};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{Html, Redirect, Response};
 use serde::Deserialize;
 
 use super::auth::{Settled, personal};
@@ -26,6 +26,7 @@ use super::open_graph::{self, OpenGraph};
 use super::viewer::{BranchView, DesignView, FileView, Page, RecentView};
 use super::{AppState, blob, files, history, schematic};
 use crate::account::Handle;
+use crate::cache::{self, Key};
 use crate::description::{self, Description};
 use crate::design::{self, At, BranchName, DesignHead, ForkSource, Slug};
 use crate::error::{Error, Refusal, Result};
@@ -205,7 +206,7 @@ pub(super) async fn show(
     at: At<'_>,
     stay: bool,
 ) -> Result<Response> {
-    let not_found = || (StatusCode::NOT_FOUND, "no such design\n").into_response();
+    let not_found = || cache::not_found(&cache::handle_key(handle), "no such design\n");
     let (Ok(handle), Ok(slug)) = (handle.parse::<Handle>(), slug.parse::<Slug>()) else {
         return Ok(not_found());
     };
@@ -215,11 +216,15 @@ pub(super) async fn show(
         }
         let moved = slug::redirect(&state.db, handle.as_str(), slug.as_str()).await?;
         return Ok(match moved {
-            Some(current) => (
-                StatusCode::MOVED_PERMANENTLY,
-                [(LOCATION, design_url(&handle, &current))],
-            )
-                .into_response(),
+            // Under the handle: a new design taking the slug is a push,
+            // which purges it.
+            Some(current) => {
+                let location = design_url(&handle, &current);
+                cache::page(
+                    &[Key::Handle(handle)],
+                    (StatusCode::MOVED_PERMANENTLY, [(LOCATION, location)]),
+                )
+            }
             None => not_found(),
         });
     };
@@ -233,21 +238,24 @@ pub(super) async fn show(
             &shown.design.default_branch,
             at,
         );
-        return Ok(Redirect::to(&sheet).into_response());
+        return Ok(cache::page(
+            &[Key::Design(shown.design.id)],
+            Redirect::to(&sheet),
+        ));
     }
     let description = description::of(&state.db, shown.design.id).await?;
     let settings = SettingsView::of(&handle, &shown.design, &description);
     let forked_from = design::fork_source(&state.db, shown.design.id).await?;
     let og =
         open_graph::for_design(state, &shown, &description, &canonical_path(&shown, at)).await?;
-    Ok(Html(design_page(
-        &shown,
-        &description,
-        settings,
-        forked_from.as_ref(),
-        og,
-    )?)
-    .into_response())
+    // The forked-from line reads the source's handle and slug, so the
+    // source's writes reach this page too.
+    let keys: Vec<Key> = std::iter::once(shown.design.id)
+        .chain(forked_from.as_ref().and_then(|source| source.design_id))
+        .map(Key::Design)
+        .collect();
+    let page = design_page(&shown, &description, settings, forked_from.as_ref(), og)?;
+    Ok(cache::page(&keys, Html(page)))
 }
 
 /// Where the upload form was opened from (`/upload?design=&branch=&from=`,
@@ -636,6 +644,10 @@ pub(super) async fn upload(
                 .thumbnails
                 .after_push(&state.db, state.blobs.as_ref(), committed.revision)
                 .await;
+            // After the render, so the purge covers a thumbnail drawn
+            // within the budget too.
+            let keys = cache::of_design(committed.design.id, &owner, committed.design.visibility);
+            cache::after_write(state.purge.as_ref(), &keys).await;
             let next = history::branch_url(&owner, &committed.design, &committed.branch);
             if committed.warnings.is_empty() {
                 return Ok(personal(settled.jar, Redirect::to(&next)));

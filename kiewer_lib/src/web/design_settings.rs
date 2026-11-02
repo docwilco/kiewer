@@ -18,6 +18,7 @@ use super::auth::{Settled, personal};
 use super::design::{design_page, design_url};
 use super::open_graph::{self, OpenGraph};
 use crate::account::Handle;
+use crate::cache;
 use crate::description::{self, Description};
 use crate::design::{self, Design, DesignHead, ForkSource, Slug};
 use crate::design_settings::{self, Settings};
@@ -150,6 +151,8 @@ pub(super) async fn save(
     };
     let (status, reason) = match outcome {
         Ok(slug) => {
+            let keys = cache::of_design(shown.design.id, &shown.owner, shown.design.visibility);
+            cache::after_write(state.purge.as_ref(), &keys).await;
             return Ok(personal(
                 settled.jar,
                 Redirect::to(&format!("/{handle}/{slug}")),

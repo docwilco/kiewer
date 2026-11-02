@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use kiewer_lib::auth::Auth;
 use kiewer_lib::blob::BlobStore;
+use kiewer_lib::cache::{NoPurge, Purge};
 use kiewer_lib::thumbnail::{NoTasks, Thumbnails};
 use kiewer_lib::web::{AppState, serve};
 use sqlx::PgPool;
@@ -36,11 +37,37 @@ pub fn state(db: PgPool, blobs: Arc<dyn BlobStore>) -> AppState {
 /// The same with `auth`, for a test that registers a provider app.
 #[must_use]
 pub fn state_with_auth(db: PgPool, blobs: Arc<dyn BlobStore>, auth: Auth) -> AppState {
+    state_with(db, blobs, auth, Arc::new(NoPurge))
+}
+
+/// The same with `purge`, for a test that reads back what a write
+/// purged (`kiewer_lib::cache::Recorder`).
+///
+/// # Panics
+///
+/// As [`state`].
+#[must_use]
+pub fn state_with_purge(db: PgPool, blobs: Arc<dyn BlobStore>, purge: Arc<dyn Purge>) -> AppState {
+    state_with(
+        db,
+        blobs,
+        Auth::new(Vec::new(), "http://127.0.0.1:1").expect("an auth"),
+        purge,
+    )
+}
+
+fn state_with(
+    db: PgPool,
+    blobs: Arc<dyn BlobStore>,
+    auth: Auth,
+    purge: Arc<dyn Purge>,
+) -> AppState {
     AppState::new(
         db,
         blobs,
         Arc::new(auth),
         Arc::new(Thumbnails::new(Arc::new(NoTasks))),
+        purge,
     )
 }
 

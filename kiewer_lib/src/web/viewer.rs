@@ -22,7 +22,7 @@ use axum::routing::get;
 
 use super::AppState;
 use super::open_graph::OpenGraph;
-use crate::cache::{Encoding, Policy};
+use crate::cache::{self, Encoding, Policy};
 use crate::error::Result;
 use crate::roles::Visibility;
 
@@ -267,18 +267,18 @@ impl Page {
     }
 }
 
-async fn page() -> Result<Html<String>> {
+async fn page() -> Result<Response> {
     let page = Page::new(
         "midi8knob".to_owned(),
         Some(BOARD_PATH.to_owned()),
         None,
         None,
     );
-    Ok(Html(page.render()?))
+    Ok(cache::page(&[], Html(page.render()?)))
 }
 
-async fn board() -> impl IntoResponse {
-    ([(CONTENT_TYPE, "text/plain; charset=utf-8")], BOARD)
+async fn board() -> Response {
+    cache::page(&[], ([(CONTENT_TYPE, "text/plain; charset=utf-8")], BOARD))
 }
 
 /// `GET /viewer/{name}`: the embedded asset of that hashed name, in the

@@ -2,8 +2,9 @@
 //! ask for. The same for everyone: nothing in it depends on the session.
 
 use askama::Template;
-use axum::response::Html;
+use axum::response::{Html, Response};
 
+use crate::cache;
 use crate::error::Result;
 
 #[derive(Template)]
@@ -13,9 +14,9 @@ struct About {
 }
 
 /// `GET /about`.
-pub async fn page() -> Result<Html<String>> {
+pub async fn page() -> Result<Response> {
     let page = About {
         build: crate::build::line(),
     };
-    Ok(Html(page.render()?))
+    Ok(cache::page(&[], Html(page.render()?)))
 }

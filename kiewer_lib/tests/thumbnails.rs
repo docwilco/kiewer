@@ -25,11 +25,12 @@ use kiewer_lib::account::{self, AccountId, Handle};
 use kiewer_lib::auth::{Auth, Provider, ProviderUser};
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::blob::{BlobHash, BlobStore, PutReceipt};
+use kiewer_lib::cache::{Key, NoPurge, Policy, Purge, Recorder};
+use kiewer_lib::design;
 use kiewer_lib::revision::RevisionHash;
 use kiewer_lib::session;
 use kiewer_lib::thumbnail::{Size, TaskAuth, TaskQueue, Thumbnails};
 use kiewer_lib::web::AppState;
-use kiewer_lib::web::blob::IMMUTABLE;
 use kiewer_lib::{Error, Result};
 use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
@@ -102,6 +103,16 @@ async fn serve(
     blobs: Arc<dyn BlobStore>,
     configure: impl FnOnce(Thumbnails) -> Thumbnails,
 ) -> (SocketAddr, Arc<Recording>) {
+    serve_purging(db, blobs, configure, Arc::new(NoPurge)).await
+}
+
+/// The same with `purge` taking what the writes purge.
+async fn serve_purging(
+    db: PgPool,
+    blobs: Arc<dyn BlobStore>,
+    configure: impl FnOnce(Thumbnails) -> Thumbnails,
+    purge: Arc<dyn Purge>,
+) -> (SocketAddr, Arc<Recording>) {
     let tasks = Arc::new(Recording::default());
     let thumbnails = configure(Thumbnails::new(Arc::clone(&tasks) as Arc<dyn TaskQueue>));
     let state = AppState::new(
@@ -109,6 +120,7 @@ async fn serve(
         blobs,
         Arc::new(Auth::new(Vec::new(), PUBLIC_URL).expect("an auth")),
         Arc::new(thumbnails),
+        purge,
     );
     (http::serve_on_free_port(state).await, tasks)
 }
@@ -191,7 +203,11 @@ async fn png(addr: SocketAddr, path: &str) -> Image {
     let response = http::send_raw(addr, "GET", path, &[], None, b"").await;
     assert_eq!(response.status, 200, "{path}");
     assert_eq!(response.header("content-type"), Some("image/png"), "{path}");
-    assert_eq!(response.header("cache-control"), Some(IMMUTABLE), "{path}");
+    assert_eq!(
+        response.header("cache-control"),
+        Some(Policy::Immutable.value()),
+        "{path}"
+    );
     assert_eq!(response.header("x-content-type-options"), Some("nosniff"));
     Image::from_png(&response.body).expect("a PNG")
 }
@@ -250,7 +266,11 @@ async fn assert_retry_refuses(addr: SocketAddr) {
 async fn assert_gone(addr: SocketAddr, route: &str) {
     let gone = http::request(addr, "GET", route, &[], "").await;
     assert_eq!(gone.status, 404, "{route}");
-    assert_eq!(gone.header("cache-control"), Some("no-store"), "{route}");
+    assert_eq!(
+        gone.header("cache-control"),
+        Some("private, no-store"),
+        "{route}"
+    );
 }
 
 /// The history page of `design_path`'s default branch.
@@ -624,7 +644,7 @@ async fn a_render_past_the_budget_saves_the_revision_queues_a_retry_and_the_plac
     )
     .await;
     assert_eq!(missing.status, 404);
-    assert_eq!(missing.header("cache-control"), Some("no-store"));
+    assert_eq!(missing.header("cache-control"), Some("private, no-store"));
 
     // The retry path renders it with no budget; a second call finds it.
     let retry_path = format!("/api/thumbnails/{revision}");
@@ -667,6 +687,63 @@ async fn a_render_past_the_budget_saves_the_revision_queues_a_retry_and_the_plac
     );
 
     assert_retry_refuses(addr).await;
+}
+
+#[tokio::test]
+async fn a_render_that_lands_on_the_retry_purges_every_design_holding_the_revision() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    if !can_render() {
+        return;
+    }
+    let dir = scratch_dir!();
+    let purge = Arc::new(Recorder::default());
+    let (addr, _tasks) = serve_purging(
+        db.clone(),
+        Arc::new(FsBlobStore::new(dir.path())),
+        |thumbnails| {
+            thumbnails
+                .with_budget(Duration::from_millis(100))
+                .with_render_delay(Duration::from_secs(1))
+        },
+        purge.clone(),
+    )
+    .await;
+    let (mut owner, owner_id, owner_handle) = signed_in(&db, addr).await;
+    let design_path = push(&mut owner, "", &[("midi8knob.kicad_pcb", BOARD)]).await;
+    let page = http::request(addr, "GET", &design_path, &[], "").await;
+    let revision = shown_revision(&page.body);
+    let (mut forker, forker_id, forker_handle) = signed_in(&db, addr).await;
+    let made = forker
+        .post_form(&format!("{design_path}/fork"), "take=default")
+        .await;
+    assert_eq!(made.status, 303, "{}", made.body);
+
+    let source = design::by_owner(&db, owner_id).await.unwrap().remove(0);
+    let fork = design::by_owner(&db, forker_id).await.unwrap().remove(0);
+    purge.clear();
+    let retry_path = format!("/api/thumbnails/{revision}");
+    let rendered = http::request(addr, "POST", &retry_path, &[], "").await;
+    assert_eq!(rendered.body, "rendered\n");
+    let mut expected = vec![
+        Key::Home,
+        Key::Design(source.id),
+        Key::Design(fork.id),
+        Key::Handle(owner_handle),
+        Key::Handle(forker_handle),
+    ];
+    expected.sort_unstable();
+    assert_eq!(
+        purge.calls(),
+        [expected],
+        "the placeholder goes from every page"
+    );
+
+    purge.clear();
+    let again = http::request(addr, "POST", &retry_path, &[], "").await;
+    assert_eq!(again.body, "already rendered\n");
+    assert!(purge.calls().is_empty(), "nothing changed the second time");
 }
 
 #[tokio::test]
@@ -737,6 +814,7 @@ async fn the_retry_path_behind_oidc_refuses_a_caller_without_a_token() {
         Arc::new(FsBlobStore::new(dir.path())),
         Arc::new(Auth::new(Vec::new(), PUBLIC_URL).expect("an auth")),
         Arc::new(thumbnails),
+        Arc::new(kiewer_lib::cache::NoPurge),
     );
     let addr = http::serve_on_free_port(state).await;
     let refused = http::request(

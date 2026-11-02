@@ -13,14 +13,14 @@
 
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 
 use super::AppState;
-use super::blob::IMMUTABLE;
 use crate::account::Handle;
+use crate::cache::{self, Key, Policy};
 use crate::design::{self, Slug};
 use crate::error::{Error, Result};
 use crate::revision::RevisionHash;
@@ -36,7 +36,7 @@ pub fn routes() -> Router<AppState> {
 fn not_found(what: &str) -> Response {
     (
         StatusCode::NOT_FOUND,
-        [(CACHE_CONTROL, "no-store")],
+        [Policy::Personal.header()],
         format!("no such {what}\n"),
     )
         .into_response()
@@ -77,7 +77,7 @@ async fn serve(
         [
             (CONTENT_TYPE, "image/png"),
             (X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            (CACHE_CONTROL, IMMUTABLE),
+            Policy::Immutable.header(),
         ],
         bytes,
     )
@@ -99,6 +99,7 @@ async fn retry(
     if !state.thumbnails.allows_task(bearer).await? {
         return Ok((
             StatusCode::UNAUTHORIZED,
+            [Policy::Personal.header()],
             "the thumbnail retry takes the queue's token\n",
         )
             .into_response());
@@ -110,8 +111,39 @@ async fn retry(
         .thumbnails
         .render(&state.db, state.blobs.as_ref(), hash)
         .await?;
+    if outcome == Outcome::Rendered {
+        purge_holders(&state, hash).await;
+    }
     Ok(match outcome {
         Outcome::NoSuchRevision => not_found("revision"),
-        outcome => (StatusCode::OK, format!("{outcome}\n")).into_response(),
+        outcome => (
+            StatusCode::OK,
+            [Policy::Personal.header()],
+            format!("{outcome}\n"),
+        )
+            .into_response(),
     })
+}
+
+/// Purge what a thumbnail that arrived after the push changes: listings
+/// and Open Graph tags hold a placeholder until it exists, on every
+/// design that reaches the revision, forks included. A read that fails
+/// is a warning, as a failed purge is: the thumbnail stands, and the
+/// pages catch up within the hour (`crate::cache::Policy::Page`).
+async fn purge_holders(state: &AppState, hash: RevisionHash) {
+    let holders = match design::holding(&state.db, hash).await {
+        Ok(holders) => holders,
+        Err(error) => {
+            tracing::warn!(%error, %hash, "the purge after a late thumbnail did not start");
+            return;
+        }
+    };
+    let mut keys = vec![Key::Home];
+    for (design, owner) in holders {
+        keys.push(Key::Design(design));
+        keys.push(Key::Handle(owner));
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    cache::after_write(state.purge.as_ref(), &keys).await;
 }
