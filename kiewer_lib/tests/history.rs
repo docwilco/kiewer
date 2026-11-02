@@ -188,7 +188,7 @@ async fn three_uploads_to_main_make_a_chain_the_history_page_lists_as_rev_1_to_3
 
 /// Every link into the design on `body` has one of the settled shapes
 /// (docs/v1-scope.md, URLs): the page, its people page, `/b/{branch}`, `/b/{branch}/history`
-/// or `/r/{hash}` with at most a `?b={branch}` hint; so no ordinal is in
+/// `/r/{hash}` or `/r/{hash}/f/{path}` with at most a `?b={branch}` hint; so no ordinal is in
 /// any URL.
 fn assert_design_links(body: &str, handle: &Handle, slug: &str) {
     let prefix = format!("href=\"/{handle}/{slug}");
@@ -202,7 +202,7 @@ fn assert_design_links(body: &str, handle: &Handle, slug: &str) {
         let settled = match segments.as_slice() {
             [] | ["schematic" | "people"] => true,
             ["b", name] | ["b", name, "history"] => is_name(name),
-            ["r", hash] => is_hash(hash),
+            ["r", hash] | ["r", hash, "f", _, ..] => is_hash(hash),
             _ => false,
         };
         assert!(settled, "an unsettled URL shape: {path}");

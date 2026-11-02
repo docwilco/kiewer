@@ -194,7 +194,7 @@ async fn every_cacheable_page_renders_the_same_bytes_with_a_session_as_without()
     let page = http::request(addr, "GET", &design_path, &[], "").await;
     // The revision dropdown's option values are the revision URLs.
     let revision = linked_hash(&page.body, &format!("{design_path}/r/"));
-    let board = linked_hash(&page.body, "href=\"/blob/");
+    let board = linked_hash(&page.body, "fetch(\"/blob/");
     // A design with a schematic alone opens on it: the bare URL answers
     // 303 and `?design` keeps the design page.
     let sheet_only = owner

@@ -9,7 +9,8 @@
 //! in `web/person.rs`; the design settings form in
 //! `web/design_settings.rs`; the fork form in `web/fork.rs`; the
 //! thumbnail route and the render retry in `web/thumbnail.rs`; the
-//! Open Graph tags in `web/open_graph.rs`.
+//! Open Graph tags in `web/open_graph.rs`; a file's download in
+//! `web/files.rs`.
 
 mod about;
 mod auth;
@@ -17,6 +18,7 @@ pub mod beacon;
 pub mod blob;
 mod design;
 pub mod design_settings;
+pub mod files;
 pub mod fork;
 pub mod history;
 pub mod open_graph;
@@ -97,6 +99,7 @@ pub fn router(state: AppState) -> Router {
         .merge(beacon::routes())
         .merge(schematic::routes())
         .merge(history::routes())
+        .merge(files::routes())
         .merge(people::routes())
         .merge(design_settings::routes())
         .merge(fork::routes())

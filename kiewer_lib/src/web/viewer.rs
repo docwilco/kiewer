@@ -136,7 +136,8 @@ pub struct FileView {
     pub path: String,
     /// The file name alone, for the download attribute.
     pub name: String,
-    /// Where the bytes are: the blob route.
+    /// Where it downloads: the file route under the revision
+    /// (`web/files.rs`).
     pub url: String,
     /// Uncompressed bytes.
     pub size: u64,

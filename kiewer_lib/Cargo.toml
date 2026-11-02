@@ -52,6 +52,10 @@ kiewer_viewer = { path = "../kiewer_viewer" }
 # reqwest line below is the same major so one client serves the token call
 # and the provider's user call.
 oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
+# The path of a file in its download URL and the RFC 8187 `filename*`
+# of its Content-Disposition (web/files.rs). In the tree already through
+# url and askama.
+percent-encoding = "2"
 # 0.8, the major sqlx and oauth2 already bring: OsRng for session ids.
 rand = { version = "0.8", default-features = false, features = ["getrandom"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

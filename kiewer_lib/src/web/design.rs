@@ -19,7 +19,7 @@ use super::design_settings::SettingsView;
 use super::fork::{ForkView, ForkedFromView};
 use super::open_graph::{self, OpenGraph};
 use super::viewer::{BranchView, DesignView, FileView, Page, RecentView};
-use super::{AppState, blob, history, schematic};
+use super::{AppState, blob, files, history, schematic};
 use crate::account::Handle;
 use crate::description::{self, Description};
 use crate::design::{self, At, BranchName, DesignHead, ForkSource, Slug};
@@ -132,7 +132,12 @@ pub(super) fn design_page(
             .map(|entry| FileView {
                 path: entry.path.to_string(),
                 name: entry.path.file_name().to_owned(),
-                url: blob::url(&entry.blob),
+                url: files::url(
+                    &shown.owner,
+                    &shown.design.slug,
+                    shown.revision.hash,
+                    &entry.path,
+                ),
                 size: entry.size,
             })
             .collect(),

@@ -30,14 +30,14 @@ pub fn url(hash: &BlobHash) -> String {
 pub const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
 /// Every blob is one of the three KiCad text files the upload keeps.
-const TEXT: &str = "text/plain; charset=utf-8";
+pub(super) const TEXT: &str = "text/plain; charset=utf-8";
 
 fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "no such blob\n").into_response()
 }
 
 /// Whether the request takes gzip, which every browser does.
-fn accepts_gzip(headers: &HeaderMap) -> bool {
+pub(super) fn accepts_gzip(headers: &HeaderMap) -> bool {
     headers
         .get_all(ACCEPT_ENCODING)
         .iter()

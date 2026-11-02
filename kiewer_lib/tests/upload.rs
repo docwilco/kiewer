@@ -101,7 +101,6 @@ async fn the_upload_form_is_for_a_signed_in_person_with_a_handle() {
 /// What the design page says after the first upload of the hand-off files.
 fn assert_design_page(body: &str, handle: &Handle) {
     let board_hash = BlobHash::of(BOARD);
-    let schematic_hash = BlobHash::of(SCHEMATIC);
     assert!(body.contains("<canvas"), "the viewer: {body}");
     assert!(
         body.contains(&format!(r#"fetch("/blob/{board_hash}")"#)),
@@ -127,8 +126,8 @@ fn assert_design_page(body: &str, handle: &Handle) {
     }
     assert!(body.contains("<dt>Board size</dt><dd>"), "{body}");
     assert!(
-        body.contains(&format!(r#"href="/blob/{schematic_hash}""#)),
-        "every file links its blob: {body}"
+        body.contains(r#"/f/midi8knob.kicad_sch" download="midi8knob.kicad_sch""#),
+        "every file links its download under the revision (#24): {body}"
     );
     assert!(body.contains("midi8knob.kicad_pro"), "{body}");
     assert!(!body.contains("README"), "the readme was dropped: {body}");

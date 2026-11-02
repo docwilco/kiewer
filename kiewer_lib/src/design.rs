@@ -1252,3 +1252,41 @@ pub async fn fork_source(db: &PgPool, design: DesignId) -> Result<Option<ForkSou
         },
     }))
 }
+
+/// The file at `path` in revision `revision` of `design`, or `None` when
+/// the design does not reach the revision (ADR 0002: a bare revision
+/// hash is no capability) or the tree has no such path. One read on the
+/// pool: a download's lookup, part of no write.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when the
+/// row holds a hash that is not 32 bytes, which the schema forbids.
+pub async fn file_at(
+    db: &PgPool,
+    design: DesignId,
+    revision: RevisionHash,
+    path: &TreePath,
+) -> Result<Option<TreeEntry>> {
+    let row: Option<(Vec<u8>, i64)> = sqlx::query_as(
+        "SELECT te.blob_hash, b.size
+         FROM design_revision dr
+         JOIN revision r ON r.hash = dr.revision_hash
+         JOIN tree_entry te ON te.tree_hash = r.tree_hash
+         JOIN blob b ON b.hash = te.blob_hash
+         WHERE dr.design_id = $1 AND dr.revision_hash = $2 AND te.path = $3",
+    )
+    .bind(design)
+    .bind(revision.as_bytes())
+    .bind(path.as_str())
+    .fetch_optional(db)
+    .await?;
+    row.map(|(blob, size)| {
+        Ok(TreeEntry {
+            path: path.clone(),
+            blob: BlobHash::from_bytes(&blob)?,
+            size: u64::try_from(size).unwrap_or(0),
+        })
+    })
+    .transpose()
+}
