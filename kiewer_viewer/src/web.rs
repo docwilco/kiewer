@@ -59,7 +59,12 @@ fn instance(backends: wgpu::Backends) -> wgpu::Instance {
 /// touched last, once the adapter and the device are in hand.
 async fn webgpu(canvas: &HtmlCanvasElement, reasons: &mut Vec<String>) -> Option<Gpu> {
     if !wgpu::util::is_browser_webgpu_supported().await {
-        reasons.push("WebGPU: navigator.gpu is not available".to_owned());
+        // wgpu's check is both: the property present and an adapter
+        // behind it, so Chrome with the API but no usable GPU lands here.
+        reasons.push(
+            "WebGPU: navigator.gpu is missing (an insecure origin, an old browser) or gave no adapter (chrome://gpu says why)"
+                .to_owned(),
+        );
         return None;
     }
     let instance = instance(wgpu::Backends::BROWSER_WEBGPU);
