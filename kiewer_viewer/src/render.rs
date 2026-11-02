@@ -1,8 +1,10 @@
 //! Drawing with wgpu at the WebGL2 floor (ADR 0001): one pipeline over
 //! flat triangles, a vertex buffer and an index buffer, one uniform for
 //! the camera and one for the colour of each draw, blended over what is
-//! already there so a layer can be translucent. No storage buffers, no
-//! compute, so the same code runs on WebGPU, on WebGL2 and natively.
+//! already there so a layer can be translucent; beside it the text pass
+//! of [`atlas_pipeline`], textured quads over a glyph atlas per face. No
+//! storage buffers, no compute, so the same code runs on WebGPU, on
+//! WebGL2 and natively.
 //!
 //! A frame is a list of [`Draw`]s, each a run of the index buffer in one
 //! colour, drawn back to front in the order given: the scene decides what
@@ -23,7 +25,7 @@ use wgpu::util::DeviceExt as _;
 
 use crate::atlas::TextVertex;
 use crate::camera::View;
-use crate::render::atlas_pipeline::{Atlas, TextPass};
+use crate::render::atlas_pipeline::{Coverage, TextPass};
 
 /// The shader source, compiled at pipeline creation.
 pub const SHADER: &str = include_str!("shader.wgsl");
@@ -312,12 +314,12 @@ impl Renderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         face: &str,
-        atlas: &Atlas<'_>,
+        coverage: &Coverage<'_>,
         vertices: &[TextVertex],
         indices: &[u32],
     ) {
         self.text
-            .upload(device, queue, face, atlas, vertices, indices);
+            .upload(device, queue, face, coverage, vertices, indices);
     }
 
     /// Drop every face of text: a new board, or a face sent back to the
@@ -432,8 +434,10 @@ impl Renderer {
                     pass.draw_indexed(draw.range.clone(), 0, 0..1);
                 }
             }
-            // Named-face text over everything: the view at group 0 is
-            // still bound.
+            // Named-face text over every layer (#46 puts it in its
+            // layer's slot). The view is bound again: the slices above
+            // bind nothing at group 0 today, and the text pass relies on
+            // it whatever they come to do.
             pass.set_bind_group(0, &self.bind_group, &[]);
             self.text.draw(&mut pass);
         }

@@ -21,7 +21,7 @@ mod newstroke_table;
 pub mod outline;
 
 use crate::geometry::{Bounds, Transform};
-use crate::model::{Font, Horizontal, Justify, Point, Size, Text, Vertical};
+use crate::model::{Board, Font, Horizontal, Justify, LayerId, Point, Size, Text, Vertical};
 
 /// Em units per coordinate step.
 const SCALE: f64 = 1.0 / 21.0;
@@ -200,21 +200,15 @@ pub fn shape(text: &str, placement: &Placement) -> TextShape {
     let pen = placement.pen;
     let lines: Vec<&str> = text.split('\n').collect();
     let interline = size.height * INTERLINE;
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a text has far fewer lines than 2^53"
-    )]
-    let block_height =
-        size.height * FIRST_LINE_HEIGHT + (lines.len().saturating_sub(1)) as f64 * interline;
     // The anchor is the top left of the block before justification; the
     // stroke font's fudges move it slightly right and up.
     let offset_x = pen / 1.52;
-    let mut offset_y = size.height - pen * 0.052;
-    match placement.justify.vertical {
-        Vertical::Top => {}
-        Vertical::Center => offset_y -= block_height / 2.0,
-        Vertical::Bottom => offset_y -= block_height,
-    }
+    let offset_y = first_baseline(
+        size.height,
+        lines.len(),
+        interline,
+        placement.justify.vertical,
+    ) - pen * 0.052;
     let origin = placement.position;
     let mut strokes: Vec<Vec<Point>> = Vec::new();
     for (index, line) in lines.iter().enumerate() {
@@ -242,8 +236,7 @@ pub fn shape(text: &str, placement: &Placement) -> TextShape {
         }
     }
     let knockout_box = Bounds::around(strokes.iter().flatten().copied()).map(|bounds| {
-        let margin = (pen / 2.0).max(size.height / 9.0);
-        let grow = pen / 2.0 + margin;
+        let grow = knockout_grow(pen, size.height);
         [
             Point {
                 x: bounds.min.x - grow,
@@ -282,11 +275,49 @@ pub fn shape(text: &str, placement: &Placement) -> TextShape {
     }
 }
 
-/// Where the pen is after each character of `line`, from `start`: a
-/// glyph advances by its width, a space by the space width, a tab to
-/// the next stop of four space widths.
-fn cursors(line: &str, size: Size, start: Point) -> Vec<(char, Point)> {
-    let space = space_width();
+/// The baseline of a block's first line below its anchor, in
+/// millimetres, as KiCad's `FONT::getLinePositions` hangs the block: a
+/// line's baseline sits a height below its top, the first line counts
+/// [`FIRST_LINE_HEIGHT`] heights and each further line one `interline`,
+/// and the block is moved up by none, half or all of that as `vertical`
+/// says.
+pub(crate) fn first_baseline(
+    height: f64,
+    line_count: usize,
+    interline: f64,
+    vertical: Vertical,
+) -> f64 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a text has far fewer lines than 2^53"
+    )]
+    let block_height =
+        height * FIRST_LINE_HEIGHT + (line_count.saturating_sub(1)) as f64 * interline;
+    match vertical {
+        Vertical::Top => height,
+        Vertical::Center => height - block_height / 2.0,
+        Vertical::Bottom => height - block_height,
+    }
+}
+
+/// How far a knockout's box grows around its glyphs: half the pen, plus
+/// KiCad's margin, the larger of half the pen and a ninth of the height.
+pub(crate) fn knockout_grow(pen: f64, height: f64) -> f64 {
+    pen / 2.0 + (pen / 2.0).max(height / 9.0)
+}
+
+/// Where the pen is after each character of `line`, from `start`, in a
+/// font whose em is `em` wide and whose space advances `space`, each
+/// other character `advance(c)`, all in millimetres: a tab reaches the
+/// next stop, at every [`TAB_WIDTH`] ems plus the space, as KiCad's
+/// stroke font places them. Ends with `('\0', end)`.
+pub(crate) fn cursors(
+    line: &str,
+    em: f64,
+    space: f64,
+    advance: impl Fn(char) -> f64,
+    start: Point,
+) -> Vec<(char, Point)> {
     let mut cursor = start;
     let mut column = 0usize;
     let mut out = Vec::new();
@@ -299,16 +330,16 @@ fn cursors(line: &str, size: Size, start: Point) -> Vec<(char, Point)> {
                     clippy::cast_precision_loss,
                     reason = "a line has far fewer columns than 2^53"
                 )]
-                let mut next = start.x + size.width * column as f64 + size.width * space;
+                let mut next = start.x + em * column as f64 + space;
                 #[expect(clippy::cast_precision_loss, reason = "the tab width is 4")]
                 while next <= cursor.x {
                     column += TAB_WIDTH;
-                    next += size.width * TAB_WIDTH as f64;
+                    next += em * TAB_WIDTH as f64;
                 }
                 cursor.x = next;
             }
-            ' ' => cursor.x += size.width * space,
-            _ => cursor.x += size.width * glyph(c).advance,
+            ' ' => cursor.x += space,
+            _ => cursor.x += advance(c),
         }
         column += 1;
     }
@@ -337,18 +368,61 @@ pub fn block_size(text: &str, size: Size) -> Size {
     Size { width, height }
 }
 
+/// The pen after each character of a Newstroke line: the stroke font's
+/// em is the text width, and a glyph advances by its width.
+fn stroke_cursors(line: &str, size: Size, start: Point) -> Vec<(char, Point)> {
+    cursors(
+        line,
+        size.width,
+        size.width * space_width(),
+        |c| size.width * glyph(c).advance,
+        start,
+    )
+}
+
 /// The advance of a whole line.
 fn line_width(line: &str, size: Size) -> f64 {
-    cursors(line, size, Point::default())
+    stroke_cursors(line, size, Point::default())
         .last()
         .map_or(0.0, |(_, end)| end.x)
+}
+
+/// Every visible text on `layer` with its content resolved and its
+/// placement on the board: the board's own as written, a footprint's
+/// carried into the board's frame with its variables expanded and kept
+/// upright when it asks. The texts `Tessellator::text` draws, for
+/// whoever draws them in another font.
+pub fn placed_texts(
+    board: &Board,
+    layer: LayerId,
+) -> impl Iterator<Item = (String, Placement, &Text)> + '_ {
+    let own = board
+        .texts
+        .iter()
+        .filter(move |text| text.layer == layer && !text.hidden)
+        .map(|text| (text.text.clone(), Placement::of(text, text.at, false), text));
+    let placed = board.footprints.iter().flat_map(move |footprint| {
+        let frame = Transform::new(footprint.at, footprint.rotation);
+        footprint
+            .texts
+            .iter()
+            .filter(move |text| text.layer == layer && !text.hidden)
+            .map(move |text| {
+                (
+                    footprint.resolve_text(text),
+                    Placement::of(text, frame.apply(text.at), true),
+                    text,
+                )
+            })
+    });
+    own.chain(placed)
 }
 
 /// The strokes of one line, unmirrored and unturned.
 fn line_strokes(line: &str, size: Size, italic: bool, start: Point) -> Vec<Vec<Point>> {
     let tilt = if italic { ITALIC_TILT } else { 0.0 };
     let mut out = Vec::new();
-    for (c, cursor) in cursors(line, size, start) {
+    for (c, cursor) in stroke_cursors(line, size, start) {
         if matches!(c, '\0' | ' ' | '\t') {
             continue;
         }

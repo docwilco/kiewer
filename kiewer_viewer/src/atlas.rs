@@ -10,8 +10,8 @@
 //! plans the atlas ([`plan`]), the page draws every glyph into its
 //! planned rectangle and hands back the alpha channel, and [`Quads::add`]
 //! places the cells `kicad_core::font::outline` laid out on the board
-//! with their rectangles' texture coordinates. The texture is coverage
-//! only (R8): the colour is the layer's, from the vertex.
+//! with the texture coordinates of [`Plan::glyphs`]. The texture is
+//! coverage only (R8): the colour is the layer's, from the vertex.
 //!
 //! Sharpness across zoom: a face's atlas is rasterised at a power of two
 //! pixels per em, chosen from the largest text in the face at the
@@ -23,9 +23,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bytemuck::{Pod, Zeroable};
-use kicad_core::font::Placement;
 use kicad_core::font::outline::{EM_PER_HEIGHT, OutlineText};
-use kicad_core::geometry::Transform;
+use kicad_core::font::placed_texts;
 use kicad_core::model::{Board, LayerId, Point, Text};
 
 /// The atlas's largest side: the WebGL2 floor's `max_texture_dimension_2d`.
@@ -119,10 +118,72 @@ fn pack_into(sizes: &[(u32, u32)], width: u32) -> Option<Packing> {
 /// where each of its characters goes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
-    /// Pixels per em.
+    /// Pixels per em the atlas is drawn at: `wanted`, or a halving of it
+    /// when the cells did not fit.
     pub px: u32,
+    /// Pixels per em the view asked for. What a later [`needs_rebuild`]
+    /// compares against: a halved `px` is the most this face can have,
+    /// and asking again every frame would rebuild the same atlas.
+    pub wanted: u32,
     /// The cells, in the order of the characters given to [`plan`].
     pub packing: Packing,
+}
+
+/// Where a character's quad samples the atlas, in texels: its cell's
+/// origin and its exact size, which the texel grid rounds up.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sample {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// A face's characters in its atlas: where each one samples, and the
+/// atlas's size to divide by.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Glyphs {
+    /// Texels across.
+    pub width: u32,
+    /// Texels down.
+    pub height: u32,
+    /// Each character's sample.
+    pub by_char: BTreeMap<char, Sample>,
+}
+
+impl Plan {
+    /// The glyphs of this plan for `chars`, each `advances` em wide (both
+    /// in the order given to [`plan`]), with a line box `line_height` em
+    /// tall: the sample of a character is its packed rectangle's origin
+    /// and its advance and line height at this plan's pixels per em,
+    /// unrounded, so the quad on the board, which is exactly those sizes
+    /// in millimetres, samples exactly the glyph and not the texel the
+    /// rounding added.
+    #[must_use]
+    pub fn glyphs(&self, chars: &[char], advances: &[f64], line_height: f64) -> Glyphs {
+        let px = f64::from(self.px);
+        let by_char = chars
+            .iter()
+            .zip(advances)
+            .zip(&self.packing.rects)
+            .map(|((&c, &advance), rect)| {
+                (
+                    c,
+                    Sample {
+                        x: f64::from(rect.x),
+                        y: f64::from(rect.y),
+                        width: advance * px,
+                        height: line_height * px,
+                    },
+                )
+            })
+            .collect();
+        Glyphs {
+            width: self.packing.width,
+            height: self.packing.height,
+            by_char,
+        }
+    }
 }
 
 /// Plan the atlas of a face for `chars`, each `advances` em wide (same
@@ -131,7 +192,8 @@ pub struct Plan {
 /// not fit even at [`MIN_PX`].
 #[must_use]
 pub fn plan(advances: &[f64], line_height: f64, px: u32) -> Option<Plan> {
-    let mut px = px.clamp(MIN_PX, MAX_PX);
+    let wanted = px.clamp(MIN_PX, MAX_PX);
+    let mut px = wanted;
     loop {
         let sizes: Vec<(u32, u32)> = advances
             .iter()
@@ -143,7 +205,11 @@ pub fn plan(advances: &[f64], line_height: f64, px: u32) -> Option<Plan> {
             })
             .collect();
         if let Some(packing) = pack(&sizes) {
-            return Some(Plan { px, packing });
+            return Some(Plan {
+                px,
+                wanted,
+                packing,
+            });
         }
         if px <= MIN_PX {
             return None;
@@ -226,7 +292,7 @@ pub fn texts_on(board: &Board, layer: LayerId) -> impl Iterator<Item = &Text> {
 #[must_use]
 pub fn chars_in(board: &Board, layer: LayerId, face: &str) -> Vec<char> {
     let mut chars = BTreeSet::from([' ']);
-    for (content, _, text) in resolved_texts(board, layer) {
+    for (content, _, text) in placed_texts(board, layer) {
         if text.font.face.as_deref() == Some(face) {
             chars.extend(content.chars().filter(|c| !matches!(c, '\n' | '\t')));
         }
@@ -241,36 +307,6 @@ pub fn max_height(board: &Board, layer: LayerId, face: &str) -> f64 {
         .filter(|text| text.font.face.as_deref() == Some(face))
         .map(|text| text.font.size.height.abs())
         .fold(0.0, f64::max)
-}
-
-/// Every visible text on `layer` with its content resolved and its
-/// placement on the board (a footprint's text carried into the board's
-/// frame and kept upright when it asks), as `Tessellator::text` places
-/// the same texts for Newstroke.
-pub fn resolved_texts(
-    board: &Board,
-    layer: LayerId,
-) -> impl Iterator<Item = (String, Placement, &Text)> + '_ {
-    let own = board
-        .texts
-        .iter()
-        .filter(move |text| text.layer == layer && !text.hidden)
-        .map(|text| (text.text.clone(), Placement::of(text, text.at, false), text));
-    let placed = board.footprints.iter().flat_map(move |footprint| {
-        let frame = Transform::new(footprint.at, footprint.rotation);
-        footprint
-            .texts
-            .iter()
-            .filter(move |text| text.layer == layer && !text.hidden)
-            .map(move |text| {
-                (
-                    footprint.resolve_text(text),
-                    Placement::of(text, frame.apply(text.at), true),
-                    text,
-                )
-            })
-    });
-    own.chain(placed)
 }
 
 /// `board` with every text in one of `system_faces` hidden, so the
@@ -324,30 +360,29 @@ pub struct Quads {
 }
 
 impl Quads {
-    /// Append `text`'s cells, each sampling its character's rectangle
-    /// of `atlas` (a texture of `packing`'s size), and its knockout
-    /// strips, sampling the empty corner texel with the coverage
-    /// inverted; `knockout` inverts the cells too. Positions are made
-    /// relative to `origin`. A character the atlas lacks is skipped.
+    /// Append `text`'s cells, each sampling its character's glyph of
+    /// `glyphs`, and its knockout strips, sampling the empty corner texel
+    /// with the coverage inverted; `knockout` inverts the cells too.
+    /// Positions are made relative to `origin`. A character the atlas
+    /// lacks is skipped.
     pub fn add(
         &mut self,
         text: &OutlineText,
-        atlas: &BTreeMap<char, Rect>,
-        packing_size: (u32, u32),
+        glyphs: &Glyphs,
         origin: Point,
         color: [f32; 4],
         knockout: bool,
     ) {
-        let (width, height) = (f64::from(packing_size.0), f64::from(packing_size.1));
+        let (width, height) = (f64::from(glyphs.width), f64::from(glyphs.height));
         let invert = if knockout { 1.0 } else { 0.0 };
         for cell in &text.cells {
-            let Some(rect) = atlas.get(&cell.c) else {
+            let Some(sample) = glyphs.by_char.get(&cell.c) else {
                 continue;
             };
-            let (x0, y0) = (f64::from(rect.x) / width, f64::from(rect.y) / height);
+            let (x0, y0) = (sample.x / width, sample.y / height);
             let (x1, y1) = (
-                f64::from(rect.x + rect.width) / width,
-                f64::from(rect.y + rect.height) / height,
+                (sample.x + sample.width) / width,
+                (sample.y + sample.height) / height,
             );
             self.quad(
                 cell.corners,
@@ -465,10 +500,14 @@ mod tests {
         }
     }
 
+    #[test_case(&vec![(500, 500); 100]; "a hundred cells of 500 overflow the largest side")]
+    #[test_case(&[(3000, 10)]; "one cell wider than the largest side")]
+    fn cells_that_overflow_the_largest_atlas_do_not_pack(sizes: &[(u32, u32)]) {
+        assert_eq!(pack(sizes), None);
+    }
+
     #[test]
-    fn cells_that_overflow_the_largest_atlas_do_not_pack() {
-        assert_eq!(pack(&vec![(500, 500); 100]), None);
-        assert_eq!(pack(&[(3000, 10)]), None);
+    fn no_cells_pack_into_the_smallest_atlas() {
         let empty = pack(&[]).expect("an empty atlas packs");
         assert_eq!((empty.width, empty.height), (256, 256));
     }
@@ -483,6 +522,7 @@ mod tests {
         let advances = vec![0.6; 60];
         let plan = plan(&advances, 1.2, MAX_PX).expect("fits at some size");
         assert_eq!(plan.px, 256);
+        assert_eq!(plan.wanted, MAX_PX, "what was asked for is kept");
         assert_eq!(plan.packing.rects.len(), 60);
         let first = plan.packing.rects.first().copied().expect("a rect");
         assert_eq!((first.width, first.height), (154, 308));
@@ -541,35 +581,20 @@ mod tests {
         assert_eq!(faces_on(&board, silk(&board)), ["Consolas", "Verdana"]);
     }
 
-    #[test]
-    fn the_characters_of_a_face_are_its_texts_resolved_and_a_space() {
+    #[test_case("Consolas", " 1HRehirt"; "the board text and the reference, with a space")]
+    #[test_case("Verdana", " !1R"; "a footprint text with its variable resolved")]
+    #[test_case("Nothing", " "; "a face no text names has only the space")]
+    fn the_characters_of_a_face_are_its_texts_resolved_and_a_space(face: &str, expected: &str) {
         let board = board();
-        let chars: String = chars_in(&board, silk(&board), "Consolas")
-            .into_iter()
-            .collect();
-        assert_eq!(chars, " 1HRehirt");
-        let chars: String = chars_in(&board, silk(&board), "Verdana")
-            .into_iter()
-            .collect();
-        assert_eq!(chars, " !1R");
-        assert!((max_height(&board, silk(&board), "Consolas") - 1.5).abs() < 1e-9);
-        assert!(max_height(&board, silk(&board), "Nothing").abs() < 1e-9);
+        let chars: String = chars_in(&board, silk(&board), face).into_iter().collect();
+        assert_eq!(chars, expected);
     }
 
-    #[test]
-    fn a_footprints_text_is_placed_in_the_boards_frame() {
+    #[test_case("Consolas", 1.5; "the tallest of two")]
+    #[test_case("Nothing", 0.0; "none is zero")]
+    fn the_tallest_text_of_a_face(face: &str, expected: f64) {
         let board = board();
-        let (content, placement, _) = resolved_texts(&board, silk(&board))
-            .find(|(_, _, text)| text.font.face.as_deref() == Some("Verdana"))
-            .expect("the Verdana text");
-        assert_eq!(content, "R1!");
-        assert!(
-            (placement.position.x - 5.0).abs() < 1e-9 && (placement.position.y - 5.0).abs() < 1e-9
-        );
-        let (_, placement, _) = resolved_texts(&board, silk(&board))
-            .next()
-            .expect("the board's own text first");
-        assert!(placement.position.x.abs() < 1e-9);
+        assert!((max_height(&board, silk(&board), face) - expected).abs() < 1e-9);
     }
 
     #[test]
@@ -583,13 +608,8 @@ mod tests {
         assert_eq!(stroke_board(&board, &BTreeSet::new()), board);
     }
 
-    #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "the colour and the invert flag compared are the same bits copied into the vertex, so they are bit-identical"
-    )]
-    fn quads_sample_each_cells_rectangle_and_strips_the_empty_corner() {
-        let placement = Placement {
+    fn placement_at_anchor() -> Placement {
+        Placement {
             size: Size {
                 width: 1.0,
                 height: 1.0,
@@ -599,52 +619,59 @@ mod tests {
             justify: Justify::default(),
             position: Point { x: 10.0, y: 20.0 },
             angle: 0.0,
-        };
-        let metrics = FaceMetrics {
-            ascent: 0.75,
-            descent: 0.25,
-        };
-        let text = layout("A B", &placement, metrics, |_| 0.5, true);
-        let atlas = BTreeMap::from([
-            (
-                'A',
-                Rect {
-                    x: 1,
-                    y: 1,
-                    width: 32,
-                    height: 64,
-                },
-            ),
-            (
-                'B',
-                Rect {
-                    x: 34,
-                    y: 1,
-                    width: 32,
-                    height: 64,
-                },
-            ),
-        ]);
+        }
+    }
+
+    const METRICS: FaceMetrics = FaceMetrics {
+        ascent: 0.75,
+        descent: 0.25,
+    };
+
+    /// Two glyphs 0.5 em wide in a 256 texel atlas at 64 px per em: cells
+    /// of 32 by 64 at (1, 1) and (34, 1).
+    fn glyphs() -> Glyphs {
+        Plan {
+            px: 64,
+            wanted: 64,
+            packing: Packing {
+                width: 256,
+                height: 256,
+                rects: vec![
+                    Rect {
+                        x: 1,
+                        y: 1,
+                        width: 32,
+                        height: 64,
+                    },
+                    Rect {
+                        x: 34,
+                        y: 1,
+                        width: 32,
+                        height: 64,
+                    },
+                ],
+            },
+        }
+        .glyphs(&['A', 'B'], &[0.5, 0.5], 1.0)
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the colour and the invert flag compared are the same bits copied into the vertex, so they are bit-identical"
+    )]
+    fn a_knockouts_quads_sample_each_cell_inverted_and_strips_the_empty_corner() {
+        let text = layout("A B", &placement_at_anchor(), METRICS, |_| 0.5, true);
         let mut quads = Quads::default();
         let color = [0.5, 0.6, 0.7, 1.0];
-        quads.add(
-            &text,
-            &atlas,
-            (256, 256),
-            Point { x: 10.0, y: 20.0 },
-            color,
-            true,
-        );
+        quads.add(&text, &glyphs(), Point { x: 10.0, y: 20.0 }, color, true);
         // Two cells, one blank and four strips around the single line.
         assert_eq!(text.strips.len(), 5);
         assert_eq!(quads.vertices.len(), 7 * 4);
         assert_eq!(quads.indices.len(), 7 * 6);
         let a = quads.vertices.first().expect("a vertex");
         assert_eq!(a.color, color);
-        assert!(
-            (a.invert - 1.0).abs() < f32::EPSILON,
-            "a knockout's cells invert"
-        );
+        assert_eq!(a.invert, 1.0, "a knockout's cells invert");
         assert!((a.uv[0] - 1.0 / 256.0).abs() < 1e-6 && (a.uv[1] - 1.0 / 256.0).abs() < 1e-6);
         let a_bottom_right = quads.vertices.get(2).expect("a vertex");
         assert!((a_bottom_right.uv[0] - 33.0 / 256.0).abs() < 1e-6);
@@ -657,14 +684,20 @@ mod tests {
         );
         let strip = quads.vertices.get(8).expect("a strip vertex");
         assert!((strip.uv[0] - 0.5 / 256.0).abs() < 1e-6);
-        assert!((strip.invert - 1.0).abs() < f32::EPSILON);
-        // Plain text: cells upright, the one strip-less text.
-        let plain = layout("A", &placement, metrics, |_| 0.5, false);
+        assert_eq!(strip.invert, 1.0);
+    }
+
+    #[test]
+    fn a_plain_texts_quads_are_its_cells_upright() {
+        let plain = layout("A", &placement_at_anchor(), METRICS, |_| 0.5, false);
         let mut quads = Quads::default();
-        quads.add(&plain, &atlas, (256, 256), Point::default(), color, false);
+        quads.add(&plain, &glyphs(), Point::default(), [1.0; 4], false);
         assert_eq!(quads.vertices.len(), 4);
         assert!(quads.vertices.iter().all(|v| v.invert == 0.0));
-        // A character the atlas lacks draws nothing.
+    }
+
+    #[test]
+    fn a_character_the_atlas_lacks_draws_nothing() {
         let missing = OutlineText {
             cells: vec![Cell {
                 c: 'Z',
@@ -673,8 +706,32 @@ mod tests {
             strips: Vec::new(),
         };
         let mut quads = Quads::default();
-        quads.add(&missing, &atlas, (256, 256), Point::default(), color, false);
+        quads.add(&missing, &glyphs(), Point::default(), [1.0; 4], false);
         assert!(quads.vertices.is_empty());
+    }
+
+    #[test]
+    fn a_glyph_samples_its_exact_advance_not_the_rounded_cell() {
+        // 0.3 em at 64 px is 19.2 texels, packed in a 20 texel cell; the
+        // quad on the board is 0.3 em wide, so it samples 19.2.
+        let plan = Plan {
+            px: 64,
+            wanted: 128,
+            packing: Packing {
+                width: 256,
+                height: 256,
+                rects: vec![Rect {
+                    x: 1,
+                    y: 1,
+                    width: 20,
+                    height: 64,
+                }],
+            },
+        };
+        let glyphs = plan.glyphs(&['i'], &[0.3], 1.0);
+        let sample = glyphs.by_char.get(&'i').copied().expect("the glyph");
+        assert!((sample.width - 19.2).abs() < 1e-9 && (sample.height - 64.0).abs() < 1e-9);
+        assert!((sample.x - 1.0).abs() < 1e-9);
     }
 
     #[test]

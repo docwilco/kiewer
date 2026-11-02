@@ -13,14 +13,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use kicad_core::font::outline::{self, FaceMetrics};
+use kicad_core::font::placed_texts;
 use kicad_core::model::{Board, LayerId, Point};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
-use crate::atlas::{self, Plan, Quads, Rect};
+use crate::atlas::{self, Plan, Quads};
 use crate::camera::{Camera, DOUBLE_CLICK, Size};
 use crate::error::{Error, Result};
-use crate::render::atlas_pipeline::Atlas;
+use crate::render::atlas_pipeline::Coverage;
 use crate::render::{Backend, MSAA_SAMPLES, Renderer, Target, device_descriptor};
 use crate::scene::{Scene, clear_color};
 use crate::view::{Layer, Side, View, ViewState, palette};
@@ -60,12 +61,40 @@ struct SystemFace {
     /// The characters its texts draw, in the order the page measures
     /// them.
     chars: Vec<char>,
-    /// Each character's advance in em, once the page has measured them.
+    /// Each character's advance in em, once the page has measured them;
+    /// empty before.
     advances: Vec<f64>,
-    /// The atlas as last planned, for the page to draw into.
-    plan: Option<Plan>,
-    /// The pixels per em of the atlas the renderer holds, once uploaded.
-    atlas_px: Option<u32>,
+    /// Where its atlas stands.
+    stage: AtlasStage,
+}
+
+/// Where a face's atlas stands.
+enum AtlasStage {
+    /// Nothing planned: the next `atlas_wanted` names the face.
+    Wanted,
+    /// Planned, for the page to draw into; the plan carries the pixels
+    /// per em the view asked for.
+    Planned(Plan),
+    /// Uploaded, from a plan made for `wanted` pixels per em: what the
+    /// next `atlas_wanted` compares the view's wish against.
+    Uploaded { wanted: u32 },
+    /// Its cells fit no atlas even at the smallest size; never asked
+    /// again, so the page does not try every frame.
+    Unfit,
+}
+
+impl AtlasStage {
+    /// The pixels per em the atlas in hand was asked for, `None` when
+    /// there is none yet; `Some(u32::MAX)` for an unfit face, which no
+    /// wish exceeds.
+    fn planned_for(&self) -> Option<u32> {
+        match self {
+            AtlasStage::Wanted => None,
+            AtlasStage::Planned(plan) => Some(plan.wanted),
+            AtlasStage::Uploaded { wanted } => Some(*wanted),
+            AtlasStage::Unfit => Some(u32::MAX),
+        }
+    }
 }
 
 /// What the browser gave: the surface on the canvas, the adapter and the
@@ -660,10 +689,11 @@ impl Viewer {
     }
 
     /// Draw `face` from a font the browser has, whose line box reaches
-    /// `ascent` em above the baseline and `descent` em below it. The
-    /// face's text leaves the Newstroke scene; the next `atlas_wanted`
-    /// names the face, and until the page uploads its atlas the text is
-    /// not drawn.
+    /// `ascent` em above the baseline and `descent` em below it; NaN or
+    /// nothing for either (a browser without `fontBoundingBoxAscent`)
+    /// takes the usual 0.8 and 0.2. The face's text leaves the Newstroke
+    /// scene; the next `atlas_wanted` names the face, and until the page
+    /// uploads its atlas the text is not drawn.
     pub fn set_face_system(&mut self, face: &str, ascent: f64, descent: f64) {
         let chars = self
             .silk()
@@ -687,8 +717,7 @@ impl Viewer {
                 metrics,
                 chars,
                 advances: Vec::new(),
-                plan: None,
-                atlas_px: None,
+                stage: AtlasStage::Wanted,
             },
         );
         self.renderer.remove_text(face);
@@ -702,7 +731,9 @@ impl Viewer {
     pub fn atlas_wanted(&self) -> String {
         self.system_faces
             .iter()
-            .find(|(face, system)| atlas::needs_rebuild(system.atlas_px, self.wanted_px(face)))
+            .find(|(face, system)| {
+                atlas::needs_rebuild(system.stage.planned_for(), self.wanted_px(face))
+            })
             .map(|(face, _)| face.clone())
             .unwrap_or_default()
     }
@@ -710,11 +741,13 @@ impl Viewer {
     /// Plan `face`'s atlas from the page's measurement: `advances` is
     /// the width of each character of `face_chars` at `px` pixels per
     /// em, in that order. Returns the pixels per em to draw at, the
-    /// atlas's width and height, then `x, y, width, height` per
-    /// character; empty when the face is unknown, the measurement does
-    /// not match the characters, or the cells fit no atlas.
+    /// atlas's width and height, the baseline's distance below a cell's
+    /// top in pixels (the face's ascent, as the layout places it), then
+    /// `x, y, width, height` per character, all whole texels; empty when
+    /// the face is unknown, the measurement does not match the
+    /// characters, or the cells fit no atlas.
     #[must_use]
-    pub fn atlas_plan(&mut self, face: &str, px: u32, advances: &[f64]) -> Vec<u32> {
+    pub fn atlas_plan(&mut self, face: &str, px: u32, advances: &[f64]) -> Vec<f64> {
         let wanted = self.wanted_px(face);
         let Some(system) = self.system_faces.get_mut(face) else {
             return Vec::new();
@@ -727,14 +760,19 @@ impl Viewer {
             .map(|advance| advance / f64::from(px))
             .collect();
         let Some(plan) = atlas::plan(&system.advances, system.metrics.line_height(), wanted) else {
-            system.plan = None;
+            system.stage = AtlasStage::Unfit;
             return Vec::new();
         };
-        let mut out = vec![plan.px, plan.packing.width, plan.packing.height];
+        let mut out = vec![
+            f64::from(plan.px),
+            f64::from(plan.packing.width),
+            f64::from(plan.packing.height),
+            system.metrics.ascent * f64::from(plan.px),
+        ];
         for rect in &plan.packing.rects {
-            out.extend([rect.x, rect.y, rect.width, rect.height]);
+            out.extend([rect.x, rect.y, rect.width, rect.height].map(f64::from));
         }
-        system.plan = Some(plan);
+        system.stage = AtlasStage::Planned(plan);
         out
     }
 
@@ -745,17 +783,16 @@ impl Viewer {
         let Some(system) = self.system_faces.get(face) else {
             return;
         };
-        let (Some(plan), Some(scene), Some((board, layer))) =
-            (&system.plan, &self.scene, self.silk())
+        let (AtlasStage::Planned(plan), Some(scene), Some((board, layer))) =
+            (&system.stage, &self.scene, self.silk())
         else {
             return;
         };
-        let rects: BTreeMap<char, Rect> = system
-            .chars
-            .iter()
-            .copied()
-            .zip(plan.packing.rects.iter().copied())
-            .collect();
+        let glyphs = plan.glyphs(
+            &system.chars,
+            &system.advances,
+            system.metrics.line_height(),
+        );
         let advances: BTreeMap<char, f64> = system
             .chars
             .iter()
@@ -763,32 +800,38 @@ impl Viewer {
             .zip(system.advances.iter().copied())
             .collect();
         let advance = |c: char| advances.get(&c).copied().unwrap_or(0.0);
-        let color = palette::F_SILKS.for_format(self.config.format);
-        let size = (plan.packing.width, plan.packing.height);
+        // The silkscreen's colour under the view in force, as the flat
+        // slices have it; a later view change recolours at the next
+        // rebuild (#46 has the per-view text).
+        let silk = Layer::Silk(Side::Front);
+        let color = self
+            .current_view()
+            .map_or(palette::F_SILKS, |view| view.color(&scene.stack, &silk))
+            .for_format(self.config.format);
         let mut quads = Quads::default();
-        for (content, placement, text) in atlas::resolved_texts(board, layer) {
+        for (content, placement, text) in placed_texts(board, layer) {
             if text.font.face.as_deref() != Some(face) || content.is_empty() {
                 continue;
             }
             let laid =
                 outline::layout(&content, &placement, system.metrics, advance, text.knockout);
-            quads.add(&laid, &rects, size, scene.origin, color, text.knockout);
+            quads.add(&laid, &glyphs, scene.origin, color, text.knockout);
         }
         self.renderer.upload_text(
             &self.device,
             &self.queue,
             face,
-            &Atlas {
-                width: plan.packing.width,
-                height: plan.packing.height,
-                coverage,
+            &Coverage {
+                width: glyphs.width,
+                height: glyphs.height,
+                bytes: coverage,
             },
             &quads.vertices,
             &quads.indices,
         );
-        let px = plan.px;
+        let wanted = plan.wanted;
         if let Some(system) = self.system_faces.get_mut(face) {
-            system.atlas_px = Some(px);
+            system.stage = AtlasStage::Uploaded { wanted };
         }
     }
 }

@@ -25,9 +25,9 @@
 //! are the parts of that box no cell covers, so the viewer fills the
 //! strips flat and the cells with their coverage inverted.
 
-use super::{FIRST_LINE_HEIGHT, Placement, TAB_WIDTH};
+use super::{Placement, cursors, first_baseline, knockout_grow};
 use crate::geometry::{Bounds, Transform};
-use crate::model::{Horizontal, Point, Vertical};
+use crate::model::{Horizontal, Point};
 
 /// The em of an outline face per unit of text height: KiCad's
 /// `OUTLINE_FONT::m_outlineFontSizeCompensation`, which makes a TrueType
@@ -108,8 +108,9 @@ impl Rect {
 
 /// Lays `text` out as `placement` says in a face of `metrics`, each
 /// character `advance` em wide (the browser's measurement; a space is
-/// `advance(' ')`, a tab reaches the next stop of four spaces). With
-/// `knockout`, the strips of the box around the cells are computed too.
+/// `advance(' ')`, a tab reaches the next stop as the stroke font places
+/// it). With `knockout`, the strips of the box around the cells are
+/// computed too.
 #[must_use]
 pub fn layout(
     text: &str,
@@ -125,18 +126,12 @@ pub fn layout(
     };
     let lines: Vec<&str> = text.split('\n').collect();
     let interline = size.height * INTERLINE_PITCH * metrics.line_height();
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a text has far fewer lines than 2^53"
-    )]
-    let block_height =
-        size.height * FIRST_LINE_HEIGHT + (lines.len().saturating_sub(1)) as f64 * interline;
-    let mut offset_y = size.height;
-    match placement.justify.vertical {
-        Vertical::Top => {}
-        Vertical::Center => offset_y -= block_height / 2.0,
-        Vertical::Bottom => offset_y -= block_height,
-    }
+    let offset_y = first_baseline(
+        size.height,
+        lines.len(),
+        interline,
+        placement.justify.vertical,
+    );
     let origin = placement.position;
     let mut cells: Vec<(char, Rect)> = Vec::new();
     let mut blanks: Vec<Rect> = Vec::new();
@@ -220,8 +215,14 @@ fn line_cells(
     cells: &mut Vec<(char, Rect)>,
     mut blanks: Option<&mut Vec<Rect>>,
 ) -> Rect {
-    let advances = cursors(line, em, advance);
-    let width = advances.last().map_or(0.0, |(_, end)| *end);
+    let advances = cursors(
+        line,
+        em,
+        advance(' ') * em,
+        |c| advance(c) * em,
+        Point::default(),
+    );
+    let width = advances.last().map_or(0.0, |(_, end)| end.x);
     let start_x = line_box.min.x
         + match horizontal {
             Horizontal::Left => 0.0,
@@ -234,11 +235,11 @@ fn line_cells(
         };
         let rect = Rect {
             min: Point {
-                x: start_x + from,
+                x: start_x + from.x,
                 y: line_box.min.y,
             },
             max: Point {
-                x: start_x + to,
+                x: start_x + to.x,
                 y: line_box.max.y,
             },
         };
@@ -264,40 +265,6 @@ fn line_cells(
     }
 }
 
-/// Each character of `line` with the pen's x before it, and a final
-/// `('\0', width)`: a glyph advances by its width, a tab to the next
-/// stop of four space widths, both in millimetres for an em of `em`.
-fn cursors(line: &str, em: f64, advance: &impl Fn(char) -> f64) -> Vec<(char, f64)> {
-    let space = advance(' ') * em;
-    let mut x = 0.0;
-    let mut column = 0usize;
-    let mut out = Vec::new();
-    for c in line.chars() {
-        out.push((c, x));
-        match c {
-            '\t' => {
-                column = (column / TAB_WIDTH + 1) * TAB_WIDTH - 1;
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "a line has far fewer columns than 2^53"
-                )]
-                let mut next = space * column as f64 + space;
-                #[expect(clippy::cast_precision_loss, reason = "the tab width is 4")]
-                while next <= x {
-                    column += TAB_WIDTH;
-                    next += space * TAB_WIDTH as f64;
-                }
-                x = next;
-            }
-            ' ' => x += space,
-            _ => x += advance(c) * em,
-        }
-        column += 1;
-    }
-    out.push(('\0', x));
-    out
-}
-
 /// The knockout box less the lines: the box is the line boxes' bounds
 /// grown by half the pen and KiCad's margin (the larger of half the pen
 /// and a ninth of the height); the strips are the bands above the first
@@ -309,8 +276,7 @@ fn knockout_strips(lines: &[Rect], pen: f64, height: f64) -> Vec<Rect> {
     let Some(bounds) = Bounds::around(lines.iter().flat_map(|rect| [rect.min, rect.max])) else {
         return Vec::new();
     };
-    let margin = (pen / 2.0).max(height / 9.0);
-    let grow = pen / 2.0 + margin;
+    let grow = knockout_grow(pen, height);
     let outer = Rect {
         min: Point {
             x: bounds.min.x - grow,
@@ -372,7 +338,7 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
-    use crate::model::{Justify, Size};
+    use crate::model::{Justify, Size, Vertical};
 
     /// Consolas as a browser measures it: every glyph 0.55 em wide, the
     /// line box 0.74 em up and 0.26 em down.
@@ -506,20 +472,18 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn spaces_and_tabs_advance_the_pen_without_a_cell() {
+    #[test_case("I I", 2.0 * ADVANCE * 1.4; "a space advances the space width")]
+    #[test_case("I\tI", 3.0 * 1.4 + ADVANCE * 1.4; "a tab after the first column reaches the stop at three ems plus a space, as in the stroke font")]
+    fn a_blank_advances_the_pen_without_a_cell(text: &str, expected_dx: f64) {
         let left = Justify {
             horizontal: Horizontal::Left,
             vertical: Vertical::Center,
             mirror: false,
         };
-        let spaced = layout("I I", &placement(left, 0.0), CONSOLAS, monospace, false);
-        assert_eq!(spaced.cells.len(), 2);
-        let dx = cell(&spaced, 1).corners[0].x - cell(&spaced, 0).corners[0].x;
-        assert!(close(dx, 2.0 * ADVANCE * 1.4), "{dx}");
-        let tabbed = layout("I\tI", &placement(left, 0.0), CONSOLAS, monospace, false);
-        let dx = cell(&tabbed, 1).corners[0].x - cell(&tabbed, 0).corners[0].x;
-        assert!(close(dx, 4.0 * ADVANCE * 1.4), "{dx}");
+        let laid = layout(text, &placement(left, 0.0), CONSOLAS, monospace, false);
+        assert_eq!(laid.cells.len(), 2);
+        let dx = cell(&laid, 1).corners[0].x - cell(&laid, 0).corners[0].x;
+        assert!(close(dx, expected_dx), "{dx}");
     }
 
     #[test]

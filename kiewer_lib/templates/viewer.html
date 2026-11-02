@@ -372,12 +372,11 @@ let fontsViewer = null;
 let fontsSchedule = function () {};
 // face named by the design -> the browser family it draws with
 const families = new Map();
-let rasterising = false;
 
 function platformList() {
   const platform = String((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "").toLowerCase();
   if (platform.includes("win")) return PROBE_LIST.windows;
-  if (platform.includes("mac") || platform.includes("iphone") || platform.includes("ipad")) return PROBE_LIST.mac;
+  if (platform.includes("mac") || platform.includes("ios") || platform.includes("iphone") || platform.includes("ipad")) return PROBE_LIST.mac;
   if (platform.includes("linux") || platform.includes("android") || platform.includes("x11")) return PROBE_LIST.linux;
   return PROBE_LIST.windows.concat(PROBE_LIST.mac, PROBE_LIST.linux);
 }
@@ -398,13 +397,12 @@ function available(family) {
   return false;
 }
 // The face's line box in em: the font bounding box where the browser
-// reports it (Chrome, Firefox 116, Safari 16.4), else a usual 0.8 / 0.2.
+// reports it (Chrome, Firefox 116, Safari 16.4), else NaN, and the wasm
+// takes its usual values; the plan hands the ascent back for drawing.
 function faceMetrics(family) {
   probeCtx.font = "100px " + quoted(family);
   const m = probeCtx.measureText("Hg");
-  const ascent = m.fontBoundingBoxAscent, descent = m.fontBoundingBoxDescent;
-  if (ascent > 0 && descent >= 0) return { ascent: ascent / 100, descent: descent / 100 };
-  return { ascent: 0.8, descent: 0.2 };
+  return { ascent: m.fontBoundingBoxAscent / 100, descent: m.fontBoundingBoxDescent / 100 };
 }
 function stored(face) {
   try { return localStorage.getItem(STORAGE_PREFIX + face); } catch (e) { return null; }
@@ -456,9 +454,12 @@ function picker(face, choice) {
   note.className = "absent";
   const listed = options.some(function (o) { return o[0] === choice; });
   if (choice && choice !== STROKE && !listed) {
+    // A remembered family off the list: free text, and when the browser
+    // has lost it since, said so, as the text draws in the stroke font.
     select.value = OTHER;
     input.hidden = false;
     input.value = choice;
+    if (!available(choice)) note.textContent = " (not found; drawn in the stroke font)";
   } else {
     select.value = choice && listed ? choice : STROKE;
   }
@@ -507,7 +508,8 @@ function setup() {
 // Rasterise the face the wasm asks for: measure its characters at
 // MEASURE_PX, take the plan, draw each character at the plan's pixels per
 // em into its cell (clipped to it, so an overhang never reaches the
-// neighbour), and hand the alpha channel over.
+// neighbour) with its baseline where the plan says, and hand the alpha
+// channel over.
 function rasterise(face) {
   const family = families.get(face);
   if (!family) return;
@@ -515,8 +517,8 @@ function rasterise(face) {
   probeCtx.font = MEASURE_PX + "px " + quoted(family);
   const advances = new Float64Array(chars.map(function (c) { return probeCtx.measureText(c).width; }));
   const plan = fontsViewer.atlas_plan(face, MEASURE_PX, advances);
-  if (plan.length < 3) return;
-  const px = plan[0], width = plan[1], height = plan[2];
+  if (plan.length < 4) return;
+  const px = plan[0], width = plan[1], height = plan[2], ascent = plan[3];
   atlasCanvas.width = width;
   atlasCanvas.height = height;
   const ctx = atlasCanvas.getContext("2d", { willReadFrequently: true });
@@ -525,9 +527,8 @@ function rasterise(face) {
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "left";
   ctx.font = px + "px " + quoted(family);
-  const ascent = faceMetrics(family).ascent * px;
   for (let i = 0; i < chars.length; i++) {
-    const x = plan[3 + i * 4], y = plan[4 + i * 4], w = plan[5 + i * 4], h = plan[6 + i * 4];
+    const x = plan[4 + i * 4], y = plan[5 + i * 4], w = plan[6 + i * 4], h = plan[7 + i * 4];
     ctx.save();
     ctx.beginPath();
     ctx.rect(x, y, w, h);
@@ -542,11 +543,10 @@ function rasterise(face) {
   fontsSchedule();
 }
 window.addEventListener("kiewer-frame", function () {
-  if (!fontsViewer || rasterising) return;
+  if (!fontsViewer) return;
   const face = fontsViewer.atlas_wanted();
   if (!face) return;
-  rasterising = true;
-  try { rasterise(face); } catch (e) { console.warn("kiewer: font atlas for " + face + ": " + e); } finally { rasterising = false; }
+  try { rasterise(face); } catch (e) { console.warn("kiewer: font atlas for " + face + ": " + e); }
 });
 window.addEventListener("kiewer-board", function (e) {
   fontsViewer = e.detail.viewer;

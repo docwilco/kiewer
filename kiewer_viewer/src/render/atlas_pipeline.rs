@@ -17,16 +17,16 @@ use crate::atlas::TextVertex;
 /// The text shader, compiled at pipeline creation.
 pub const SHADER: &str = include_str!("text.wgsl");
 
-/// A face's coverage atlas as the page rasterised it.
+/// A face's coverage as the page rasterised it: the atlas's bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Atlas<'a> {
+pub struct Coverage<'a> {
     /// Texels across, a multiple of 256 (`write_texture`'s row alignment
     /// for one byte per texel).
     pub width: u32,
     /// Texels down.
     pub height: u32,
     /// `width * height` bytes, row-major, 255 for full coverage.
-    pub coverage: &'a [u8],
+    pub bytes: &'a [u8],
 }
 
 /// The pipeline and the faces it draws.
@@ -148,17 +148,17 @@ impl TextPass {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         face: &str,
-        atlas: &Atlas<'_>,
+        coverage: &Coverage<'_>,
         vertices: &[TextVertex],
         indices: &[u32],
     ) {
         self.remove(face);
-        if indices.is_empty() || atlas.width == 0 || atlas.height == 0 {
+        if indices.is_empty() || coverage.width == 0 || coverage.height == 0 {
             return;
         }
         let size = wgpu::Extent3d {
-            width: atlas.width,
-            height: atlas.height,
+            width: coverage.width,
+            height: coverage.height,
             depth_or_array_layers: 1,
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -171,15 +171,15 @@ impl TextPass {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let expected =
-            usize::try_from(u64::from(atlas.width) * u64::from(atlas.height)).unwrap_or(usize::MAX);
+        let expected = usize::try_from(u64::from(coverage.width) * u64::from(coverage.height))
+            .unwrap_or(usize::MAX);
         // A short buffer is padded with no coverage rather than refused:
         // the page's canvas read-back is what it is.
         let mut padded;
-        let coverage = if atlas.coverage.len() == expected {
-            atlas.coverage
+        let bytes = if coverage.bytes.len() == expected {
+            coverage.bytes
         } else {
-            padded = atlas.coverage.to_vec();
+            padded = coverage.bytes.to_vec();
             padded.resize(expected, 0);
             padded.as_slice()
         };
@@ -190,11 +190,11 @@ impl TextPass {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            coverage,
+            bytes,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(atlas.width),
-                rows_per_image: Some(atlas.height),
+                bytes_per_row: Some(coverage.width),
+                rows_per_image: Some(coverage.height),
             },
             size,
         );

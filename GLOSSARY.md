@@ -93,6 +93,12 @@ _Avoid_: level of detail, LOD
 **Stroke font**:
 Newstroke, KiCad's built-in line font, bundled in kiewer and used for every text item that names no face. Its glyph table is regenerated from the font's CC0 sources by `newstroke_dev`.
 
+**System face**:
+A font face a design names that the browser has, or that the person picked for one it lacks; its text draws from that font rather than from the stroke font. The choice is remembered per browser per face.
+
+**Glyph atlas**:
+One image per system face holding every character the design draws in it, redrawn at a size fit for the zoom; text in a system face is drawn from it.
+
 **Knockout**:
 A text item drawn inverted: a filled box around the text with the glyphs cut out of it, as KiCad's `knockout` flag on a text's layer asks.
 
