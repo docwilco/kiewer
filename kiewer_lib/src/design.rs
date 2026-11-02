@@ -5,18 +5,21 @@
 //! pool and serve a page. A revision is only ever read through a design
 //! (`design_revision`), since a bare hash would be a capability.
 
-use std::fmt;
 use std::str::FromStr;
 
 use sqlx::{PgConnection, PgExecutor, PgPool};
 
-use crate::account::{AccountId, Handle, slugify};
+use crate::account::{AccountId, Handle};
 use crate::blob::BlobHash;
 use crate::error::{Error, Refusal, Result};
 use crate::revision::{
     Metadata, RevisionDraft, RevisionHash, TreeEntry, TreeHash, TreePath, revision_hash, tree_hash,
 };
 use crate::roles::Visibility;
+
+/// The slug type, where the upload and the pages have always found it;
+/// its rules and its redirects are `crate::slug`.
+pub use crate::slug::Slug;
 
 /// A design's row id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, sqlx::Type)]
@@ -25,78 +28,6 @@ pub struct DesignId(i64);
 
 /// The branch every design starts with (GLOSSARY, Default branch).
 pub const DEFAULT_BRANCH: &str = "main";
-
-/// A design's name in its URL: lowercase letters, digits and hyphens, 1
-/// to 64 characters, no hyphen at either end, unique per owner. Picked
-/// from the upload's name here; the full rules, renames and redirects are
-/// #22.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Slug(String);
-
-impl Slug {
-    /// The longest slug.
-    pub const MAX_LEN: usize = 64;
-
-    /// What a design with nothing usable in its name is called.
-    pub const FALLBACK: &str = "design";
-
-    /// The slug as text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// A slug read back from its row, taken as it is.
-    pub(crate) fn from_row(text: String) -> Self {
-        Self(text)
-    }
-
-    /// The slug a name suggests: lowercased, every run of other characters
-    /// a hyphen, cut to the length; [`Slug::FALLBACK`] when nothing of the
-    /// name survives.
-    #[must_use]
-    pub fn suggest(name: &str) -> Self {
-        slugify(name, Self::MAX_LEN)
-            .parse()
-            .unwrap_or_else(|_| Self(Self::FALLBACK.to_owned()))
-    }
-
-    fn fault(text: &str) -> Option<&'static str> {
-        if text.is_empty() {
-            return Some("is empty");
-        }
-        if text.len() > Self::MAX_LEN {
-            return Some("is longer than 64 characters");
-        }
-        if !text
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        {
-            return Some("may use only lowercase letters, digits and hyphens");
-        }
-        if text.starts_with('-') || text.ends_with('-') {
-            return Some("may not start or end with a hyphen");
-        }
-        None
-    }
-}
-
-impl fmt::Display for Slug {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl FromStr for Slug {
-    type Err = Error;
-
-    fn from_str(text: &str) -> Result<Self> {
-        match Self::fault(text) {
-            None => Ok(Self(text.to_owned())),
-            Some(fault) => Err(Error::Malformed(format!("slug {text:?} {fault}"))),
-        }
-    }
-}
 
 /// A design as its row has it. The owner is the one person it belongs
 /// to (`roles`: exactly one, since the column is never null); the other
@@ -211,7 +142,9 @@ pub async fn find_at<'c>(
     row.map(Design::try_from).transpose()
 }
 
-/// A new design of `owner` at `slug`, within the upload's transaction.
+/// A new design of `owner` at `slug`, within the upload's transaction. A
+/// redirect an earlier design of theirs left at `slug` ends here: the
+/// slug is this design's now.
 ///
 /// # Errors
 ///
@@ -223,6 +156,7 @@ pub async fn create(
     slug: &Slug,
     name: &str,
 ) -> Result<Design> {
+    crate::slug::release(&mut *tx, owner, slug).await?;
     let inserted: std::result::Result<DesignId, sqlx::Error> = sqlx::query_scalar(
         "INSERT INTO design (owner_id, slug, name) VALUES ($1, $2, $3) RETURNING id",
     )
@@ -709,36 +643,4 @@ async fn entries(db: &PgPool, tree: TreeHash) -> Result<Vec<TreeEntry>> {
             })
         })
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use test_case::test_case;
-
-    use super::*;
-
-    #[test_case("midi8knob", "midi8knob"; "a name that is a slug")]
-    #[test_case("My Board v2", "my-board-v2"; "case and spaces")]
-    #[test_case("--Odd__Name--", "odd-name"; "runs collapsed and ends trimmed")]
-    #[test_case("***", "design"; "nothing survives")]
-    #[test_case("", "design"; "empty")]
-    fn a_name_suggests_a_slug(name: &str, slug: &str) {
-        assert_eq!(Slug::suggest(name).as_str(), slug);
-    }
-
-    #[test]
-    fn a_long_name_is_cut_without_a_trailing_hyphen() {
-        let name = format!("{}-x", "a".repeat(Slug::MAX_LEN - 1));
-        let slug = Slug::suggest(&name);
-        assert_eq!(slug.as_str(), "a".repeat(Slug::MAX_LEN - 1));
-    }
-
-    #[test_case(""; "empty")]
-    #[test_case("Upper"; "an uppercase letter")]
-    #[test_case("-x"; "a leading hyphen")]
-    #[test_case("x-"; "a trailing hyphen")]
-    #[test_case("a b"; "a space")]
-    fn a_malformed_slug_is_refused(text: &str) {
-        assert!(matches!(text.parse::<Slug>(), Err(Error::Malformed(_))));
-    }
 }

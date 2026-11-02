@@ -24,6 +24,12 @@ axum-extra = { version = "0.12", default-features = false, features = ["cookie"]
 derive_more = { version = "2", features = ["display", "error", "from"] }
 # The GCS store's upload payload type (blob/gcs.rs); in the tree already.
 bytes = "1"
+# The description's Markdown (docs/v1-scope.md, Pages and URLs): CommonMark
+# with the table and strikethrough extensions, rendered through the
+# allow-list of kiewer_lib::description. No features: the defaults are the
+# command-line tool, syntax highlighting and a builder, none of which the
+# server renders with.
+comrak = { version = "0.59", default-features = false }
 flate2 = "1"
 # The GCS store (blob/gcs.rs): Google's own client. Its data path is the
 # JSON API, which the fake-gcs-server emulator speaks (object_store's XML

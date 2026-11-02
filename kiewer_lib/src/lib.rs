@@ -6,7 +6,9 @@ pub mod blob;
 pub mod build;
 pub mod config;
 pub mod db;
+pub mod description;
 pub mod design;
+pub mod design_settings;
 pub mod error;
 mod hex;
 pub mod listing;
@@ -14,6 +16,7 @@ pub mod revision;
 pub mod roles;
 pub mod server;
 pub mod session;
+pub mod slug;
 pub mod upload;
 pub mod web;
 
