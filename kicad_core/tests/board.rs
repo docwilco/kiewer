@@ -249,6 +249,56 @@ fn the_multi_layer_zone_is_on_all_four_copper_layers() {
 }
 
 #[test]
+fn footprint_text_variables_resolve_to_its_properties() {
+    let board = board();
+    let footprint = &board.footprints[0];
+    let reference = footprint
+        .texts
+        .iter()
+        .find(|t| t.role == TextRole::Reference)
+        .expect("a reference");
+    let mut text = reference.clone();
+    text.text = "${REFERENCE} is ${VALUE} (${Datasheet}) ${NOSUCH} ${".to_owned();
+    let expected = format!(
+        "{} is {} ({}) ${{NOSUCH}} ${{",
+        footprint.reference().expect("reference"),
+        footprint.value().expect("value"),
+        footprint.property("Datasheet").expect("datasheet")
+    );
+    assert_eq!(footprint.resolve_text(&text), expected);
+}
+
+#[test]
+fn a_text_is_upright_unless_unlocked() {
+    let board = board();
+    let footprint = &board.footprints[0];
+    // KiCad writes `(unlocked yes)` on the fields it hides; the shown
+    // texts of the hand-off's footprint are all upright.
+    let free: Vec<&str> = footprint
+        .texts
+        .iter()
+        .filter(|t| !t.upright && !t.hidden)
+        .map(|t| t.text.as_str())
+        .collect();
+    assert!(free.is_empty(), "not upright: {free:?}");
+    assert!(footprint.texts.iter().any(|t| t.hidden && !t.upright));
+    let unlocked = parse_board(
+        r#"(kicad_pcb (version 20241229) (generator "pcbnew") (layers (0 "F.Cu" signal) (37 "F.SilkS" user))
+          (footprint "X" (layer "F.Cu") (at 0 0)
+            (fp_text user "a" (at 0 0 270) (unlocked yes) (layer "F.SilkS") (effects (font (size 1 1))))
+            (fp_text user "b" (at 0 0 270 unlocked) (layer "F.SilkS") (effects (font (size 1 1))))
+            (fp_text user "c" (at 0 0 270) (unlocked no) (layer "F.SilkS") (effects (font (size 1 1))))))"#,
+    )
+    .expect("parses");
+    let upright: Vec<bool> = unlocked.footprints[0]
+        .texts
+        .iter()
+        .map(|t| t.upright)
+        .collect();
+    assert_eq!(upright, [false, false, true]);
+}
+
+#[test]
 fn hidden_properties_are_texts_that_are_hidden() {
     let board = board();
     let datasheet = board.footprints[0]

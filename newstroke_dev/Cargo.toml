@@ -1,0 +1,19 @@
+[package]
+name = "newstroke_dev"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Dev-only: the converter that writes kicad_core/src/font/newstroke_table.rs
+# from the Newstroke sources. Never a dependency of a shipped crate.
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+derive_more = { version = "2", default-features = false, features = ["display", "error", "from"] }
+
+[dev-dependencies]
+test-case = "3"

@@ -17,6 +17,10 @@ derive_more = { version = "2", default-features = false, features = ["display", 
 # draws and the thumbnail renderer will draw. std only: no serde, no
 # debugger hooks.
 lyon_tessellation = { version = "1", default-features = false, features = ["std"] }
+# Polygon booleans (tessellate.rs): a knockout text is its box minus the
+# union of its strokes, which no fill rule over overlapping strokes gives.
+# Pure Rust, builds for wasm32; no features (no rayon, no serde).
+i_overlay = { version = "9", default-features = false }
 
 [dev-dependencies]
 test-case = "3"

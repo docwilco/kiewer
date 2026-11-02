@@ -2,13 +2,18 @@
 //! thumbnail renderer will draw. One copper layer at a time (tracks, track
 //! arcs, vias, pads and stored zone fills, holes left open), the holes
 //! drilled through that layer (drawn last, in the page colour, so a track
-//! ending in a via does not fill the hole back in), and the
-//! outline as the strokes of `Edge.Cuts`.
+//! ending in a via does not fill the hole back in), the outline as the
+//! strokes of `Edge.Cuts`, the graphics of any other layer (a silkscreen's
+//! lines and filled shapes), and the text of a layer in Newstroke
+//! ([`crate::font`]), a knockout as its box with the glyphs cut out.
 //!
 //! Everything is computed in f64 and handed to lyon in f32 at the last
 //! step; positions in the [`Mesh`] are millimetres in the file's frame,
 //! y down, as the model has them.
 
+use i_overlay::core::fill_rule::FillRule as OverlayFill;
+use i_overlay::core::overlay_rule::OverlayRule;
+use i_overlay::float::single::SingleFloatOverlay as _;
 use lyon_tessellation::geometry_builder::{BuffersBuilder, VertexBuffers};
 use lyon_tessellation::math::{Point as LyonPoint, point};
 use lyon_tessellation::path::Path;
@@ -17,10 +22,11 @@ use lyon_tessellation::{
     StrokeTessellator, StrokeVertex,
 };
 
+use crate::font::{self, Placement, TextShape};
 use crate::geometry::{Arc, Bounds, Transform, segments_for};
 use crate::model::{
-    Board, Drawing, Drill, EDGE_CUTS, LayerId, Pad, PadKind, PadShape, Point, Shape, Size, Via,
-    Zone,
+    Board, Drawing, Drill, EDGE_CUTS, LayerId, Pad, PadKind, PadShape, Point, Shape, Size, Text,
+    Via, Zone,
 };
 
 /// Triangles: positions in millimetres, indices in threes.
@@ -206,6 +212,63 @@ impl Tessellator {
             .filter_map(|drawing| graphic_bounds(&drawing, self.tolerance))
             .reduce(Bounds::union)
     }
+
+    /// The graphics on `layer`, the board's and the footprints' (in their
+    /// frames): a filled closed shape as its fill, everything else as a
+    /// stroke of its width (at least 0.05 mm) with round ends.
+    #[must_use]
+    pub fn graphics(&self, board: &Board, layer: LayerId) -> Mesh {
+        let mut builder = MeshBuilder::new(self.tolerance);
+        for drawing in layer_drawings(board, layer) {
+            let (points, closed) = outline_points(&drawing, self.tolerance);
+            if drawing.filled && closed {
+                builder.fill(&[points], &[]);
+            } else {
+                let width = drawing.width.max(MIN_OUTLINE_WIDTH);
+                builder.stroke(&points, width, closed);
+            }
+        }
+        builder.finish()
+    }
+
+    /// The text on `layer` in Newstroke: every visible board text and
+    /// footprint text (its variables resolved, placed in the footprint's
+    /// frame, kept upright when the footprint asks), stroked at its pen
+    /// width with round ends. A knockout text is its box with the glyphs
+    /// cut out.
+    #[must_use]
+    pub fn text(&self, board: &Board, layer: LayerId) -> Mesh {
+        let mut builder = MeshBuilder::new(self.tolerance);
+        for text in board.texts.iter().filter(|t| t.layer == layer) {
+            builder.text(&text.text, text, &Transform::identity(), false);
+        }
+        for footprint in &board.footprints {
+            let frame = Transform::new(footprint.at, footprint.rotation);
+            for text in footprint.texts.iter().filter(|t| t.layer == layer) {
+                builder.text(&footprint.resolve_text(text), text, &frame, true);
+            }
+        }
+        builder.finish()
+    }
+}
+
+/// Every drawing on `layer`: the board's own as written, a footprint's
+/// carried into the board's frame.
+fn layer_drawings(board: &Board, layer: LayerId) -> impl Iterator<Item = Drawing> + '_ {
+    let own = board
+        .graphics
+        .iter()
+        .filter(move |graphic| graphic.layer == layer)
+        .map(|graphic| graphic.drawing.clone());
+    let placed = board.footprints.iter().flat_map(move |footprint| {
+        let frame = Transform::new(footprint.at, footprint.rotation);
+        footprint
+            .graphics
+            .iter()
+            .filter(move |graphic| graphic.layer == layer)
+            .map(move |graphic| transformed(&graphic.drawing, &frame))
+    });
+    own.chain(placed)
 }
 
 /// Every `Edge.Cuts` drawing on the board: the board's own as written,
@@ -454,6 +517,32 @@ fn rounded_rect(size: Size, radius: f64, tolerance: f64) -> Vec<Point> {
     points
 }
 
+/// The outline of a round-ended stroke from `a` to `b` of `width`: a
+/// stadium, as a polygon in increasing angle. Two coincident ends give
+/// the disc.
+fn stadium(a: Point, b: Point, width: f64, tolerance: f64) -> Vec<Point> {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let length = dx.hypot(dy);
+    let mid = Point {
+        x: f64::midpoint(a.x, b.x),
+        y: f64::midpoint(a.y, b.y),
+    };
+    // `Transform` turns by minus its angle in the file's frame, so the
+    // segment's own angle goes in negated.
+    let along = Transform::new(mid, -dy.atan2(dx).to_degrees());
+    rounded_rect(
+        Size {
+            width: length + width,
+            height: width,
+        },
+        width / 2.0,
+        tolerance,
+    )
+    .into_iter()
+    .map(|p| along.apply(p))
+    .collect()
+}
+
 /// Whether two points coincide to within a picometre: a generator's
 /// repeated corner, never two distinct points of a board.
 fn same_point(a: Point, b: Point) -> bool {
@@ -651,6 +740,94 @@ impl MeshBuilder {
         for fill in zone.fills.iter().filter(|fill| fill.layer == layer) {
             let polygon: Vec<Point> = fill.points.iter().map(|&p| frame.apply(p)).collect();
             self.fill(&[polygon], &[]);
+        }
+    }
+
+    /// A text item reading `content`, anchored in `frame` (a footprint's,
+    /// or the identity for a board text). Nothing for a hidden or empty
+    /// text.
+    fn text(&mut self, content: &str, text: &Text, frame: &Transform, in_footprint: bool) {
+        if text.hidden || content.is_empty() {
+            return;
+        }
+        let placement = Placement {
+            size: text.font.size,
+            pen: font::pen_width(&text.font),
+            italic: text.font.italic,
+            justify: text.justify,
+            position: frame.apply(text.at),
+            angle: font::draw_angle(text.rotation, in_footprint && text.upright),
+        };
+        let shape = font::shape(content, &placement);
+        if text.knockout {
+            self.knockout(&shape);
+        } else {
+            self.strokes(&shape);
+        }
+    }
+
+    /// The strokes of a laid-out text; a stroke of one point is a dot.
+    fn strokes(&mut self, shape: &TextShape) {
+        for stroke in &shape.strokes {
+            match stroke.as_slice() {
+                [] => {}
+                [dot] => {
+                    let disc = circle(*dot, shape.pen / 2.0, self.tolerance);
+                    self.fill(&[disc], &[]);
+                }
+                _ => self.stroke(stroke, shape.pen, false),
+            }
+        }
+    }
+
+    /// A knockout: the text's box less the union of its strokes, each
+    /// stroke the stadiums of its segments. The union is a boolean
+    /// difference, not a fill rule: strokes overlap where glyphs cross
+    /// and join, and any winding count would fill those overlaps back in.
+    fn knockout(&mut self, shape: &TextShape) {
+        let Some(corners) = shape.knockout_box else {
+            return;
+        };
+        let to_pair = |p: Point| [p.x, p.y];
+        let subject: Vec<Vec<[f64; 2]>> = vec![corners.iter().copied().map(to_pair).collect()];
+        let mut clip: Vec<Vec<[f64; 2]>> = Vec::new();
+        for stroke in &shape.strokes {
+            match stroke.as_slice() {
+                [] => {}
+                [dot] => clip.push(
+                    circle(*dot, shape.pen / 2.0, self.tolerance)
+                        .into_iter()
+                        .map(to_pair)
+                        .collect(),
+                ),
+                points => {
+                    for pair in points.windows(2) {
+                        let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
+                            continue;
+                        };
+                        clip.push(
+                            stadium(*a, *b, shape.pen, self.tolerance)
+                                .into_iter()
+                                .map(to_pair)
+                                .collect(),
+                        );
+                    }
+                }
+            }
+        }
+        let shapes = subject.overlay(&clip, OverlayRule::Difference, OverlayFill::NonZero);
+        for polygons in shapes {
+            let mut contours = polygons.into_iter().map(|contour| {
+                contour
+                    .into_iter()
+                    .map(|[x, y]| Point { x, y })
+                    .collect::<Vec<Point>>()
+            });
+            let Some(outer) = contours.next() else {
+                continue;
+            };
+            let holes: Vec<Vec<Point>> = contours.collect();
+            self.fill(&[outer], &holes);
         }
     }
 

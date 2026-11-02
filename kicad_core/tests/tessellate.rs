@@ -6,6 +6,7 @@
 
 use std::sync::OnceLock;
 
+use kicad_core::font;
 use kicad_core::geometry::Bounds;
 use kicad_core::model::{Board, Point};
 use kicad_core::parse_board;
@@ -29,15 +30,26 @@ fn hand_off_board() -> &'static Board {
     })
 }
 
-/// A board with four copper layers and an outline layer, holding `items`.
+/// A board with four copper layers, an outline layer and a front
+/// silkscreen, holding `items`.
 fn board(items: &str) -> Board {
     let source = format!(
         r#"(kicad_pcb (version 20241229) (generator "pcbnew")
-  (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
+  (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user) (37 "F.SilkS" user "F.Silkscreen"))
   {items}
 )"#
     );
     parse_board(&source).expect("the test board parses")
+}
+
+fn silk_text(board: &Board) -> Mesh {
+    let layer = board.layer_named("F.SilkS").expect("F.SilkS");
+    Tessellator::new(TOLERANCE).text(board, layer)
+}
+
+fn silk_graphics(board: &Board) -> Mesh {
+    let layer = board.layer_named("F.SilkS").expect("F.SilkS");
+    Tessellator::new(TOLERANCE).graphics(board, layer)
 }
 
 fn f_cu(board: &Board) -> Mesh {
@@ -462,6 +474,205 @@ fn a_board_without_an_outline_has_no_outline_bounds() {
     let board =
         board(r#"(segment (start 10 20) (end 14 20) (width 0.5) (layer "F.Cu") (net "GND"))"#);
     assert_eq!(Tessellator::new(TOLERANCE).outline_bounds(&board), None);
+}
+
+/// The area of a round-ended stroke of `length` and `width`.
+fn stroke_area(length: f64, width: f64) -> f64 {
+    length * width + PI * (width / 2.0) * (width / 2.0)
+}
+
+#[test]
+fn a_text_is_its_glyph_strokes_at_the_pen_width() {
+    // I is one stroke, 21/21 of the size tall, 5/21 in from the left
+    // bearing. Left and bottom justified: KiCad's anchor sits the block
+    // (1.17 heights) above the position, a stroke-width fudge aside.
+    let board = board(
+        r#"(gr_text "I" (at 10 20 0) (layer "F.SilkS")
+             (effects (font (size 1 1) (thickness 0.15)) (justify left bottom)))"#,
+    );
+    let mesh = silk_text(&board);
+    assert_close(mesh.area(), stroke_area(1.0, 0.15), 0.01, "one stem");
+    let stem_x = 10.0 + 0.15 / 1.52 + 5.0 / 21.0;
+    let baseline = 20.0 + 1.0 - 0.15 * 0.052 - 1.17;
+    assert_bounds(
+        &mesh,
+        (stem_x - 0.075, baseline - 20.0 / 21.0 - 0.075),
+        (stem_x + 0.075, baseline + 1.0 / 21.0 + 0.075),
+        TOLERANCE * 2.0,
+    );
+}
+
+#[test]
+fn a_hidden_text_and_a_text_on_another_layer_draw_nothing() {
+    let board = board(
+        r#"(gr_text "I" (at 10 20 0) (layer "F.Cu") (effects (font (size 1 1) (thickness 0.15))))
+           (footprint "X" (layer "F.Cu") (at 0 0)
+             (property "Datasheet" "I" (at 0 0 0) (hide yes) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15)))))"#,
+    );
+    assert!(silk_text(&board).is_empty());
+}
+
+#[test]
+fn a_knockout_text_is_a_box_with_the_glyph_cut_out() {
+    let board = board(
+        r#"(gr_text "I" (at 10 20 0) (layer "F.SilkS" knockout)
+             (effects (font (size 1 1) (thickness 0.15)) (justify left bottom)))"#,
+    );
+    let mesh = silk_text(&board);
+    // The box grows from the stem by half the pen plus the margin (a
+    // ninth of the height, which beats half the pen).
+    let grow = 0.075 + 1.0 / 9.0;
+    let box_area = (2.0 * grow) * (1.0 + 2.0 * grow);
+    assert_close(
+        mesh.area(),
+        box_area - stroke_area(1.0, 0.15),
+        0.01,
+        "the box less the stem",
+    );
+    let stem_x = 10.0 + 0.15 / 1.52 + 5.0 / 21.0;
+    let baseline = 20.0 + 1.0 - 0.15 * 0.052 - 1.17;
+    let mid_y = baseline - 0.5;
+    assert!(
+        !mesh.covers(Point {
+            x: stem_x,
+            y: mid_y
+        }),
+        "the stem is cut out"
+    );
+    assert!(
+        mesh.covers(Point {
+            x: stem_x + 0.075 + 0.05,
+            y: mid_y
+        }),
+        "the box beside the stem is filled"
+    );
+    assert_bounds(
+        &mesh,
+        (stem_x - grow, baseline - 20.0 / 21.0 - grow),
+        (stem_x + grow, baseline + 1.0 / 21.0 + grow),
+        TOLERANCE * 2.0,
+    );
+}
+
+#[test]
+fn a_footprint_text_sits_in_its_frame_and_reads_upright() {
+    // The footprint at (100, 100) turned 90 degrees puts a text at (5, 0)
+    // in its frame at (100, 95). The text's own angle is absolute, 270,
+    // which the upright rule folds to 90: the stem of I lies along x,
+    // centred on the position (I's stem is 5/21 in, half its advance).
+    let upright = board(
+        r#"(footprint "X" (layer "F.Cu") (at 100 100 90)
+             (property "Reference" "I" (at 5 0 270) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15)))))"#,
+    );
+    let mesh = silk_text(&upright);
+    let baseline_offset = 1.0 - 0.15 * 0.052 - 1.17 / 2.0;
+    let (top, bottom) = (baseline_offset - 20.0 / 21.0, baseline_offset + 1.0 / 21.0);
+    // Turned 90 degrees counter-clockwise on the screen: what was down
+    // (bottom, positive y) is now right (positive x).
+    assert_bounds(
+        &mesh,
+        (100.0 + top - 0.075, 95.0 - 0.075),
+        (100.0 + bottom + 0.075, 95.0 + 0.075),
+        TOLERANCE * 2.0,
+    );
+    // Unlocked, the text keeps its 270 degrees: up on the screen is now
+    // right, so the stem lies the other way round.
+    let unlocked = board(
+        r#"(footprint "X" (layer "F.Cu") (at 100 100 90)
+             (property "Reference" "I" (at 5 0 270) (unlocked yes) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15)))))"#,
+    );
+    assert_bounds(
+        &silk_text(&unlocked),
+        (100.0 - bottom - 0.075, 95.0 - 0.075),
+        (100.0 - top + 0.075, 95.0 + 0.075),
+        TOLERANCE * 2.0,
+    );
+}
+
+#[test]
+fn a_reference_placeholder_draws_the_reference() {
+    let board = board(
+        r#"(footprint "X" (layer "F.Cu") (at 0 0)
+             (property "Reference" "II" (at 0 0 0) (layer "F.SilkS") (hide yes) (effects (font (size 1 1) (thickness 0.15))))
+             (fp_text user "${REFERENCE}" (at 0 0 0) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15)))))"#,
+    );
+    // Two stems, not the strokes of the twelve characters written.
+    assert_close(
+        silk_text(&board).area(),
+        2.0 * stroke_area(1.0, 0.15),
+        0.01,
+        "II",
+    );
+}
+
+#[test]
+fn silkscreen_graphics_are_strokes_and_fills_in_the_footprint_frame() {
+    let board = board(
+        r#"(gr_rect (start 0 0) (end 2 1) (stroke (width 0) (type default)) (fill yes) (layer "F.SilkS"))
+           (footprint "X" (layer "F.Cu") (at 10 10 90)
+             (fp_line (start 0 0) (end 4 0) (stroke (width 0.12) (type default)) (layer "F.SilkS")))"#,
+    );
+    let mesh = silk_graphics(&board);
+    assert_close(
+        mesh.area(),
+        2.0 + stroke_area(4.0, 0.12),
+        0.01,
+        "a fill and a line",
+    );
+    assert!(
+        mesh.covers(Point { x: 1.0, y: 0.5 }),
+        "the filled rectangle"
+    );
+    // The line runs from (10, 10) up the screen to (10, 6) in the turned frame.
+    assert!(mesh.covers(Point { x: 10.0, y: 8.0 }), "the line");
+}
+
+#[test]
+fn the_hand_off_silkscreen_text_follows_kicad_anchors() {
+    let board = hand_off_board();
+    let layer = board.layer_named("F.SilkS").expect("F.SilkS");
+    let tessellator = Tessellator::new(TOLERANCE);
+    let outline = tessellator.outline_bounds(board).expect("an outline");
+    let mesh = tessellator.text(board, layer);
+    let bounds = mesh.bounds().expect("silkscreen text");
+    assert!(
+        bounds.min.x >= outline.min.x && bounds.max.x <= outline.max.x,
+        "text {bounds:?} inside {outline:?}"
+    );
+    // "3V3" at (82.98, 78.66), left and bottom justified, 1 mm, pen 0.15:
+    // KiCad's render cache of the same item (drawn in Consolas) has its
+    // glyphs' bottoms at 78.50, the 1.17-height block rule; in the stroke
+    // font the baseline is a fudge higher and the glyphs' lowest points
+    // (no descenders in "3V3") sit 1/21 below it.
+    let text = board
+        .texts
+        .iter()
+        .find(|text| text.text == "3V3")
+        .expect("the 3V3 label");
+    let shape = font::shape(
+        &text.text,
+        &font::Placement {
+            size: text.font.size,
+            pen: font::pen_width(&text.font),
+            italic: false,
+            justify: text.justify,
+            position: text.at,
+            angle: text.rotation,
+        },
+    );
+    let points: Vec<Point> = shape.strokes.iter().flatten().copied().collect();
+    let lowest = points.iter().map(|p| p.y).fold(f64::MIN, f64::max);
+    let leftmost = points.iter().map(|p| p.x).fold(f64::MAX, f64::min);
+    assert_close(
+        lowest,
+        78.66 - 0.17 - 0.15 * 0.052 + 1.0 / 21.0,
+        1e-6,
+        "the bottom of 3V3",
+    );
+    assert!(
+        (82.98 + 0.15 / 1.52..82.98 + 0.5).contains(&leftmost),
+        "3V3 starts just right of its anchor: {leftmost}"
+    );
 }
 
 #[test]

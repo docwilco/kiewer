@@ -463,10 +463,15 @@ impl Parser {
     /// A text item: `text` is its content (already read, since `gr_text`,
     /// `fp_text` and `property` keep it at different positions).
     fn text(&self, node: &Node, text: &str, role: TextRole) -> Result<Text> {
-        let (at, rotation) = at(node.require("at")?)?;
+        let at_node = node.require("at")?;
+        let (at, rotation) = at(at_node)?;
         let layer_node = node.require("layer")?;
         let layer = self.layer(layer_node)?;
         let hidden = node.has_flag("hide") || flag(node, "hide");
+        // `(unlocked yes)`, or the word in the `at` of a KiCad 7 file
+        // (after the angle when there is one), frees the text from the
+        // upright rule.
+        let upright = !(flag(node, "unlocked") || at_node.has_flag("unlocked"));
         let mut font = Font {
             face: None,
             size: Size {
@@ -510,6 +515,7 @@ impl Parser {
             layer,
             knockout: layer_node.has_flag("knockout"),
             hidden,
+            upright,
             font,
             justify,
         })

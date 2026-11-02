@@ -264,6 +264,12 @@ pub struct Text {
     pub knockout: bool,
     /// Not shown.
     pub hidden: bool,
+    /// Kept readable: a footprint's text with this set draws at its
+    /// rotation folded into (-90, 90], so it reads from the left or from
+    /// below whatever way the footprint turns. KiCad's default; the file
+    /// writes `(unlocked yes)` to turn it off. Board-level text ignores
+    /// it.
+    pub upright: bool,
     /// The font.
     pub font: Font,
     /// The anchoring.
@@ -400,6 +406,37 @@ pub struct Footprint {
 }
 
 impl Footprint {
+    /// `text`'s content with the footprint's variables expanded:
+    /// `${REFERENCE}`, `${VALUE}` and `${<property name>}` become the
+    /// property's value; a variable the footprint does not define stays
+    /// as written.
+    #[must_use]
+    pub fn resolve_text(&self, text: &Text) -> String {
+        let mut out = String::new();
+        let mut rest = text.text.as_str();
+        while let Some(start) = rest.find("${") {
+            let (before, from_var) = rest.split_at(start);
+            out.push_str(before);
+            let Some(end) = from_var.find('}') else {
+                out.push_str(from_var);
+                return out;
+            };
+            let name = from_var.get(2..end).unwrap_or_default();
+            let value = match name {
+                "REFERENCE" => self.reference(),
+                "VALUE" => self.value(),
+                other => self.property(other),
+            };
+            match value {
+                Some(value) => out.push_str(value),
+                None => out.push_str(from_var.get(..=end).unwrap_or_default()),
+            }
+            rest = from_var.get(end + 1..).unwrap_or_default();
+        }
+        out.push_str(rest);
+        out
+    }
+
     /// The value of the property named `name`, when present.
     #[must_use]
     pub fn property(&self, name: &str) -> Option<&str> {
