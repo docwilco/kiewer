@@ -109,7 +109,7 @@ struct Paint {
 /// The step between one draw's paint and the next in the one uniform
 /// buffer that holds them all: the offset alignment WebGL2 requires,
 /// which the limits name as 256.
-const PAINT_STRIDE: u64 = 256;
+const PAINT_STRIDE: usize = 256;
 
 /// A colour as the page names it (`#2b2b2b`), converted for the target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,8 +363,9 @@ impl Renderer {
     }
 
     /// Draw `draws`, in order, as `view` sees them into `target`, over
-    /// its clear colour. A draw whose range runs past the geometry is
-    /// skipped.
+    /// its clear colour, and the named-face text over them when
+    /// `named_text` (its layer is shown). A draw whose range runs past
+    /// the geometry is skipped.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -372,6 +373,7 @@ impl Renderer {
         target: &Target<'_>,
         view: View,
         draws: &[Draw],
+        named_text: bool,
     ) {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&view));
         self.grow_paints(device, draws.len());
@@ -385,12 +387,22 @@ impl Renderer {
             return;
         };
         let clear = target.clear;
-        for (index, draw) in draws.iter().enumerate() {
-            queue.write_buffer(
-                &paints.buffer,
-                index as u64 * PAINT_STRIDE,
-                bytemuck::bytes_of(&Paint { color: draw.color }),
-            );
+        // Every draw's paint in one write, each at its stride.
+        if !draws.is_empty() {
+            let mut packed = vec![0u8; draws.len() * PAINT_STRIDE];
+            for (chunk, draw) in packed
+                .as_chunks_mut::<PAINT_STRIDE>()
+                .0
+                .iter_mut()
+                .zip(draws)
+            {
+                let paint = Paint { color: draw.color };
+                let bytes = bytemuck::bytes_of(&paint);
+                if let Some(slot) = chunk.get_mut(..bytes.len()) {
+                    slot.copy_from_slice(bytes);
+                }
+            }
+            queue.write_buffer(&paints.buffer, 0, &packed);
         }
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame"),
@@ -429,17 +441,19 @@ impl Renderer {
                         clippy::cast_possible_truncation,
                         reason = "a frame has tens of draws, so the offset is far below 2^32"
                     )]
-                    let offset = (index as u64 * PAINT_STRIDE) as u32;
+                    let offset = (index * PAINT_STRIDE) as u32;
                     pass.set_bind_group(1, &paints.bind_group, &[offset]);
                     pass.draw_indexed(draw.range.clone(), 0, 0..1);
                 }
             }
-            // Named-face text over every layer (#46 puts it in its
-            // layer's slot). The view is bound again: the slices above
-            // bind nothing at group 0 today, and the text pass relies on
-            // it whatever they come to do.
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            self.text.draw(&mut pass);
+            // Named-face text over every layer when its layer is shown
+            // (#46 puts it in its layer's slot). The view is bound again:
+            // the slices above bind nothing at group 0 today, and the
+            // text pass relies on it whatever they come to do.
+            if named_text {
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                self.text.draw(&mut pass);
+            }
         }
         queue.submit(std::iter::once(encoder.finish()));
     }
@@ -455,7 +469,7 @@ impl Renderer {
         {
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("paints"),
-                size: count as u64 * PAINT_STRIDE,
+                size: (count * PAINT_STRIDE) as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -531,10 +545,11 @@ mod tests {
         assert!(limits.max_dynamic_uniform_buffers_per_pipeline_layout >= 1);
         assert!(limits.max_bind_groups >= 2);
         assert_eq!(
-            PAINT_STRIDE % u64::from(limits.min_uniform_buffer_offset_alignment),
+            PAINT_STRIDE
+                % usize::try_from(limits.min_uniform_buffer_offset_alignment).expect("fits"),
             0
         );
-        assert!(PAINT_STRIDE >= std::mem::size_of::<Paint>() as u64);
+        assert!(PAINT_STRIDE >= std::mem::size_of::<Paint>());
     }
 
     #[test]

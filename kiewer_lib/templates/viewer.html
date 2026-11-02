@@ -57,9 +57,9 @@
   <p id="hint">wheel zooms, ctrl+wheel and shift+wheel pan, middle or right drag pans, + and - zoom, Home fits</p>
   <p id="zoom"></p>
   <div id="layers" hidden>
+    <p id="warning" hidden></p>
     <details>
       <summary>Layers</summary>
-      <p id="warning" hidden></p>
       <div id="layer-list"></div>
     </details>
   </div>
@@ -568,6 +568,9 @@ const viewSelect = document.getElementById("view");
 const warningBox = document.getElementById("warning");
 let layersViewer = null;
 let scheduleFrame = null;
+// Where each layer's slider was last left, by key: a layer ticked off
+// and on again comes back at it (the fragment carries only `off`).
+const lastOpacity = new Map();
 
 function syncFragment() {
   const fragment = "#" + layersViewer.fragment();
@@ -601,9 +604,11 @@ function buildLayers() {
     opacity.min = "0";
     opacity.max = "1";
     opacity.step = "0.01";
-    opacity.value = String(layersViewer.layer_opacity(key));
+    const remembered = !shown.checked && lastOpacity.has(key);
+    opacity.value = String(remembered ? lastOpacity.get(key) : layersViewer.layer_opacity(key));
     opacity.title = "opacity";
     const apply = function () {
+      lastOpacity.set(key, Number(opacity.value));
       layersViewer.set_layer(key, shown.checked, Number(opacity.value));
       syncFragment();
       scheduleFrame();

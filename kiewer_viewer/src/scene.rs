@@ -10,11 +10,11 @@
 use std::ops::Range;
 
 use kicad_core::geometry::Bounds;
-use kicad_core::model::{Board, LayerId, Point};
+use kicad_core::model::{Board, Point};
 use kicad_core::tessellate::{Mesh, Tessellator};
 
 use crate::render::{Draw, Rgb, Vertex};
-use crate::view::{Layer, Side, Stack, ViewState, palette};
+use crate::view::{Layer, Side, Stack, View, ViewState, palette};
 
 /// How far a flattened curve may sit from the true one, in millimetres:
 /// a micrometre, a tenth of a pixel at the thousandfold zoom the tracer
@@ -59,6 +59,9 @@ pub struct Scene {
     pub slices: Vec<Slice>,
     /// The board's copper, which names the views.
     pub stack: Stack,
+    /// The stack's views ([`Stack::views`]), built once; a state's
+    /// `view` numbers them from 1.
+    pub views: Vec<View>,
     /// How many zones are drawn hatched for want of a stored fill.
     pub unfilled_zones: usize,
 }
@@ -86,52 +89,63 @@ impl Scene {
             vertices: Vec::new(),
             indices: Vec::new(),
             slices: Vec::new(),
+            views: stack.views(),
             stack: stack.clone(),
             unfilled_zones: board.unfilled_zones(),
         };
-        let named = |name: &str| board.layer_named(name);
         for layer in stack.order(Side::Front) {
-            match &layer {
-                Layer::Board => scene.add(&layer, Paint::Layer, &tessellator.board_fill(board)),
-                Layer::Outline => scene.add(&layer, Paint::Layer, &tessellator.outline(board)),
-                Layer::Copper(name) => {
-                    if let Some(id) = named(name) {
-                        scene.add(&layer, Paint::Layer, &tessellator.copper(board, id));
-                        // After the copper, in the page colour: a track
-                        // ending in a via covers the hole the via's ring
-                        // left open, and the hole must win.
-                        scene.add(&layer, Paint::Page, &tessellator.holes(board, id));
-                    }
+            // A KiCad layer's key is its canonical name in the board's
+            // table; a board without the layer gets no slice for it.
+            let id = board.layer_named(&layer.to_string());
+            match (&layer, id) {
+                (Layer::Board, _) => {
+                    scene.add(&layer, Paint::Layer, &tessellator.board_fill(board));
                 }
-                Layer::Mask(side) => {
-                    if let Some(id) = kicad_layer(board, *side, "Mask") {
-                        scene.add(&layer, Paint::Layer, &tessellator.mask(board, id));
-                    }
+                (Layer::Outline, _) => {
+                    scene.add(&layer, Paint::Layer, &tessellator.outline(board));
                 }
-                Layer::Paste(side) => {
-                    if let Some(id) = kicad_layer(board, *side, "Paste") {
-                        scene.add(&layer, Paint::Layer, &tessellator.paste(board, id));
-                    }
-                }
-                Layer::Silk(side) => {
-                    if let Some(id) = kicad_layer(board, *side, "SilkS") {
-                        let mut silk = tessellator.graphics(board, id);
-                        silk.append(&tessellator.text(board, id));
-                        scene.add(&layer, Paint::Layer, &silk);
-                    }
-                }
-                Layer::Courtyard(side) => {
-                    if let Some(id) = kicad_layer(board, *side, "CrtYd") {
-                        scene.add(&layer, Paint::Layer, &tessellator.graphics(board, id));
-                    }
-                }
-                Layer::Holes => {
+                (Layer::Holes, _) => {
                     scene.add(&layer, Paint::Page, &tessellator.all_holes(board));
                     scene.add(&layer, Paint::Layer, &tessellator.rims(board));
                 }
+                (Layer::Copper(_), Some(id)) => {
+                    scene.add(&layer, Paint::Layer, &tessellator.copper(board, id));
+                    // After the copper, in the page colour: a track
+                    // ending in a via covers the hole the via's ring
+                    // left open, and the hole must win.
+                    scene.add(&layer, Paint::Page, &tessellator.holes(board, id));
+                }
+                (Layer::Mask(_), Some(id)) => {
+                    scene.add(&layer, Paint::Layer, &tessellator.mask(board, id));
+                }
+                (Layer::Paste(_), Some(id)) => {
+                    scene.add(&layer, Paint::Layer, &tessellator.paste(board, id));
+                }
+                (Layer::Silk(_), Some(id)) => {
+                    let mut silk = tessellator.graphics(board, id);
+                    silk.append(&tessellator.text(board, id));
+                    scene.add(&layer, Paint::Layer, &silk);
+                }
+                (Layer::Courtyard(_), Some(id)) => {
+                    scene.add(&layer, Paint::Layer, &tessellator.graphics(board, id));
+                }
+                (
+                    Layer::Copper(_)
+                    | Layer::Mask(_)
+                    | Layer::Paste(_)
+                    | Layer::Silk(_)
+                    | Layer::Courtyard(_),
+                    None,
+                ) => {}
             }
         }
         Some(scene)
+    }
+
+    /// The view `state` names, when the board has it.
+    #[must_use]
+    pub fn view(&self, state: &ViewState) -> Option<&View> {
+        self.views.get(state.view.checked_sub(1)?)
     }
 
     /// Append `mesh` as a slice of `layer` in `paint`, positions made
@@ -161,8 +175,7 @@ impl Scene {
     /// target of `format` with the layer's opacity as alpha.
     #[must_use]
     pub fn draw_list(&self, state: &ViewState, format: wgpu::TextureFormat) -> Vec<Draw> {
-        let views = self.stack.views();
-        let Some(view) = state.view.checked_sub(1).and_then(|index| views.get(index)) else {
+        let Some(view) = self.view(state) else {
             return Vec::new();
         };
         let mut draws = Vec::new();
@@ -185,15 +198,6 @@ impl Scene {
         }
         draws
     }
-}
-
-/// The id of the KiCad layer `<side>.<kind>`, when the board has it.
-fn kicad_layer(board: &Board, side: Side, kind: &str) -> Option<LayerId> {
-    let letter = match side {
-        Side::Front => 'F',
-        Side::Back => 'B',
-    };
-    board.layer_named(&format!("{letter}.{kind}"))
 }
 
 /// `position` (millimetres, f32) relative to `origin`: the difference is

@@ -379,8 +379,8 @@ impl Clearances {
         }
     }
 
-    /// How far the mask opening of a pad of `size` sits past its edge: the
-    /// margin, 0 when none is set.
+    /// How far a pad's mask opening sits past its edge: the margin, 0
+    /// when none is set.
     #[must_use]
     pub fn mask_expansion(self) -> f64 {
         self.solder_mask_margin.unwrap_or(0.0)
@@ -605,9 +605,10 @@ pub struct Zone {
 }
 
 impl Zone {
-    /// Whether the zone is copper on `layer` with no stored fill there: a
-    /// zone saved before its fill was computed, or unfilled on purpose.
-    /// A keepout is never unfilled; it is not copper.
+    /// Whether the zone is on `layer` with no stored fill there: a zone
+    /// saved before its fill was computed, or unfilled on purpose. A
+    /// keepout is never unfilled; it is not copper. Whether `layer` is
+    /// copper is the caller's question ([`Board::unfilled_zones`] asks it).
     #[must_use]
     pub fn is_unfilled_on(&self, layer: LayerId) -> bool {
         !self.keepout
@@ -719,8 +720,13 @@ impl Board {
     /// and says so.
     #[must_use]
     pub fn unfilled_zones(&self) -> usize {
+        let copper = |id: LayerId| self.layer(id).is_some_and(Layer::is_copper);
         self.all_zones()
-            .filter(|zone| zone.layers.iter().any(|&layer| zone.is_unfilled_on(layer)))
+            .filter(|zone| {
+                zone.layers
+                    .iter()
+                    .any(|&layer| copper(layer) && zone.is_unfilled_on(layer))
+            })
             .count()
     }
 

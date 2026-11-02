@@ -136,10 +136,11 @@ pub const JOIN_TOLERANCE: f64 = 0.01;
 /// where no pad is drawn.
 pub const HOLE_RIM: f64 = 0.1;
 
-/// The hatch an unfilled zone draws across its outline: lines this far
-/// apart (measured across them), at 45 degrees, this wide; the outline
-/// itself is stroked at the same width.
+/// How far apart, measured across them, the 45-degree lines of an
+/// unfilled zone's hatch are, in millimetres.
 pub const HATCH_PITCH: f64 = 1.0;
+/// How wide each hatch line is, in millimetres; the zone's outline is
+/// stroked at the same width.
 pub const HATCH_WIDTH: f64 = 0.1;
 
 /// Turns board items into a [`Mesh`] at one tolerance: how far a chord
@@ -494,25 +495,38 @@ fn wound(polygon: &[Point], positive: bool) -> Vec<[f64; 2]> {
 }
 
 /// The polygons a drawing covers, for a boolean: a filled closed shape is
-/// its outline, anything else the stadium of each stroked segment at the
-/// drawing's width (at least [`MIN_OUTLINE_WIDTH`]).
+/// its outline plus its stroke when it has a width (KiCad draws both),
+/// anything else the stadium of each stroked segment at the drawing's
+/// width (at least [`MIN_OUTLINE_WIDTH`]).
 fn drawing_polygons(drawing: &Drawing, tolerance: f64) -> Vec<Vec<Point>> {
     let (points, closed) = outline_points(drawing, tolerance);
-    if drawing.filled && closed {
+    let filled = drawing.filled && closed;
+    if filled && drawing.width <= 0.0 {
         return vec![points];
     }
     let width = drawing.width.max(MIN_OUTLINE_WIDTH);
-    let mut polygons: Vec<Vec<Point>> = points
-        .windows(2)
-        .filter_map(|pair| match pair {
-            [a, b] => Some(stadium(*a, *b, width, tolerance)),
-            _ => None,
-        })
-        .collect();
+    let mut polygons: Vec<Vec<Point>> = filled.then(|| points.clone()).into_iter().collect();
+    polygons.extend(points.windows(2).filter_map(|pair| match pair {
+        [a, b] => Some(stadium(*a, *b, width, tolerance)),
+        _ => None,
+    }));
     if closed && let (Some(&last), Some(&first)) = (points.last(), points.first()) {
         polygons.push(stadium(last, first, width, tolerance));
     }
     polygons
+}
+
+/// `size` grown by `grow` on every side, and `radius` with it: the one
+/// rule a pad's outline, its mask opening, its paste and its hole's rim
+/// share. KiCad rounds a grown corner by the growth.
+fn grown(size: Size, radius: f64, grow: f64) -> (Size, f64) {
+    (
+        Size {
+            width: size.width + 2.0 * grow,
+            height: size.height + 2.0 * grow,
+        },
+        radius + grow,
+    )
 }
 
 /// Every drawing on `layer`: the board's own as written, a footprint's
@@ -948,11 +962,8 @@ impl MeshBuilder {
             PadShape::Rect | PadShape::Trapezoid | PadShape::ChamferedRect => 0.0,
             PadShape::RoundRect => pad.round_radius_ratio.unwrap_or(0.25) * min_side,
         };
-        let grown = Size {
-            width: pad.size.width + 2.0 * grow,
-            height: pad.size.height + 2.0 * grow,
-        };
-        rounded_rect(grown, radius + grow, self.tolerance)
+        let (size, radius) = grown(pad.size, radius, grow);
+        rounded_rect(size, radius, self.tolerance)
             .into_iter()
             .map(|p| shape.apply(p))
             .collect()
@@ -1002,11 +1013,8 @@ impl MeshBuilder {
     fn hole(&self, drill: Drill, shape: &Transform, grow: f64) -> Vec<Point> {
         let min_side = drill.size.width.min(drill.size.height);
         let turned = shape.then(Transform::new(drill.offset, 0.0));
-        let grown = Size {
-            width: drill.size.width + 2.0 * grow,
-            height: drill.size.height + 2.0 * grow,
-        };
-        rounded_rect(grown, min_side / 2.0 + grow, self.tolerance)
+        let (size, radius) = grown(drill.size, min_side / 2.0, grow);
+        rounded_rect(size, radius, self.tolerance)
             .into_iter()
             .map(|p| turned.apply(p))
             .collect()

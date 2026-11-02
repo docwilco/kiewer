@@ -388,7 +388,7 @@ impl Viewer {
     /// view before. A number past the last view is ignored.
     pub fn set_view(&mut self, number: usize) {
         let Some(scene) = &self.scene else { return };
-        if (1..=scene.stack.views().len()).contains(&number) {
+        if (1..=scene.views.len()).contains(&number) {
             self.state = ViewState::new(number);
             self.mirror_for_view();
         }
@@ -416,11 +416,16 @@ impl Viewer {
         self.layer_state(key).is_some()
     }
 
-    /// The opacity the layer `key` names draws at, 0 to 1; 1 for a layer
-    /// that is hidden and has no opacity of its own.
+    /// The opacity the layer `key` names draws at, 0 to 1. For a hidden
+    /// layer, the opacity the view in force gives it, or 1 when the view
+    /// does not show it either: where the slider starts when it is ticked.
     #[must_use]
     pub fn layer_opacity(&self, key: &str) -> f64 {
-        f64::from(self.layer_state(key).unwrap_or(1.0))
+        let opacity = self.layer_state(key).or_else(|| {
+            let layer = Layer::parse(key)?;
+            self.current_view()?.layers.get(&layer).copied()
+        });
+        f64::from(opacity.unwrap_or(1.0))
     }
 
     /// The colour the layer `key` names draws in under the view in force,
@@ -442,7 +447,7 @@ impl Viewer {
         let Some(layer) = Layer::parse(key) else {
             return;
         };
-        let Some(view) = self.current_view() else {
+        let Some(view) = self.current_view().cloned() else {
             return;
         };
         #[expect(
@@ -465,11 +470,7 @@ impl Viewer {
     /// lists. Nothing before a board.
     pub fn apply_fragment(&mut self, fragment: &str) {
         let Some(scene) = &self.scene else { return };
-        self.state = ViewState::from_fragment(
-            fragment,
-            scene.stack.default_view(),
-            scene.stack.views().len(),
-        );
+        self.state = ViewState::from_fragment(fragment, &scene.stack);
         self.mirror_for_view();
     }
 
@@ -488,32 +489,38 @@ impl Viewer {
             && scene.unfilled_zones > 0
         {
             let zones = if scene.unfilled_zones == 1 {
-                "1 zone has".to_owned()
+                "1 zone has no stored fill and is drawn hatched".to_owned()
             } else {
-                format!("{} zones have", scene.unfilled_zones)
+                format!(
+                    "{} zones have no stored fill and are drawn hatched",
+                    scene.unfilled_zones
+                )
             };
             warnings.push(format!(
-                "{zones} no stored fill and is drawn hatched: fill the zones in KiCad and save the board"
+                "{zones}: fill the zones in KiCad and save the board"
             ));
         }
         warnings
     }
 
     /// The view the state names, for the loaded board.
-    fn current_view(&self) -> Option<View> {
-        let scene = self.scene.as_ref()?;
-        scene
-            .stack
-            .views()
-            .into_iter()
-            .nth(self.state.view.checked_sub(1)?)
+    fn current_view(&self) -> Option<&View> {
+        self.scene.as_ref()?.view(&self.state)
     }
 
     /// The opacity of the layer `key` names, or `None` when hidden or
     /// unknown.
     fn layer_state(&self, key: &str) -> Option<f32> {
         let layer = Layer::parse(key)?;
-        self.state.opacity(&self.current_view()?, &layer)
+        self.state.opacity(self.current_view()?, &layer)
+    }
+
+    /// Whether the named-face text, which the atlas draws over every
+    /// layer, belongs in the frame: its layer, the front silkscreen, is
+    /// shown. Its opacity is the follow-up issue-10 files.
+    fn named_text_shown(&self) -> bool {
+        self.layer_state(&Layer::Silk(Side::Front).to_string())
+            .is_some()
     }
 
     /// Mirror the camera as the view in force asks.
@@ -642,6 +649,7 @@ impl Viewer {
             },
             self.camera.view(origin),
             &draws,
+            self.named_text_shown(),
         );
         self.queue.present(frame);
         Ok(())

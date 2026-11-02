@@ -249,7 +249,7 @@ impl Stack {
                 title,
                 top: side.unwrap_or(Side::Front),
                 mirrored: false,
-                realistic: false,
+                as_built: false,
                 layers: layers.into_iter().collect(),
             });
         }
@@ -271,7 +271,7 @@ impl Stack {
                 ),
                 top: side,
                 mirrored,
-                realistic: true,
+                as_built: true,
                 layers: layers.into_iter().collect(),
             });
         }
@@ -293,7 +293,7 @@ impl Stack {
                 title: format!("{t}.Cu + {f}.Cu + {t}.SilkS + {f}.SilkS + {t}.CrtYd + {f}.CrtYd"),
                 top,
                 mirrored: false,
-                realistic: false,
+                as_built: false,
                 layers: layers.into_iter().collect(),
             });
         }
@@ -339,7 +339,7 @@ pub struct View {
     pub mirrored: bool,
     /// Copper on the top side drawn as it looks under a mask (copper
     /// colour) rather than in the theme's colour for the layer.
-    pub realistic: bool,
+    pub as_built: bool,
     /// The layers shown and their opacity; a layer not here is hidden.
     pub layers: BTreeMap<Layer, f32>,
 }
@@ -352,7 +352,7 @@ impl View {
             Layer::Board => palette::BOARD,
             Layer::Outline => palette::OUTLINE,
             Layer::Copper(name) => {
-                if self.realistic && layer.side() == Some(self.top) {
+                if self.as_built && layer.side() == Some(self.top) {
                     palette::COPPER
                 } else {
                     stack.copper_theme(name)
@@ -433,14 +433,15 @@ impl ViewState {
         out
     }
 
-    /// The state a fragment names (with or without its `#`) for a stack
-    /// of `view_count` views: the view number when it is in range, else
-    /// `default_view`; every `layer=value` with a layer [`Layer::parse`]
-    /// knows and a value that is `off` or a number, clamped to 0..=1;
-    /// anything else ignored.
+    /// The state a fragment names (with or without its `#`) for `stack`:
+    /// the view number when the stack has it, else the stack's default
+    /// view; every `layer=value` with a layer [`Layer::parse`] knows and
+    /// a value that is `off` or a number, clamped to 0..=1; anything
+    /// else ignored.
     #[must_use]
-    pub fn from_fragment(fragment: &str, default_view: usize, view_count: usize) -> Self {
-        let mut state = Self::new(default_view);
+    pub fn from_fragment(fragment: &str, stack: &Stack) -> Self {
+        let mut state = Self::new(stack.default_view());
+        let view_count = stack.views().len();
         for pair in fragment.trim_start_matches('#').split('&') {
             let Some((key, value)) = pair.split_once('=') else {
                 continue;
@@ -525,7 +526,7 @@ mod tests {
         let views = stack.views();
         let front = &views[4];
         assert_eq!(front.top, Side::Front);
-        assert!(!front.mirrored && front.realistic);
+        assert!(!front.mirrored && front.as_built);
         let shown: Vec<(String, f32)> = front
             .layers
             .iter()
@@ -642,7 +643,7 @@ mod tests {
         // Back to the view's own value: no override.
         state.set(&views[4], Layer::Paste(Side::Front), Some(1.0));
         assert_eq!(state.fragment(), "view=5&F.Cu=0.5&B.Mask=1&F.SilkS=off");
-        let parsed = ViewState::from_fragment(&format!("#{}", state.fragment()), 1, 8);
+        let parsed = ViewState::from_fragment(&format!("#{}", state.fragment()), &four_layers());
         assert_eq!(parsed, state);
         assert_eq!(parsed.opacity(&views[4], &copper("F.Cu")), Some(0.5));
         assert_eq!(parsed.opacity(&views[4], &Layer::Silk(Side::Front)), None);
@@ -659,8 +660,14 @@ mod tests {
     #[test]
     fn a_view_alone_is_a_bare_fragment_and_an_empty_fragment_is_the_default() {
         assert_eq!(ViewState::new(6).fragment(), "view=6");
-        assert_eq!(ViewState::from_fragment("", 5, 8), ViewState::new(5));
-        assert_eq!(ViewState::from_fragment("#", 5, 8), ViewState::new(5));
+        assert_eq!(
+            ViewState::from_fragment("", &four_layers()),
+            ViewState::new(5)
+        );
+        assert_eq!(
+            ViewState::from_fragment("#", &four_layers()),
+            ViewState::new(5)
+        );
     }
 
     #[test_case("view=9", 5; "a view past the last is the default")]
@@ -668,14 +675,15 @@ mod tests {
     #[test_case("view=two", 5; "a view that is not a number is the default")]
     #[test_case("view=3&F.Fab=1&junk&=1", 3; "unknown keys and loose pairs are skipped")]
     fn a_bad_fragment_keeps_what_it_can(fragment: &str, view: usize) {
-        let state = ViewState::from_fragment(fragment, 5, 8);
+        let state = ViewState::from_fragment(fragment, &four_layers());
         assert_eq!(state.view, view);
         assert!(state.overrides.is_empty());
     }
 
     #[test]
     fn an_opacity_is_clamped_and_rounded_to_a_hundredth() {
-        let state = ViewState::from_fragment("view=1&F.Cu=1.7&B.Cu=0.123&In1.Cu=nan", 5, 8);
+        let state =
+            ViewState::from_fragment("view=1&F.Cu=1.7&B.Cu=0.123&In1.Cu=nan", &four_layers());
         assert_eq!(state.overrides.get(&copper("F.Cu")), Some(&Some(1.0)));
         assert_eq!(state.overrides.get(&copper("B.Cu")), Some(&Some(0.12)));
         assert_eq!(state.overrides.get(&copper("In1.Cu")), None);

@@ -786,21 +786,32 @@ fn the_mask_overlay_is_the_board_minus_the_openings_grown_by_the_margin() {
 
 #[test]
 fn a_mask_graphic_and_a_through_hole_pad_open_the_mask_as_well() {
-    // A filled rectangle drawn on F.Mask is an opening; a through-hole pad
-    // on every mask layer opens both sides, with the board's own clearance
-    // from the setup.
+    // A filled rectangle drawn on F.Mask is an opening, its stroke of 0.2
+    // included as KiCad draws it; a through-hole pad on every mask layer
+    // opens both sides, with the board's own clearance from the setup. A
+    // zone on the mask layer without a fill is a graphic, not an unfilled
+    // copper zone.
     let board = board(&format!(
         r#"{RECT_OUTLINE}
            (setup (pad_to_mask_clearance 0.05))
-           (gr_rect (start 1 1) (end 3 3) (stroke (width 0) (type default)) (fill yes) (layer "F.Mask"))
+           (gr_rect (start 1 1) (end 3 3) (stroke (width 0.2) (type default)) (fill yes) (layer "F.Mask"))
+           (zone (layers "F.Mask") (hatch edge 0.5) (polygon (pts (xy 5 1) (xy 7 1) (xy 7 3) (xy 5 3))))
            (footprint "J" (layer "F.Cu") (at 10 5)
              (pad "1" thru_hole circle (at 0 0) (size 2 2) (drill 1) (layers "*.Cu" "*.Mask")))"#
     ));
+    assert_eq!(board.unfilled_zones(), 0, "a mask-layer zone is no copper");
     let tessellator = Tessellator::new(TOLERANCE);
     let front = tessellator.mask(&board, on_layer(&board, "F.Mask"));
     let disc = PI * 1.05 * 1.05;
-    assert_close(front.area(), 200.0 - 4.0 - disc, 2e-3, "front mask area");
+    // The stroked rectangle is 2.2 square with corners rounded to 0.1.
+    let drawn = 2.2 * 2.2 - (4.0 - PI) * 0.1 * 0.1;
+    assert_close(front.area(), 200.0 - drawn - disc, 2e-3, "front mask area");
     assert!(!front.covers(Point { x: 2.0, y: 2.0 }), "the drawn opening");
+    assert!(!front.covers(Point { x: 3.05, y: 2.0 }), "its stroke");
+    assert!(
+        front.covers(Point { x: 6.0, y: 2.0 }),
+        "the zone is no opening"
+    );
     let back = tessellator.mask(&board, on_layer(&board, "B.Mask"));
     assert_close(back.area(), 200.0 - disc, 2e-3, "back mask area");
     assert!(!back.covers(Point { x: 10.0, y: 5.0 }), "the pad's opening");
