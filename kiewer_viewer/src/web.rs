@@ -30,16 +30,19 @@ pub struct Viewer {
     camera: Camera,
     scene: Option<Scene>,
     backend: Backend,
+    fallback: Vec<String>,
 }
 
 /// What the browser gave: the surface on the canvas, the adapter and the
-/// device behind it, and which backend that is.
+/// device behind it, which backend that is, and why it is not WebGPU
+/// when it is not.
 struct Gpu {
     surface: wgpu::Surface<'static>,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     backend: Backend,
+    fallback: Vec<String>,
 }
 
 fn instance(backends: wgpu::Backends) -> wgpu::Instance {
@@ -87,6 +90,7 @@ async fn webgpu(canvas: &HtmlCanvasElement, reasons: &mut Vec<String>) -> Option
         device,
         queue,
         backend: Backend::WebGpu,
+        fallback: Vec::new(),
     })
 }
 
@@ -98,16 +102,19 @@ async fn webgl2(canvas: HtmlCanvasElement, mut reasons: Vec<String>) -> Result<G
     let surface = instance
         .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
         .map_err(|source| Error::Surface { backend, source })?;
-    let adapter = instance
+    let adapter = match instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(&surface),
             ..Default::default()
         })
         .await
-        .map_err(|error| {
+    {
+        Ok(adapter) => adapter,
+        Err(error) => {
             reasons.push(format!("WebGL2: no adapter: {error}"));
-            Error::NoAdapter { reasons }
-        })?;
+            return Err(Error::NoAdapter { reasons });
+        }
+    };
     let (device, queue) = adapter
         .request_device(&device_descriptor())
         .await
@@ -118,6 +125,7 @@ async fn webgl2(canvas: HtmlCanvasElement, mut reasons: Vec<String>) -> Result<G
         device,
         queue,
         backend,
+        fallback: reasons,
     })
 }
 
@@ -141,6 +149,18 @@ impl Viewer {
     ) -> core::result::Result<Viewer, JsError> {
         console_error_panic_hook::set_once();
         let gpu = request_gpu(canvas).await?;
+        // The page shows the backend; why WebGPU was passed over goes to
+        // the console, where a check on a browser that should have it
+        // finds it.
+        if !gpu.fallback.is_empty() {
+            web_sys::console::warn_1(
+                &format!(
+                    "kiewer: WebGL2 after WebGPU failed: {}",
+                    gpu.fallback.join("; ")
+                )
+                .into(),
+            );
+        }
         let mut config = gpu
             .surface
             .get_default_config(&gpu.adapter, width.max(1), height.max(1))
@@ -173,6 +193,7 @@ impl Viewer {
             camera,
             scene: None,
             backend: gpu.backend,
+            fallback: gpu.fallback,
         })
     }
 
@@ -180,6 +201,13 @@ impl Viewer {
     #[must_use]
     pub fn backend(&self) -> String {
         self.backend.to_string()
+    }
+
+    /// Why the backend is not WebGPU, one reason per step that failed,
+    /// joined with `; `; empty on WebGPU.
+    #[must_use]
+    pub fn fallback_reasons(&self) -> String {
+        self.fallback.join("; ")
     }
 
     /// Samples per pixel the frame is drawn with: 4 with multisampling, 1

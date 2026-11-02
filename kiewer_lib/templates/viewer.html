@@ -170,6 +170,8 @@ try {
   viewer = await Viewer.create(canvas, canvas.width, canvas.height);
   const samples = viewer.samples();
   status.textContent = viewer.backend() + (samples > 1 ? ", " + samples + "x msaa" : "");
+  // On WebGL2, hovering the status says why WebGPU was not used.
+  status.title = viewer.fallback_reasons();
   const response = await fetch("{{ board_path }}");
   if (!response.ok) throw new Error("the board: HTTP " + response.status);
   viewer.load_board(await response.text());
