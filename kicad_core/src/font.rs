@@ -380,6 +380,20 @@ fn stroke_cursors(line: &str, size: Size, start: Point) -> Vec<(char, Point)> {
     )
 }
 
+/// Where the pen is at each character of `line` laid out `height` tall
+/// and as wide, from x 0, with the character; ends with `('\0', end)`.
+/// What a label is drawn from, one glyph at a time (`crate::labels`).
+pub(crate) fn glyph_cursors(line: &str, height: f64) -> Vec<(char, f64)> {
+    let size = Size {
+        width: height,
+        height,
+    };
+    stroke_cursors(line, size, Point::default())
+        .into_iter()
+        .map(|(c, cursor)| (c, cursor.x))
+        .collect()
+}
+
 /// The advance of a whole line.
 fn line_width(line: &str, size: Size) -> f64 {
     stroke_cursors(line, size, Point::default())

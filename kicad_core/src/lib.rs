@@ -20,6 +20,7 @@ pub mod board;
 pub mod error;
 pub mod font;
 pub mod geometry;
+pub mod labels;
 pub mod model;
 pub mod schematic;
 pub mod sexpr;
