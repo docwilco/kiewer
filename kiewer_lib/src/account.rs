@@ -59,20 +59,7 @@ impl Handle {
     /// nothing of it survives or what does is reserved.
     #[must_use]
     pub fn suggest(login: &str) -> Option<Self> {
-        let mut text = String::with_capacity(login.len());
-        for ch in login.chars().flat_map(char::to_lowercase) {
-            if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
-                text.push(ch);
-            } else if !text.ends_with('-') {
-                text.push('-');
-            }
-        }
-        let mut text = text.trim_matches('-');
-        if text.len() > Self::MAX_LEN {
-            text = &text[..Self::MAX_LEN];
-            text = text.trim_end_matches('-');
-        }
-        text.parse().ok()
+        slugify(login, Self::MAX_LEN).parse().ok()
     }
 
     /// Why `text` is not a handle, in the words the form shows, or `None`
@@ -98,6 +85,28 @@ impl Handle {
         }
         None
     }
+}
+
+/// `text` as a name made of lowercase letters, digits and hyphens: case
+/// folded, every run of other characters one hyphen, no hyphen at either
+/// end, cut to `max_len` bytes. What a handle is suggested from a login
+/// with and a slug from a design's name (`design::Slug`); empty when
+/// nothing of the text survives.
+pub(crate) fn slugify(text: &str, max_len: usize) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            out.push(ch);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let mut out = out.trim_matches('-');
+    if out.len() > max_len {
+        out = &out[..max_len];
+        out = out.trim_end_matches('-');
+    }
+    out.to_owned()
 }
 
 impl fmt::Display for Handle {

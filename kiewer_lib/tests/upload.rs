@@ -15,7 +15,7 @@ use kiewer_lib::blob::BlobHash;
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::error::Refusal;
 use kiewer_lib::session;
-use kiewer_lib::upload::{self, Author, FileKind, Incoming, Limits, Target};
+use kiewer_lib::upload::{self, Author, Incoming, Limits, Target};
 use kiewer_lib::web::AppState;
 use kiewer_lib::web::blob::IMMUTABLE;
 use kiewer_lib::{Error, Result};
@@ -40,9 +40,8 @@ async fn server(db: PgPool) -> (SocketAddr, TempDir) {
     (http::serve_on_free_port(state).await, dir)
 }
 
-/// A person with a handle and a live session: the browser carries the
-/// cookie as if they had signed in.
-async fn signed_in(db: &PgPool, addr: SocketAddr) -> (http::Browser, AccountId, Handle) {
+/// A person with a handle: the uploader.
+async fn person(db: &PgPool) -> (AccountId, Handle) {
     let signed_in = account::sign_in(
         db,
         Provider::GitHub,
@@ -58,12 +57,17 @@ async fn signed_in(db: &PgPool, addr: SocketAddr) -> (http::Browser, AccountId, 
     account::choose_handle(db, signed_in.account_id, &handle)
         .await
         .expect("choose");
-    let id = session::start(db, signed_in.account_id)
-        .await
-        .expect("a session");
+    (signed_in.account_id, handle)
+}
+
+/// A person with a handle and a live session: the browser carries the
+/// cookie as if they had signed in.
+async fn signed_in(db: &PgPool, addr: SocketAddr) -> (http::Browser, AccountId, Handle) {
+    let (account_id, handle) = person(db).await;
+    let id = session::start(db, account_id).await.expect("a session");
     let mut browser = http::Browser::new(addr);
     browser.set_cookie("kiewer_session", &id.to_string());
-    (browser, signed_in.account_id, handle)
+    (browser, account_id, handle)
 }
 
 #[tokio::test]
@@ -233,8 +237,10 @@ async fn uploading_the_hand_off_files_makes_a_design_shown_with_the_viewer() {
         "{}",
         page.body
     );
-    let (parents, heads): (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM revision r JOIN design_revision dr ON dr.revision_hash = r.hash
+    let (listed, parents, heads): (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM design_revision dr JOIN design d ON d.id = dr.design_id
+                 JOIN account a ON a.id = d.owner_id WHERE a.handle = $1),
+                (SELECT count(*) FROM revision r JOIN design_revision dr ON dr.revision_hash = r.hash
                  JOIN design d ON d.id = dr.design_id JOIN account a ON a.id = d.owner_id
                  WHERE a.handle = $1 AND r.parent_hash IS NOT NULL),
                 (SELECT count(*) FROM branch b JOIN design d ON d.id = b.design_id
@@ -244,7 +250,11 @@ async fn uploading_the_hand_off_files_makes_a_design_shown_with_the_viewer() {
     .fetch_one(&db)
     .await
     .unwrap();
-    assert_eq!((parents, heads), (1, 1), "one chain of two on one branch");
+    assert_eq!(
+        (listed, parents, heads),
+        (2, 1, 1),
+        "both revisions are the design's, one chain of two, on one branch"
+    );
 }
 
 #[tokio::test]
@@ -282,6 +292,27 @@ async fn an_upload_without_a_kicad_file_or_with_a_malformed_one_is_refused_with_
         "the parser's error names the file and the line: {}",
         malformed.body
     );
+
+    let schematic = browser
+        .post_multipart(
+            "/upload",
+            &[Part::file(
+                "bad.kicad_sch",
+                b"(kicad_pcb (version 20241229))",
+            )],
+        )
+        .await;
+    assert_eq!(schematic.status, 422, "{}", schematic.body);
+    assert!(
+        schematic.body.contains("bad.kicad_sch") && schematic.body.contains("kicad_sch"),
+        "a board where a schematic was named is refused naming the file: {}",
+        schematic.body
+    );
+    let project = browser
+        .post_multipart("/upload", &[Part::file("bad.kicad_pro", b"{ not json")])
+        .await;
+    assert_eq!(project.status, 422, "{}", project.body);
+    assert!(project.body.contains("bad.kicad_pro"), "{}", project.body);
 
     let old = browser
         .post_multipart(
@@ -411,7 +442,7 @@ async fn the_account_cap_and_the_parse_timeout_refuse_through_commit() {
     };
     let dir = scratch_dir!();
     let blobs = FsBlobStore::new(dir.path());
-    let (_, account_id, handle) = signed_in(&db, "127.0.0.1:1".parse().unwrap()).await;
+    let (account_id, handle) = person(&db).await;
     let author = Author { account_id, handle };
 
     let tiny_account = Limits {
@@ -432,7 +463,7 @@ async fn the_account_cap_and_the_parse_timeout_refuse_through_commit() {
     )
     .await
     .unwrap();
-    let full = upload::commit(
+    let full = upload::push(
         &db,
         &blobs,
         &tiny_account,
@@ -466,7 +497,7 @@ async fn the_account_cap_and_the_parse_timeout_refuse_through_commit() {
         .await
         .unwrap();
     assert_eq!(incoming.len(), 1);
-    let slow = upload::commit(
+    let slow = upload::push(
         &db,
         &blobs,
         &no_time,
@@ -480,10 +511,6 @@ async fn the_account_cap_and_the_parse_timeout_refuse_through_commit() {
     assert!(
         matches!(slow, Error::Refused(Refusal::ParseTimeout { seconds: 0 })),
         "{slow}"
-    );
-    assert_eq!(
-        FileKind::of(&"x.kicad_pcb".parse().unwrap()),
-        Some(FileKind::Board)
     );
 }
 

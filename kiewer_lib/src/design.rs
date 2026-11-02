@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use sqlx::{PgConnection, PgPool};
 
-use crate::account::{AccountId, Handle};
+use crate::account::{AccountId, Handle, slugify};
 use crate::blob::BlobHash;
 use crate::error::{Error, Refusal, Result};
 use crate::revision::{
@@ -55,20 +55,8 @@ impl Slug {
     /// name survives.
     #[must_use]
     pub fn suggest(name: &str) -> Self {
-        let mut text = String::with_capacity(name.len());
-        for ch in name.chars().flat_map(char::to_lowercase) {
-            if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
-                text.push(ch);
-            } else if !text.ends_with('-') {
-                text.push('-');
-            }
-        }
-        let mut text = text.trim_matches('-');
-        if text.len() > Self::MAX_LEN {
-            text = &text[..Self::MAX_LEN];
-            text = text.trim_end_matches('-');
-        }
-        text.parse()
+        slugify(name, Self::MAX_LEN)
+            .parse()
             .unwrap_or_else(|_| Self(Self::FALLBACK.to_owned()))
     }
 
@@ -149,8 +137,10 @@ pub async fn by_owner(db: &PgPool, owner: AccountId) -> Result<Vec<Design>> {
     Ok(rows.into_iter().map(design_from_row).collect())
 }
 
-/// `owner`'s design at `slug`, within the upload's transaction, locked
-/// against another push to it until the transaction ends.
+/// `owner`'s design at `slug`, within the upload's transaction. Not
+/// locked: the head is read next and moved by compare-and-set
+/// ([`set_head`]), so of two pushes at once the second is refused rather
+/// than silently appended onto a head its uploader never saw.
 ///
 /// # Errors
 ///
@@ -162,7 +152,7 @@ pub async fn find_owned(
 ) -> Result<Option<Design>> {
     let row: Option<DesignRow> = sqlx::query_as(
         "SELECT id, owner_id, slug, name, default_branch FROM design
-         WHERE owner_id = $1 AND slug = $2 FOR UPDATE",
+         WHERE owner_id = $1 AND slug = $2",
     )
     .bind(owner)
     .bind(slug.as_str())
@@ -420,7 +410,8 @@ pub async fn account_bytes(
     let adding: Vec<Vec<u8>> = adding.iter().map(|hash| hash.as_bytes().to_vec()).collect();
     // The reachable set is one index walk per design of the owner: design
     // by owner, design_revision by design, revision and tree_entry by
-    // primary key. Nothing here scans a whole table.
+    // primary key; the sums join blob by its primary key from that set
+    // and from the given hashes, so neither scans blob.
     let (used, added): (i64, i64) = sqlx::query_as(
         "WITH reachable AS (
              SELECT DISTINCT te.blob_hash
@@ -429,12 +420,18 @@ pub async fn account_bytes(
              JOIN revision r ON r.hash = dr.revision_hash
              JOIN tree_entry te ON te.tree_hash = r.tree_hash
              WHERE d.owner_id = $1
+         ),
+         used AS (
+             SELECT COALESCE(SUM(b.size), 0)::bigint AS bytes
+             FROM reachable x JOIN blob b ON b.hash = x.blob_hash
+         ),
+         added AS (
+             SELECT COALESCE(SUM(b.size), 0)::bigint AS bytes
+             FROM blob b
+             WHERE b.hash = ANY($2)
+               AND NOT EXISTS (SELECT 1 FROM reachable x WHERE x.blob_hash = b.hash)
          )
-         SELECT
-             (SELECT COALESCE(SUM(b.size), 0)::bigint FROM blob b
-              WHERE b.hash IN (SELECT blob_hash FROM reachable)),
-             (SELECT COALESCE(SUM(b.size), 0)::bigint FROM blob b
-              WHERE b.hash = ANY($2) AND b.hash NOT IN (SELECT blob_hash FROM reachable))",
+         SELECT used.bytes, added.bytes FROM used, added",
     )
     .bind(owner)
     .bind(&adding)
@@ -478,7 +475,7 @@ pub struct Revision {
 }
 
 /// A revision's row, read by column name so the revision columns can sit
-/// inside a wider row ([`Shown`]'s) unchanged.
+/// inside a wider row ([`DesignHead`]'s) unchanged.
 #[derive(sqlx::FromRow)]
 struct RevisionRow {
     hash: Vec<u8>,
@@ -538,7 +535,7 @@ impl TryFrom<RevisionRow> for Revision {
 /// What a design page shows: the design, its owner's handle, the branch
 /// and the revision at its head, with the revision's files.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Shown {
+pub struct DesignHead {
     pub design: Design,
     pub owner: Handle,
     pub branch: String,
@@ -547,7 +544,7 @@ pub struct Shown {
     pub files: Vec<TreeEntry>,
 }
 
-impl Shown {
+impl DesignHead {
     /// The board the viewer loads: the shallowest `.kicad_pcb`, first by
     /// name among equals, or `None` for a revision without one.
     #[must_use]
@@ -555,7 +552,7 @@ impl Shown {
         self.files
             .iter()
             .filter(|entry| entry.path.extension().as_deref() == Some("kicad_pcb"))
-            .min_by_key(|entry| (entry.path.as_str().matches('/').count(), &entry.path))
+            .min_by_key(|entry| (entry.path.depth(), &entry.path))
     }
 }
 
@@ -566,7 +563,7 @@ impl Shown {
 ///
 /// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
 /// holds a hash that is not 32 bytes, which the schema forbids.
-pub async fn show(db: &PgPool, handle: &str, slug: &str) -> Result<Option<Shown>> {
+pub async fn show(db: &PgPool, handle: &str, slug: &str) -> Result<Option<DesignHead>> {
     // Two reads on the pool for one page: the head and its files. A push
     // between them could show a head with the files of the same head only,
     // since both are keyed by hashes the first read returned; nothing is
@@ -600,7 +597,7 @@ pub async fn show(db: &PgPool, handle: &str, slug: &str) -> Result<Option<Shown>
     };
     let revision = Revision::try_from(row.revision)?;
     let files = entries(db, revision.tree).await?;
-    Ok(Some(Shown {
+    Ok(Some(DesignHead {
         design: Design {
             id: row.id,
             owner_id: row.owner_id,

@@ -2,7 +2,7 @@
 //! the design's default branch in the viewer with the revision's details
 //! (`web/viewer.rs`'s page); `/upload` is the form and its POST for a
 //! signed-in person with a handle, streamed part by part into
-//! `upload::Incoming` and committed by `upload::commit`. The upload pages
+//! `upload::Incoming` and committed by `upload::push`. The upload pages
 //! are the person's own, so they carry `private, no-store`; the design
 //! page renders the same for everyone.
 
@@ -94,8 +94,8 @@ async fn upload_page(
         designs: design::by_owner(&state.db, settled.account_id).await?,
         handle: settled.handle,
         error,
-        file_mb: Limits::DEFAULT.file_bytes / (1024 * 1024),
-        revision_mb: Limits::DEFAULT.revision_bytes / (1024 * 1024),
+        file_mb: Limits::DEFAULT.file_mb(),
+        revision_mb: Limits::DEFAULT.revision_mb(),
     };
     Ok(personal(settled.jar, (status, Html(page.render()?))))
 }
@@ -118,12 +118,12 @@ fn status(refusal: &Refusal) -> StatusCode {
         | Refusal::RevisionTooLarge { .. }
         | Refusal::AccountFull { .. } => StatusCode::PAYLOAD_TOO_LARGE,
         Refusal::NoKicadFile
-        | Refusal::Malformed { .. }
+        | Refusal::DoesNotParse { .. }
         | Refusal::ParseTimeout { .. }
         | Refusal::Blocked { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         Refusal::SlugTaken { .. } | Refusal::HeadMoved { .. } => StatusCode::CONFLICT,
         Refusal::NoSuchDesign { .. } => StatusCode::NOT_FOUND,
-        Refusal::BadRequest { .. } => StatusCode::BAD_REQUEST,
+        Refusal::Unreadable { .. } => StatusCode::BAD_REQUEST,
     }
 }
 
@@ -132,13 +132,18 @@ fn status(refusal: &Refusal) -> StatusCode {
 fn multipart_refusal(error: &MultipartError) -> Refusal {
     if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
         Refusal::RevisionTooLarge {
-            limit_mb: Limits::DEFAULT.revision_bytes / (1024 * 1024),
+            limit_mb: Limits::DEFAULT.revision_mb(),
         }
     } else {
-        Refusal::BadRequest {
+        Refusal::Unreadable {
             reason: error.body_text(),
         }
     }
+}
+
+/// The same, as the crate's error, for a `map_err`.
+fn unreadable(error: &MultipartError) -> Error {
+    multipart_refusal(error).into()
 }
 
 /// The text fields of the upload form, gathered as the parts arrive.
@@ -160,7 +165,7 @@ async fn receive(
         let field = match multipart.next_field().await {
             Ok(Some(field)) => field,
             Ok(None) => return Ok(()),
-            Err(error) => return Err(multipart_refusal(&error).into()),
+            Err(error) => return Err(unreadable(&error)),
         };
         match field.name() {
             Some("design") => fields.design = Some(text(field).await?),
@@ -173,19 +178,12 @@ async fn receive(
 }
 
 async fn text(field: Field<'_>) -> Result<String> {
-    field
-        .text()
-        .await
-        .map_err(|error| multipart_refusal(&error).into())
+    field.text().await.map_err(|error| unreadable(&error))
 }
 
 /// A part the upload does not keep is read to its end and forgotten.
 async fn drain(mut field: Field<'_>) -> Result<()> {
-    while let Some(_chunk) = field
-        .chunk()
-        .await
-        .map_err(|error| Error::from(multipart_refusal(&error)))?
-    {}
+    while let Some(_chunk) = field.chunk().await.map_err(|error| unreadable(&error))? {}
     Ok(())
 }
 
@@ -200,11 +198,7 @@ async fn receive_file(mut field: Field<'_>, incoming: &mut Incoming) -> Result<(
         return drain(field).await;
     };
     incoming.begin(path, kind).await?;
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|error| Error::from(multipart_refusal(&error)))?
-    {
+    while let Some(chunk) = field.chunk().await.map_err(|error| unreadable(&error))? {
         incoming.write(&chunk).await?;
     }
     incoming.end().await
@@ -246,7 +240,7 @@ pub(super) async fn upload(
     };
     let committed = match received {
         Ok(()) => {
-            upload::commit(
+            upload::push(
                 &state.db,
                 state.blobs.as_ref(),
                 &Limits::DEFAULT,

@@ -16,6 +16,7 @@ use sqlx::PgPool;
 
 use crate::account::{AccountId, Handle};
 use crate::error::{Error, Result};
+use crate::hex::{decode, encode};
 
 /// How long a session lives after it starts or refreshes.
 pub const LIFETIME_DAYS: i32 = 30;
@@ -28,41 +29,6 @@ pub const REFRESH_AFTER_DAYS: i32 = 1;
 /// sessions page's "last seen" is this coarse, and a busy session costs
 /// one write per interval, not one per page.
 pub const SEEN_EVERY_MINUTES: i32 = 5;
-
-/// 32 bytes as 64 lowercase hex characters.
-fn hex(bytes: &[u8; 32]) -> String {
-    use std::fmt::Write as _;
-    let mut text = String::with_capacity(64);
-    for byte in bytes {
-        // Writing to a String cannot fail.
-        let _ = write!(text, "{byte:02x}");
-    }
-    text
-}
-
-/// The 32 bytes 64 lowercase hex characters spell, and only that
-/// spelling, so one value has one text form; `what` names the value in
-/// the error.
-fn from_hex(text: &str, what: &str) -> Result<[u8; 32]> {
-    let malformed = || Error::Malformed(format!("not a {what}"));
-    let digit = |b: u8| match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        _ => None,
-    };
-    if text.len() != 64 {
-        return Err(malformed());
-    }
-    let mut out = [0u8; 32];
-    for (slot, &[first, second]) in out.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
-        let (high, low) = (digit(first), digit(second));
-        *slot = match (high, low) {
-            (Some(high), Some(low)) => (high << 4) | low,
-            _ => return Err(malformed()),
-        };
-    }
-    Ok(out)
-}
 
 /// The random id a session cookie carries: 32 bytes from the OS, shown as
 /// 64 lowercase hex characters. Only its hash is stored.
@@ -87,7 +53,7 @@ impl SessionId {
 
 impl fmt::Display for SessionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&hex(&self.0))
+        f.write_str(&encode(&self.0))
     }
 }
 
@@ -104,7 +70,7 @@ impl FromStr for SessionId {
     /// The canonical text only: 64 lowercase hex digits, so one id has one
     /// spelling (and one hash).
     fn from_str(text: &str) -> Result<Self> {
-        from_hex(text, "session id").map(Self)
+        decode(text, "session id").map(Self)
     }
 }
 
@@ -124,7 +90,7 @@ impl SessionKey {
 
 impl fmt::Display for SessionKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&hex(&self.0))
+        f.write_str(&encode(&self.0))
     }
 }
 
@@ -133,7 +99,7 @@ impl FromStr for SessionKey {
 
     /// 64 lowercase hex digits, as [`Display`](fmt::Display) writes them.
     fn from_str(text: &str) -> Result<Self> {
-        from_hex(text, "session key").map(Self)
+        decode(text, "session key").map(Self)
     }
 }
 

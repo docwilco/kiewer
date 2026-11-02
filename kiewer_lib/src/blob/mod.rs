@@ -10,9 +10,7 @@
 pub mod fs;
 pub mod gcs;
 
-use std::fmt;
 use std::io::{Read, Write};
-use std::str::FromStr;
 
 use async_trait::async_trait;
 use flate2::Compression;
@@ -21,70 +19,19 @@ use flate2::write::GzEncoder;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
+use crate::hex::sha256_name;
 
-/// The SHA-256 of a blob's uncompressed bytes. Displays as 64 lowercase
-/// hex characters and parses from the same.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BlobHash([u8; 32]);
+sha256_name!(
+    BlobHash,
+    "blob hash",
+    "The SHA-256 of a blob's uncompressed bytes: 64 lowercase hex characters in text."
+);
 
 impl BlobHash {
     /// The hash of these bytes.
     #[must_use]
     pub fn of(bytes: &[u8]) -> Self {
         Self(Sha256::digest(bytes).into())
-    }
-
-    /// The hash's 32 bytes, for a `bytea` column.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-
-    /// The hash a `bytea` column holds.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Malformed`] when the column is not 32 bytes, which the
-    /// schema forbids.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bytes.try_into().map(Self).map_err(|_| {
-            Error::Malformed(format!(
-                "a blob hash is not 32 bytes: {} found",
-                bytes.len()
-            ))
-        })
-    }
-}
-
-impl fmt::Display for BlobHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Debug for BlobHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "BlobHash({self})")
-    }
-}
-
-impl FromStr for BlobHash {
-    type Err = Error;
-
-    fn from_str(text: &str) -> Result<Self> {
-        let malformed = || Error::Malformed(format!("not a blob hash: {text:?}"));
-        if text.len() != 64 {
-            return Err(malformed());
-        }
-        let mut out = [0u8; 32];
-        for (slot, pair) in out.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
-            let pair = std::str::from_utf8(pair).map_err(|_| malformed())?;
-            *slot = u8::from_str_radix(pair, 16).map_err(|_| malformed())?;
-        }
-        Ok(Self(out))
     }
 }
 

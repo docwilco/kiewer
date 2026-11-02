@@ -1,7 +1,7 @@
 //! An upload: one or more KiCad files become a revision of a design
 //! (docs/v1-scope.md, Uploads). The parts of the multipart body are
 //! streamed into temporary files as they arrive ([`Incoming`]), counted
-//! against the per-file and per-revision caps; then [`commit`] roots the
+//! against the per-file and per-revision caps; then [`push`] roots the
 //! files at the project folder, parses each one under the parse timeout,
 //! stores its bytes as a blob, and writes the tree, revision, branch and
 //! `design_revision` rows in one transaction. Nothing slow happens inside
@@ -53,15 +53,22 @@ impl Limits {
         parse_timeout: Duration::from_secs(30),
     };
 
-    fn file_mb(&self) -> u64 {
+    /// The per-file cap in whole megabytes, as the form and a refusal
+    /// say it.
+    #[must_use]
+    pub fn file_mb(&self) -> u64 {
         self.file_bytes / MB
     }
 
-    fn revision_mb(&self) -> u64 {
+    /// The per-revision cap in whole megabytes.
+    #[must_use]
+    pub fn revision_mb(&self) -> u64 {
         self.revision_bytes / MB
     }
 
-    fn account_gb(&self) -> u64 {
+    /// The per-account cap in whole gigabytes.
+    #[must_use]
+    pub fn account_gb(&self) -> u64 {
         self.account_bytes / (1024 * MB)
     }
 }
@@ -284,29 +291,21 @@ pub enum Target {
     Existing { slug: Slug },
 }
 
-/// What a committed upload made.
+/// What a push made.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Committed {
+pub struct Pushed {
     pub design: Design,
     pub revision: RevisionHash,
     /// Whether the design is new.
     pub created: bool,
 }
 
-/// A received file with its path made relative to the project folder.
-struct Rooted {
-    path: TreePath,
-    kind: FileKind,
-    temp: PathBuf,
-    size: u64,
-}
-
 /// The name of the file the project folder is found by: the `.kicad_pro`,
 /// else the shallowest `.kicad_pcb`, else the shallowest `.kicad_sch`
 /// (GLOSSARY, Project folder); and every file under that folder with its
 /// path relative to it, in path order, shallowest first.
-fn root_at_project_folder(files: Vec<Received>) -> (String, Vec<Rooted>) {
-    let depth = |path: &TreePath| path.as_str().matches('/').count();
+fn root_at_project_folder(files: Vec<Received>) -> (String, Vec<Received>) {
+    let depth = TreePath::depth;
     let anchor = FileKind::ALL
         .into_iter()
         .find_map(|kind| {
@@ -327,7 +326,7 @@ fn root_at_project_folder(files: Vec<Received>) -> (String, Vec<Rooted>) {
         .rsplit_once('.')
         .map_or(anchor.path.file_name(), |(stem, _)| stem)
         .to_owned();
-    let mut rooted: Vec<Rooted> = files
+    let mut rooted: Vec<Received> = files
         .into_iter()
         .filter_map(|file| {
             let Some(relative) = file.path.as_str().strip_prefix(&folder) else {
@@ -337,12 +336,7 @@ fn root_at_project_folder(files: Vec<Received>) -> (String, Vec<Rooted>) {
             let path = relative
                 .parse()
                 .expect("a suffix of a path at a segment boundary is a path");
-            Some(Rooted {
-                path,
-                kind: file.kind,
-                temp: file.temp,
-                size: file.size,
-            })
+            Some(Received { path, ..file })
         })
         .collect();
     rooted.sort_by(|a, b| (depth(&a.path), &a.path).cmp(&(depth(&b.path), &b.path)));
@@ -353,7 +347,7 @@ fn root_at_project_folder(files: Vec<Received>) -> (String, Vec<Rooted>) {
 /// the board's metadata when it is one.
 fn parse(kind: FileKind, path: &TreePath, bytes: &[u8]) -> Result<Option<Metadata>> {
     let malformed = |error: String| {
-        Error::Refused(Refusal::Malformed {
+        Error::Refused(Refusal::DoesNotParse {
             path: path.to_string(),
             error,
         })
@@ -394,7 +388,7 @@ fn parse(kind: FileKind, path: &TreePath, bytes: &[u8]) -> Result<Option<Metadat
 /// [`Error::Refused`] for every reason the uploader can act on
 /// ([`Refusal`]); [`Error::Io`], [`Error::Db`] and the blob store's own
 /// errors otherwise.
-pub async fn commit(
+pub async fn push(
     db: &PgPool,
     blobs: &dyn BlobStore,
     limits: &Limits,
@@ -402,14 +396,14 @@ pub async fn commit(
     target: Target,
     message: Option<&str>,
     incoming: Incoming,
-) -> Result<Committed> {
+) -> Result<Pushed> {
     if incoming.is_empty() {
         return Err(Refusal::NoKicadFile.into());
     }
     let Incoming { dir, files, .. } = incoming;
     let (stem, rooted) = root_at_project_folder(files);
     if let Some(pair) = rooted.windows(2).find(|pair| pair[0].path == pair[1].path) {
-        return Err(Refusal::Malformed {
+        return Err(Refusal::DoesNotParse {
             path: pair[0].path.to_string(),
             error: "appears twice in the upload".to_owned(),
         }
@@ -437,7 +431,7 @@ async fn parse_and_store(
     db: &PgPool,
     blobs: &dyn BlobStore,
     limits: &Limits,
-    rooted: Vec<Rooted>,
+    rooted: Vec<Received>,
 ) -> Result<(Vec<TreeEntry>, Option<Metadata>)> {
     let deadline = Instant::now() + limits.parse_timeout;
     let mut entries = Vec::with_capacity(rooted.len());
@@ -500,7 +494,7 @@ struct Rows<'a> {
 /// (found and locked, or made), the quota against them, the tree, the
 /// revision on the branch's head, the head moved by compare-and-set, and
 /// the design's index of its revisions.
-async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Committed> {
+async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Pushed> {
     let Rows {
         author,
         target,
@@ -563,9 +557,9 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Comm
         %revision,
         files = entries.len(),
         created,
-        "upload committed"
+        "revision pushed"
     );
-    Ok(Committed {
+    Ok(Pushed {
         design,
         revision,
         created,
@@ -588,10 +582,10 @@ mod tests {
         assert_eq!(Incoming::accepts(name).map(|(_, kind)| kind), kind);
     }
 
-    #[test]
-    fn a_name_that_is_not_a_path_is_dropped() {
-        assert!(Incoming::accepts("../x.kicad_pcb").is_none());
-        assert!(Incoming::accepts("").is_none());
+    #[test_case("../x.kicad_pcb"; "a parent segment")]
+    #[test_case(""; "empty")]
+    fn a_name_that_is_not_a_path_is_dropped(name: &str) {
+        assert!(Incoming::accepts(name).is_none());
     }
 
     fn received(path: &str) -> Received {
@@ -604,7 +598,7 @@ mod tests {
         }
     }
 
-    fn paths(rooted: &[Rooted]) -> Vec<&str> {
+    fn paths(rooted: &[Received]) -> Vec<&str> {
         rooted.iter().map(|file| file.path.as_str()).collect()
     }
 
@@ -630,21 +624,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn without_a_project_file_the_board_roots_the_tree_and_without_a_board_the_shallowest_schematic()
-     {
-        let (stem, rooted) = root_at_project_folder(vec![
-            received("a/b/board.kicad_pcb"),
-            received("a/b/board.kicad_sch"),
-        ]);
-        assert_eq!(stem, "board");
-        assert_eq!(paths(&rooted), ["board.kicad_pcb", "board.kicad_sch"]);
-        let (stem, rooted) = root_at_project_folder(vec![
-            received("deep/er/sheet.kicad_sch"),
-            received("top.kicad_sch"),
-        ]);
-        assert_eq!(stem, "top");
-        assert_eq!(paths(&rooted), ["top.kicad_sch", "deep/er/sheet.kicad_sch"]);
+    #[test_case(&["a/b/board.kicad_pcb", "a/b/board.kicad_sch"], "board", &["board.kicad_pcb", "board.kicad_sch"]; "without a project file the board roots the tree")]
+    #[test_case(&["deep/er/sheet.kicad_sch", "top.kicad_sch"], "top", &["top.kicad_sch", "deep/er/sheet.kicad_sch"]; "without a board the shallowest schematic does")]
+    fn the_anchor_falls_back_from_project_to_board_to_schematic(
+        uploaded: &[&str],
+        stem: &str,
+        rooted_paths: &[&str],
+    ) {
+        let (found, rooted) =
+            root_at_project_folder(uploaded.iter().map(|path| received(path)).collect());
+        assert_eq!(found, stem);
+        assert_eq!(paths(&rooted), rooted_paths);
     }
 
     #[test]
@@ -671,7 +661,7 @@ mod tests {
         let path: TreePath = "x.file".parse().unwrap();
         let err = parse(kind, &path, bytes).expect_err("refused");
         match err {
-            Error::Refused(Refusal::Malformed { path, error }) => {
+            Error::Refused(Refusal::DoesNotParse { path, error }) => {
                 assert_eq!(path, "x.file");
                 assert!(!error.is_empty());
             }
@@ -682,8 +672,13 @@ mod tests {
     #[test]
     fn the_body_limit_leaves_room_for_the_framing() {
         assert!(BODY_LIMIT as u64 > Limits::DEFAULT.revision_bytes);
+    }
+
+    #[test]
+    fn the_default_caps_are_the_scopes() {
         assert_eq!(Limits::DEFAULT.file_mb(), 50);
         assert_eq!(Limits::DEFAULT.revision_mb(), 200);
         assert_eq!(Limits::DEFAULT.account_gb(), 2);
+        assert_eq!(Limits::DEFAULT.parse_timeout, Duration::from_secs(30));
     }
 }

@@ -117,7 +117,7 @@ pub enum Refusal {
     NoKicadFile,
     /// A KiCad-named file does not parse; `error` is the parser's message.
     #[display("{path}: {error}")]
-    Malformed { path: String, error: String },
+    DoesNotParse { path: String, error: String },
     /// Parsing the files took longer than the server allows.
     #[display("parsing took longer than {seconds} seconds")]
     ParseTimeout { seconds: u64 },
@@ -137,7 +137,7 @@ pub enum Refusal {
     HeadMoved { branch: String },
     /// The multipart body itself could not be read.
     #[display("the upload could not be read: {reason}")]
-    BadRequest { reason: String },
+    Unreadable { reason: String },
 }
 
 /// The library's result type.
