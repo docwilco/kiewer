@@ -26,13 +26,16 @@ FROM ubuntu:24.04
 ARG BUILD_VERSION=dev
 # The programs the code runs, and ca-certificates for TLS. This list, the
 # CI workflow's apt step and the dev-box setup move together: a program
-# one of them gains, all gain in the same commit. The thumbnail renderer
-# (ADR 0004) will add Mesa's lavapipe here.
+# one of them gains, all gain in the same commit.
 # tini: PID 1 in front of the program, so a child orphaned by a killed
 # process is reaped instead of sitting as a zombie for the container's
 # life, and the SIGTERM Cloud Run sends at shutdown is forwarded unchanged.
+# mesa-vulkan-drivers: Mesa's lavapipe, the software Vulkan driver the
+# headless renderer draws thumbnails with (ADR 0004); the Vulkan loader
+# comes with it. Cloud Run has no GPU, so this is the only driver the
+# loader finds, and no environment variable is needed to select it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tini \
+    && apt-get install -y --no-install-recommends ca-certificates tini mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*
 # The user the program runs as: Cloud Run runs the entrypoint as root
 # unless the image says otherwise. Ubuntu's image ships a placeholder

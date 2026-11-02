@@ -1,0 +1,19 @@
+[package]
+name = "kiewer_render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# The headless renderer as a program: a thin wrapper over
+# kiewer_viewer::headless, which the golden-image test and the thumbnail
+# path call as a library. Not published: the server image carries the
+# kiewer binary alone.
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+kicad_core = { path = "../kicad_core" }
+kiewer_viewer = { path = "../kiewer_viewer" }

@@ -13,6 +13,8 @@ use wasm_bindgen::prelude::wasm_bindgen;
 pub mod atlas;
 pub mod camera;
 pub mod error;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod headless;
 pub mod labels;
 pub mod render;
 pub mod scene;

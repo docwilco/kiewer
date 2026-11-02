@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["kicad_core", "kiewer_viewer", "kiewer_lib", "kiewer", "kiewer_test_support", "newstroke_dev"]
+members = ["kicad_core", "kiewer_viewer", "kiewer_lib", "kiewer", "kiewer_render", "kiewer_test_support", "newstroke_dev"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,21 @@ edition = "2024"
 rust-version = "1.91.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/docwilco/kiewer"
+
+# The golden-image test (kiewer_viewer/tests/golden.rs) decodes nine PNGs
+# of a few megapixels and tessellates a board on every run, and `test`
+# inherits `dev`: unoptimised, the nine pages took 47 s to render and
+# encode where the release build took 3 s. Dependencies at opt-level 3
+# (the PNG codec, lyon, wgpu, naga), the workspace's own code at 1, keep
+# the debug build debuggable and the test stage in seconds; the price is
+# one cold rebuild of the dependencies per target directory. The release
+# profile, debug assertions, overflow checks and the lints stay as they
+# are (rust-conventions).
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
 
 [workspace.lints.rust]
 # an unsafe fn body gets no implicit unsafe powers: every unsafe operation

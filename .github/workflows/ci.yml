@@ -93,9 +93,14 @@ jobs:
       # The programs the code or its tests run. This list, the Dockerfile's
       # apt layer and the dev-box setup move together: a program one of them
       # gains, all gain in the same commit (Postgres is a service above, not
-      # a program on the runner). No apt package yet:
-      # - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends <packages>
+      # a program on the runner).
       #
+      # mesa-vulkan-drivers: Mesa's lavapipe, the software Vulkan driver the
+      # headless renderer draws with on a machine without a GPU (ADR 0004),
+      # for the golden-image test (kiewer_viewer/tests/golden.rs), which
+      # fails rather than skips here when the loader finds no driver. The
+      # Vulkan loader itself comes with the package.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
       # fake-gcs-server, the GCS emulator for kiewer_lib/tests/gcs_blob_store.rs:
       # Google's own storage client against it over plain http on the
       # loopback. Pinned by version and checksum; the tests make their own

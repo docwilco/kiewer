@@ -62,6 +62,9 @@ pub enum Backend {
     WebGpu,
     #[display("webgl2")]
     WebGl2,
+    /// Native, headless: lavapipe or a GPU's own driver (`headless`).
+    #[display("vulkan")]
+    Vulkan,
 }
 
 /// Samples per pixel when the target format allows it: the edges of

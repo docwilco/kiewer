@@ -76,6 +76,15 @@ the version CI pins), then
 `fake-gcs-server -scheme http -host 127.0.0.1 -port 8092 -backend memory -public-host 127.0.0.1`
 and `export KIEWER_GCS_EMULATOR=http://127.0.0.1:8092`.
 
+The golden-image test (`kiewer_viewer/tests/golden.rs`) renders the
+hand-off board headless through wgpu on Vulkan and compares each view
+with `viewer-drop/exports/png`; its tolerance is in its module doc. It
+needs a Vulkan driver: on a box without a GPU that is Mesa's lavapipe,
+`apt install mesa-vulkan-drivers`, the package CI and the Dockerfile
+install. Without one it skips with a line saying so; on CI it fails
+instead. `cargo run --bin kiewer_render -- viewer-drop/board/midi8knob.kicad_pcb <dir>`
+writes the same PNGs for a look.
+
 Clippy is pedantic with no blanket allows: every finding is fixed or carries a
 site-level `#[expect(..., reason = "...")]` naming the invariant that makes it safe.
 
@@ -94,6 +103,16 @@ The executable's non-zero exits, each a kind of `kiewer_lib::error::Error`
 | 7 | Template | a page did not render |
 | 8 | Failed | a failure with no better kind |
 | 9 | Upstream | a sign-in provider or another service over HTTP |
+
+`kiewer_render`'s, each a kind of `kiewer_viewer::error::Error` (`Exit`
+there, the same way); 2 is a usage error.
+
+| Code | Kind | Meaning |
+|---|---|---|
+| 3 | Io | reading the board or writing a PNG |
+| 4 | Board | the board does not parse or has nothing to draw |
+| 5 | Gpu | no Vulkan adapter, no device, or a frame that would not read back |
+| 6 | Png | a PNG that would not encode or decode |
 
 ## Infrastructure
 
