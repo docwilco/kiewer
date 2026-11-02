@@ -10,14 +10,19 @@
 //! free for a WebGL2 context. A failure on both is an [`Error`] the page
 //! shows; nothing here panics on a missing API.
 
-use kicad_core::model::Point;
+use std::collections::{BTreeMap, BTreeSet};
+
+use kicad_core::font::outline::{self, FaceMetrics};
+use kicad_core::model::{Board, LayerId, Point};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
+use crate::atlas::{self, Plan, Quads, Rect};
 use crate::camera::{Camera, DOUBLE_CLICK, Size};
 use crate::error::{Error, Result};
+use crate::render::atlas_pipeline::Atlas;
 use crate::render::{Backend, MSAA_SAMPLES, Renderer, device_descriptor};
-use crate::scene::{Scene, palette};
+use crate::scene::{SILK_LAYER, Scene, palette};
 
 /// The viewer over one canvas.
 #[wasm_bindgen]
@@ -36,6 +41,27 @@ pub struct Viewer {
     /// The scale the board was last fitted at, 0 before a board: the
     /// zoom the page shows is relative to it.
     fit_scale: f64,
+    /// The board as parsed, kept for the text the atlas draws.
+    board: Option<Board>,
+    /// The faces the page draws from the browser's fonts, by the name
+    /// the design uses, with what the page measured and planned.
+    system_faces: BTreeMap<String, SystemFace>,
+}
+
+/// A face the page rasterises (docs/v1-scope.md, Fonts), as far as the
+/// page has got with it.
+struct SystemFace {
+    /// The face's ascent and descent as the page measured them.
+    metrics: FaceMetrics,
+    /// The characters its texts draw, in the order the page measures
+    /// them.
+    chars: Vec<char>,
+    /// Each character's advance in em, once the page has measured them.
+    advances: Vec<f64>,
+    /// The atlas as last planned, for the page to draw into.
+    plan: Option<Plan>,
+    /// The pixels per em of the atlas the renderer holds, once uploaded.
+    atlas_px: Option<u32>,
 }
 
 /// What the browser gave: the surface on the canvas, the adapter and the
@@ -232,6 +258,8 @@ impl Viewer {
             fallback: gpu.fallback,
             vendor,
             fit_scale: 0.0,
+            board: None,
+            system_faces: BTreeMap::new(),
         })
     }
 
@@ -288,9 +316,12 @@ impl Viewer {
         let scene = Scene::build(&board, self.config.format).ok_or(Error::NothingToDraw)?;
         self.renderer
             .upload(&self.device, &scene.vertices, &scene.indices);
+        self.renderer.clear_text();
+        self.system_faces.clear();
         self.camera.fit(scene.bounds);
         self.fit_scale = self.camera.scale();
         self.scene = Some(scene);
+        self.board = Some(board);
         Ok(())
     }
 
@@ -411,5 +442,210 @@ impl Viewer {
         );
         self.queue.present(frame);
         Ok(())
+    }
+}
+
+/// The font side of the viewer (docs/v1-scope.md, Fonts; `crate::atlas`):
+/// which faces the board names, and the round trip by which the page
+/// rasterises one. The page calls `font_faces` after `load_board`, probes
+/// and asks the person, then either `set_face_stroke` (Newstroke draws
+/// the face, the default) or `set_face_system` with the face's measured
+/// ascent and descent. From then on, after every frame the page asks
+/// `atlas_wanted`; for the face it names, the page measures the advances
+/// of `face_chars` at some pixel size, hands them to `atlas_plan`, draws
+/// each character into the rectangle the plan gives at the plan's pixels
+/// per em, and hands the alpha channel to `atlas_upload`. The wasm keeps
+/// the layout (`kicad_core`) and the quads; the page keeps the font.
+#[wasm_bindgen]
+impl Viewer {
+    /// The faces the board's drawn text names, distinct, in order of
+    /// first appearance; empty before a board or for a board whose text
+    /// is all in the stroke font.
+    #[must_use]
+    pub fn font_faces(&self) -> Vec<String> {
+        self.silk()
+            .map(|(board, layer)| atlas::faces_on(board, layer))
+            .unwrap_or_default()
+    }
+
+    /// The distinct characters the texts in `face` draw, sorted, a space
+    /// among them: what the page measures and rasterises, in this order.
+    #[must_use]
+    pub fn face_chars(&self, face: &str) -> String {
+        self.silk()
+            .map(|(board, layer)| atlas::chars_in(board, layer, face).into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// Draw `face` in Newstroke: the default, and the choice when the
+    /// browser lacks the face and the person picks nothing else.
+    pub fn set_face_stroke(&mut self, face: &str) {
+        self.system_faces.remove(face);
+        self.renderer.remove_text(face);
+        self.rebuild_scene();
+    }
+
+    /// Draw `face` from a font the browser has, whose line box reaches
+    /// `ascent` em above the baseline and `descent` em below it. The
+    /// face's text leaves the Newstroke scene; the next `atlas_wanted`
+    /// names the face, and until the page uploads its atlas the text is
+    /// not drawn.
+    pub fn set_face_system(&mut self, face: &str, ascent: f64, descent: f64) {
+        let chars = self
+            .silk()
+            .map(|(board, layer)| atlas::chars_in(board, layer, face))
+            .unwrap_or_default();
+        let metrics = FaceMetrics {
+            ascent: if ascent.is_finite() && ascent > 0.0 {
+                ascent
+            } else {
+                0.8
+            },
+            descent: if descent.is_finite() && descent >= 0.0 {
+                descent
+            } else {
+                0.2
+            },
+        };
+        self.system_faces.insert(
+            face.to_owned(),
+            SystemFace {
+                metrics,
+                chars,
+                advances: Vec::new(),
+                plan: None,
+                atlas_px: None,
+            },
+        );
+        self.renderer.remove_text(face);
+        self.rebuild_scene();
+    }
+
+    /// The face whose atlas the page should rasterise now, for the
+    /// current zoom (`crate::atlas::needs_rebuild`), or empty when every
+    /// face's atlas fits the view.
+    #[must_use]
+    pub fn atlas_wanted(&self) -> String {
+        self.system_faces
+            .iter()
+            .find(|(face, system)| atlas::needs_rebuild(system.atlas_px, self.wanted_px(face)))
+            .map(|(face, _)| face.clone())
+            .unwrap_or_default()
+    }
+
+    /// Plan `face`'s atlas from the page's measurement: `advances` is
+    /// the width of each character of `face_chars` at `px` pixels per
+    /// em, in that order. Returns the pixels per em to draw at, the
+    /// atlas's width and height, then `x, y, width, height` per
+    /// character; empty when the face is unknown, the measurement does
+    /// not match the characters, or the cells fit no atlas.
+    #[must_use]
+    pub fn atlas_plan(&mut self, face: &str, px: u32, advances: &[f64]) -> Vec<u32> {
+        let wanted = self.wanted_px(face);
+        let Some(system) = self.system_faces.get_mut(face) else {
+            return Vec::new();
+        };
+        if px == 0 || advances.len() != system.chars.len() {
+            return Vec::new();
+        }
+        system.advances = advances
+            .iter()
+            .map(|advance| advance / f64::from(px))
+            .collect();
+        let Some(plan) = atlas::plan(&system.advances, system.metrics.line_height(), wanted) else {
+            system.plan = None;
+            return Vec::new();
+        };
+        let mut out = vec![plan.px, plan.packing.width, plan.packing.height];
+        for rect in &plan.packing.rects {
+            out.extend([rect.x, rect.y, rect.width, rect.height]);
+        }
+        system.plan = Some(plan);
+        out
+    }
+
+    /// `face`'s atlas as the page drew it to the last plan: one byte of
+    /// coverage per texel, row-major, the plan's width times its height.
+    /// Lays the face's texts out, builds their quads and uploads both.
+    pub fn atlas_upload(&mut self, face: &str, coverage: &[u8]) {
+        let Some(system) = self.system_faces.get(face) else {
+            return;
+        };
+        let (Some(plan), Some(scene), Some((board, layer))) =
+            (&system.plan, &self.scene, self.silk())
+        else {
+            return;
+        };
+        let rects: BTreeMap<char, Rect> = system
+            .chars
+            .iter()
+            .copied()
+            .zip(plan.packing.rects.iter().copied())
+            .collect();
+        let advances: BTreeMap<char, f64> = system
+            .chars
+            .iter()
+            .copied()
+            .zip(system.advances.iter().copied())
+            .collect();
+        let advance = |c: char| advances.get(&c).copied().unwrap_or(0.0);
+        let color = palette::F_SILKS.for_format(self.config.format);
+        let size = (plan.packing.width, plan.packing.height);
+        let mut quads = Quads::default();
+        for (content, placement, text) in atlas::resolved_texts(board, layer) {
+            if text.font.face.as_deref() != Some(face) || content.is_empty() {
+                continue;
+            }
+            let laid =
+                outline::layout(&content, &placement, system.metrics, advance, text.knockout);
+            quads.add(&laid, &rects, size, scene.origin, color, text.knockout);
+        }
+        self.renderer.upload_text(
+            &self.device,
+            &self.queue,
+            face,
+            &Atlas {
+                width: plan.packing.width,
+                height: plan.packing.height,
+                coverage,
+            },
+            &quads.vertices,
+            &quads.indices,
+        );
+        let px = plan.px;
+        if let Some(system) = self.system_faces.get_mut(face) {
+            system.atlas_px = Some(px);
+        }
+    }
+}
+
+impl Viewer {
+    /// The board and the layer whose text the viewer draws.
+    fn silk(&self) -> Option<(&Board, LayerId)> {
+        let board = self.board.as_ref()?;
+        Some((board, board.layer_named(SILK_LAYER)?))
+    }
+
+    /// The pixels per em `face` wants at the camera's scale.
+    fn wanted_px(&self, face: &str) -> u32 {
+        let height = self
+            .silk()
+            .map_or(0.0, |(board, layer)| atlas::max_height(board, layer, face));
+        atlas::wanted_px(height, self.camera.scale())
+    }
+
+    /// Rebuild the Newstroke scene with the system faces' texts left
+    /// out, keeping the camera where it is.
+    fn rebuild_scene(&mut self) {
+        let Some(board) = &self.board else {
+            return;
+        };
+        let system: BTreeSet<String> = self.system_faces.keys().cloned().collect();
+        let stroke = atlas::stroke_board(board, &system);
+        if let Some(scene) = Scene::build(&stroke, self.config.format) {
+            self.renderer
+                .upload(&self.device, &scene.vertices, &scene.indices);
+            self.scene = Some(scene);
+        }
     }
 }

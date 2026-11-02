@@ -26,6 +26,12 @@
   #design a { color: inherit; }
   #design dl { display: grid; grid-template-columns: max-content auto; gap: 0.2em 1em; margin: 0.5em 0; }
   #design dd { margin: 0; }
+  /* The font warning and picker (docs/v1-scope.md, Fonts): over the
+     stage's top right, one line per face the browser lacks. */
+  #fonts { position: absolute; right: 0.8em; top: 0.8em; max-width: 28em; padding: 0.6em 0.8em; background: #4a3f1e; border-radius: 4px; }
+  #fonts p { margin: 0.3em 0; }
+  #fonts select, #fonts input { font: inherit; max-width: 100%; }
+  #fonts .absent { opacity: 0.7; }
 </style>
 </head>
 <body>
@@ -40,6 +46,7 @@
   <p id="error" hidden></p>
   <p id="hint">wheel zooms, ctrl+wheel and shift+wheel pan, middle or right drag pans, + and - zoom, Home fits</p>
   <p id="zoom"></p>
+  <div id="fonts" hidden></div>
 </div>
 {% if let Some(design) = design %}
 <details id="design">
@@ -108,6 +115,7 @@ function schedule() {
     frame = 0;
     try { viewer.render(); } catch (e) { fail(e); }
     showZoom();
+    window.dispatchEvent(new Event("kiewer-frame"));
   });
 }
 // Lower right: the zoom relative to the fitted board and the scale in
@@ -230,6 +238,7 @@ try {
   const response = await fetch("{{ url }}");
   if (!response.ok) throw new Error("the board: HTTP " + response.status);
   viewer.load_board(await response.text());
+  window.dispatchEvent(new CustomEvent("kiewer-board", { detail: { viewer, schedule } }));
 {% else %}
   status.textContent += ", no board in this revision";
 {% endif %}
@@ -308,6 +317,225 @@ if (window.kiewerPanic) {
 } else {
   sendBeacon("failed", errorBox.textContent);
 }
+</script>
+<script type="module">
+// Fonts (docs/v1-scope.md, Fonts; the wasm side is the font block of
+// kiewer_viewer/src/web.rs). A design naming a face the browser has draws
+// it from that font; one naming a face the browser lacks gets a warning
+// and a picker: the faces of a fixed per-platform list that pass the
+// probe, a free-text box, and the KiCad stroke font, preselected. The
+// choice is kept in localStorage keyed by the face the design names, so
+// the next design naming it draws the same way. Availability is canvas
+// width measurement against a generic fallback: document.fonts.check()
+// says yes to any name, and queryLocalFonts() is Chromium-only.
+//
+// Text in a system face renders through a glyph atlas the page
+// rasterises: the wasm says which face wants one (after a zoom crossed
+// its threshold), the page measures the face's characters, the wasm plans
+// the atlas, the page draws every character into its cell and hands back
+// the alpha channel, and the wasm draws textured quads.
+const STORAGE_PREFIX = "kiewer.font.";
+const STROKE = "stroke";
+const OTHER = "other";
+const PROBE_TEXT = "mmmmmmmmmmlli0O1Il|WwQq@#.,;";
+const PROBE_PX = 72;
+const MEASURE_PX = 64;
+// Common faces per platform; the design's own face joins the list it is
+// probed with, so a face that is present is found whatever the platform.
+const PROBE_LIST = {
+  windows: ["Arial", "Calibri", "Cambria", "Consolas", "Courier New", "Georgia", "Segoe UI", "Tahoma", "Times New Roman", "Verdana"],
+  mac: ["Helvetica", "Helvetica Neue", "Menlo", "Monaco", "SF Mono", "Avenir", "Futura", "Gill Sans", "Courier", "Times"],
+  linux: ["DejaVu Sans", "DejaVu Sans Mono", "Liberation Sans", "Liberation Mono", "Noto Sans", "Noto Sans Mono", "Ubuntu", "Ubuntu Mono", "Cantarell", "FreeSans"],
+};
+const fontsBox = document.getElementById("fonts");
+const probeCanvas = document.createElement("canvas");
+const probeCtx = probeCanvas.getContext("2d");
+const atlasCanvas = document.createElement("canvas");
+let fontsViewer = null;
+let fontsSchedule = function () {};
+// face named by the design -> the browser family it draws with
+const families = new Map();
+let rasterising = false;
+
+function platformList() {
+  const platform = String((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "").toLowerCase();
+  if (platform.includes("win")) return PROBE_LIST.windows;
+  if (platform.includes("mac") || platform.includes("iphone") || platform.includes("ipad")) return PROBE_LIST.mac;
+  if (platform.includes("linux") || platform.includes("android") || platform.includes("x11")) return PROBE_LIST.linux;
+  return PROBE_LIST.windows.concat(PROBE_LIST.mac, PROBE_LIST.linux);
+}
+function quoted(family) { return '"' + String(family).replace(/["\\]/g, "") + '"'; }
+// Present when the probe text measures differently with the face in front
+// of a generic fallback than with the fallback alone, for any of three
+// fallbacks: a face that is absent falls through to the fallback and
+// measures the same; one that happens to match one generic's widths is
+// told apart by another.
+function available(family) {
+  if (!probeCtx || !family) return false;
+  for (const fallback of ["monospace", "serif", "sans-serif"]) {
+    probeCtx.font = PROBE_PX + "px " + fallback;
+    const base = probeCtx.measureText(PROBE_TEXT).width;
+    probeCtx.font = PROBE_PX + "px " + quoted(family) + ", " + fallback;
+    if (probeCtx.measureText(PROBE_TEXT).width !== base) return true;
+  }
+  return false;
+}
+// The face's line box in em: the font bounding box where the browser
+// reports it (Chrome, Firefox 116, Safari 16.4), else a usual 0.8 / 0.2.
+function faceMetrics(family) {
+  probeCtx.font = "100px " + quoted(family);
+  const m = probeCtx.measureText("Hg");
+  const ascent = m.fontBoundingBoxAscent, descent = m.fontBoundingBoxDescent;
+  if (ascent > 0 && descent >= 0) return { ascent: ascent / 100, descent: descent / 100 };
+  return { ascent: 0.8, descent: 0.2 };
+}
+function stored(face) {
+  try { return localStorage.getItem(STORAGE_PREFIX + face); } catch (e) { return null; }
+}
+function store(face, choice) {
+  try { localStorage.setItem(STORAGE_PREFIX + face, choice); } catch (e) { /* private mode: the choice lasts the page */ }
+}
+function useStroke(face) {
+  families.delete(face);
+  fontsViewer.set_face_stroke(face);
+  fontsSchedule();
+}
+function useFamily(face, family) {
+  families.set(face, family);
+  const m = faceMetrics(family);
+  fontsViewer.set_face_system(face, m.ascent, m.descent);
+  fontsSchedule();
+}
+function apply(face, choice) {
+  if (!choice || choice === STROKE) useStroke(face);
+  else if (available(choice)) useFamily(face, choice);
+  else useStroke(face);
+}
+// One line per missing face: the warning, the select (stroke font first
+// and preselected, then the probed faces, then "another font"), and the
+// text box the last option reveals.
+function picker(face, choice) {
+  const line = document.createElement("p");
+  const text = document.createElement("span");
+  text.textContent = "This design names the font " + face + ", which this browser does not have. Draw it with ";
+  line.appendChild(text);
+  const select = document.createElement("select");
+  const options = [[STROKE, "the KiCad stroke font (Newstroke)"]];
+  for (const family of platformList()) {
+    if (family !== face && available(family)) options.push([family, family]);
+  }
+  options.push([OTHER, "another font..."]);
+  for (const [value, label] of options) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    select.appendChild(option);
+  }
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "font name";
+  input.hidden = true;
+  const note = document.createElement("span");
+  note.className = "absent";
+  const listed = options.some(function (o) { return o[0] === choice; });
+  if (choice && choice !== STROKE && !listed) {
+    select.value = OTHER;
+    input.hidden = false;
+    input.value = choice;
+  } else {
+    select.value = choice && listed ? choice : STROKE;
+  }
+  function chosen() {
+    if (select.value === OTHER) {
+      input.hidden = false;
+      const family = input.value.trim();
+      if (!family) { note.textContent = ""; return; }
+      if (available(family)) {
+        note.textContent = "";
+        store(face, family);
+        useFamily(face, family);
+      } else {
+        note.textContent = " (not found; drawn in the stroke font)";
+        store(face, STROKE);
+        useStroke(face);
+      }
+      return;
+    }
+    input.hidden = true;
+    note.textContent = "";
+    store(face, select.value);
+    apply(face, select.value);
+  }
+  select.addEventListener("change", chosen);
+  input.addEventListener("change", chosen);
+  line.appendChild(select);
+  line.appendChild(document.createTextNode(" "));
+  line.appendChild(input);
+  line.appendChild(note);
+  return line;
+}
+function setup() {
+  fontsBox.replaceChildren();
+  families.clear();
+  let missing = 0;
+  for (const face of fontsViewer.font_faces()) {
+    if (available(face)) { useFamily(face, face); continue; }
+    const choice = stored(face);
+    apply(face, choice);
+    fontsBox.appendChild(picker(face, choice));
+    missing += 1;
+  }
+  fontsBox.hidden = missing === 0;
+}
+// Rasterise the face the wasm asks for: measure its characters at
+// MEASURE_PX, take the plan, draw each character at the plan's pixels per
+// em into its cell (clipped to it, so an overhang never reaches the
+// neighbour), and hand the alpha channel over.
+function rasterise(face) {
+  const family = families.get(face);
+  if (!family) return;
+  const chars = Array.from(fontsViewer.face_chars(face));
+  probeCtx.font = MEASURE_PX + "px " + quoted(family);
+  const advances = new Float64Array(chars.map(function (c) { return probeCtx.measureText(c).width; }));
+  const plan = fontsViewer.atlas_plan(face, MEASURE_PX, advances);
+  if (plan.length < 3) return;
+  const px = plan[0], width = plan[1], height = plan[2];
+  atlasCanvas.width = width;
+  atlasCanvas.height = height;
+  const ctx = atlasCanvas.getContext("2d", { willReadFrequently: true });
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#fff";
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "left";
+  ctx.font = px + "px " + quoted(family);
+  const ascent = faceMetrics(family).ascent * px;
+  for (let i = 0; i < chars.length; i++) {
+    const x = plan[3 + i * 4], y = plan[4 + i * 4], w = plan[5 + i * 4], h = plan[6 + i * 4];
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.clip();
+    ctx.fillText(chars[i], x, y + ascent);
+    ctx.restore();
+  }
+  const data = ctx.getImageData(0, 0, width, height).data;
+  const coverage = new Uint8Array(width * height);
+  for (let i = 0; i < coverage.length; i++) coverage[i] = data[i * 4 + 3];
+  fontsViewer.atlas_upload(face, coverage);
+  fontsSchedule();
+}
+window.addEventListener("kiewer-frame", function () {
+  if (!fontsViewer || rasterising) return;
+  const face = fontsViewer.atlas_wanted();
+  if (!face) return;
+  rasterising = true;
+  try { rasterise(face); } catch (e) { console.warn("kiewer: font atlas for " + face + ": " + e); } finally { rasterising = false; }
+});
+window.addEventListener("kiewer-board", function (e) {
+  fontsViewer = e.detail.viewer;
+  fontsSchedule = e.detail.schedule;
+  try { setup(); } catch (e2) { console.warn("kiewer: font picker: " + e2); }
+});
 </script>
 </body>
 </html>
