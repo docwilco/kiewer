@@ -1008,3 +1008,229 @@ async fn entries(db: &PgPool, tree: TreeHash) -> Result<Vec<TreeEntry>> {
         })
         .collect()
 }
+
+/// Every branch of `design` with its head, by name, within a fork's
+/// transaction, and held: a push to any of them waits until the
+/// transaction ends, so the branches the fork copies are the ones it
+/// read and the revision it records is the head it copies.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
+/// holds a hash that is not 32 bytes, which the schema forbids.
+pub async fn lock_branches(tx: &mut PgConnection, design: DesignId) -> Result<Vec<Branch>> {
+    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "SELECT name, head_hash FROM branch WHERE design_id = $1 ORDER BY name FOR SHARE",
+    )
+    .bind(design)
+    .fetch_all(tx)
+    .await?;
+    rows.into_iter()
+        .map(|(name, head)| {
+            Ok(Branch {
+                name: BranchName::from_row(name),
+                head: RevisionHash::from_bytes(&head)?,
+            })
+        })
+        .collect()
+}
+
+/// Every slug of `owner`'s designs: what a fork's slug has to differ
+/// from. All of them, not those under the base, since a numbered slug
+/// cuts a long base and so leaves its prefix. Within the fork's
+/// transaction.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses.
+pub async fn slugs_of(tx: &mut PgConnection, owner: AccountId) -> Result<Vec<Slug>> {
+    // One person's designs, by the (owner_id, slug) index.
+    let rows: Vec<String> = sqlx::query_scalar("SELECT slug FROM design WHERE owner_id = $1")
+        .bind(owner)
+        .fetch_all(tx)
+        .await?;
+    Ok(rows.into_iter().map(Slug::from_row).collect())
+}
+
+/// A new design of `owner` at `slug` that is a fork of `source` (whose
+/// owner is at `source_owner`) at `revision`: the source's name, default
+/// branch and visibility, and the fork source columns (GLOSSARY, Forked
+/// from). Within the fork's transaction; a redirect an earlier design of
+/// the owner's left at `slug` ends here, as [`create`] ends it.
+///
+/// # Errors
+///
+/// [`Error::Refused`] with [`Refusal::SlugTaken`] when the owner has a
+/// design there already; [`Error::Db`] when Postgres refuses otherwise.
+pub async fn create_fork(
+    tx: &mut PgConnection,
+    owner: AccountId,
+    slug: &Slug,
+    source: &Design,
+    source_owner: &Handle,
+    revision: RevisionHash,
+) -> Result<Design> {
+    crate::slug::release(&mut *tx, owner, slug).await?;
+    let inserted: std::result::Result<DesignId, sqlx::Error> = sqlx::query_scalar(
+        "INSERT INTO design (owner_id, slug, name, default_branch, visibility,
+             forked_from_design_id, forked_from_handle, forked_from_slug,
+             forked_from_revision_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+    )
+    .bind(owner)
+    .bind(slug.as_str())
+    .bind(&source.name)
+    .bind(&source.default_branch)
+    .bind(source.visibility.as_str())
+    .bind(source.id)
+    .bind(source_owner.as_str())
+    .bind(source.slug.as_str())
+    .bind(revision.as_bytes())
+    .fetch_one(tx)
+    .await;
+    match inserted {
+        Ok(id) => Ok(Design {
+            id,
+            owner_id: owner,
+            slug: slug.clone(),
+            name: source.name.clone(),
+            default_branch: source.default_branch.clone(),
+            visibility: source.visibility,
+        }),
+        Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+            Err(Error::Refused(Refusal::SlugTaken {
+                slug: slug.to_string(),
+            }))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The branches of `from` named in `names` become branches of `to` at
+/// the same heads, within the fork's transaction after [`lock_branches`]
+/// held them. The names copied come back, by name.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses.
+pub async fn copy_branches(
+    tx: &mut PgConnection,
+    from: DesignId,
+    to: DesignId,
+    names: &[&str],
+) -> Result<Vec<BranchName>> {
+    let copied: Vec<String> = sqlx::query_scalar(
+        "INSERT INTO branch (design_id, name, head_hash)
+         SELECT $2, b.name, b.head_hash FROM branch b
+         WHERE b.design_id = $1 AND b.name = ANY($3)
+         ORDER BY b.name
+         RETURNING name",
+    )
+    .bind(from)
+    .bind(to)
+    .bind(names)
+    .fetch_all(tx)
+    .await?;
+    Ok(copied.into_iter().map(BranchName::from_row).collect())
+}
+
+/// `design`'s index of its revisions rebuilt from its branches: every
+/// revision on the chain of any branch of the design becomes one it may
+/// show (ADR 0002: the index is rebuildable from the branches). Rows
+/// already there stay; rows no chain reaches stay too, since the chain
+/// is what a read follows and the collector what removes them. What a
+/// fork writes after it has copied its branches; how many rows it added.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses.
+pub async fn rebuild_design_revisions(tx: &mut PgConnection, design: DesignId) -> Result<u64> {
+    let added = sqlx::query(&format!(
+        "WITH RECURSIVE {CHAIN}
+         INSERT INTO design_revision (design_id, revision_hash)
+         SELECT DISTINCT $1, c.hash FROM chain c
+         ON CONFLICT DO NOTHING"
+    ))
+    .bind(design)
+    .bind(None::<&str>)
+    .execute(tx)
+    .await?
+    .rows_affected();
+    Ok(added)
+}
+
+/// Where a fork came from, as its page says it (GLOSSARY, Forked from).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkSource {
+    /// The owner's handle and the slug the source is at now, or, once the
+    /// source is deleted, the ones the fork recorded.
+    pub handle: String,
+    pub slug: String,
+    /// Whether the source design still exists.
+    pub exists: bool,
+    /// The revision the fork started at, or `None` once the collector
+    /// removed it.
+    pub revision: Option<RevisionHash>,
+    /// Whether the source still reaches that revision, so a link to it
+    /// under the source's URLs resolves.
+    pub reachable: bool,
+}
+
+/// Where `design` came from, or `None` for a design that is not a fork.
+/// One read on the pool: a page's lookup, part of no write.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when the row
+/// holds a hash that is not 32 bytes, which the schema forbids.
+pub async fn fork_source(db: &PgPool, design: DesignId) -> Result<Option<ForkSource>> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        kept_handle: String,
+        kept_slug: String,
+        handle: Option<String>,
+        slug: Option<String>,
+        revision: Option<Vec<u8>>,
+        reachable: bool,
+    }
+    // The design by its key, the source by its key, its owner by its key,
+    // the reachability by design_revision's key.
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT d.forked_from_handle AS kept_handle, d.forked_from_slug AS kept_slug,
+                a.handle, s.slug, d.forked_from_revision_hash AS revision,
+                EXISTS (SELECT 1 FROM design_revision dr
+                        WHERE dr.design_id = s.id
+                          AND dr.revision_hash = d.forked_from_revision_hash) AS reachable
+         FROM design d
+         LEFT JOIN design s ON s.id = d.forked_from_design_id
+         LEFT JOIN account a ON a.id = s.owner_id
+         WHERE d.id = $1 AND d.forked_from_handle IS NOT NULL",
+    )
+    .bind(design)
+    .fetch_optional(db)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let revision = row
+        .revision
+        .as_deref()
+        .map(RevisionHash::from_bytes)
+        .transpose()?;
+    Ok(Some(match (row.handle, row.slug) {
+        (Some(handle), Some(slug)) => ForkSource {
+            handle,
+            slug,
+            exists: true,
+            revision,
+            reachable: row.reachable,
+        },
+        _ => ForkSource {
+            handle: row.kept_handle,
+            slug: row.kept_slug,
+            exists: false,
+            revision,
+            reachable: false,
+        },
+    }))
+}

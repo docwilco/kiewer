@@ -18,7 +18,7 @@ use super::auth::{Settled, personal};
 use super::design::design_page;
 use crate::account::Handle;
 use crate::description::{self, Description};
-use crate::design::{self, Design, DesignHead, Slug};
+use crate::design::{self, Design, DesignHead, ForkSource, Slug};
 use crate::design_settings::{self, Settings};
 use crate::error::{Error, Result};
 
@@ -80,6 +80,7 @@ fn refused(
     status: StatusCode,
     shown: &DesignHead,
     description: &Description,
+    forked_from: Option<&ForkSource>,
     attempt: SettingsView,
     reason: String,
 ) -> Result<Response> {
@@ -87,7 +88,7 @@ fn refused(
         error: Some(reason),
         ..attempt
     };
-    let page = design_page(shown, description, settings)?;
+    let page = design_page(shown, description, settings, forked_from)?;
     Ok(personal(settled.jar, (status, Html(page))))
 }
 
@@ -112,6 +113,7 @@ pub(super) async fn save(
         return Ok(not_found(settled));
     };
     let description = description::of(&state.db, shown.design.id).await?;
+    let forked_from = design::fork_source(&state.db, shown.design.id).await?;
     let attempt = SettingsView {
         action: url(&handle, &slug),
         name: form.name.clone(),
@@ -149,6 +151,7 @@ pub(super) async fn save(
             StatusCode::UNPROCESSABLE_ENTITY,
             &shown,
             &description,
+            forked_from.as_ref(),
             attempt,
             reason,
         ),
@@ -159,6 +162,7 @@ pub(super) async fn save(
                 StatusCode::CONFLICT,
                 &shown,
                 &description,
+                forked_from.as_ref(),
                 attempt,
                 refusal.to_string(),
             )

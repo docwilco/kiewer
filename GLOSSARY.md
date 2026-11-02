@@ -31,14 +31,15 @@ The revision a branch currently points at.
 How many revisions deep a revision sits along the branch in context ("rev 7"). A property of the branch, never part of a URL.
 
 **Fork**:
-A new design, under another owner or the same one, whose branches start at another design's revisions. Records where it came from.
-_Avoid_: copy, clone
+A new design made by a signed-in person from another design they can open, under their own handle: its branches are the source's default branch, or all of the source's branches, at their heads, and its revisions are the source's own, shared rather than copied. Takes the source's name, default branch and visibility; records where it came from. A person may fork their own design, which then sits at the next free slug.
+_Avoid_: copy, clone, duplicate
 
 **Pending revision**:
 An upload whose files are stored but whose branch head moved during the upload, waiting for the uploader to choose re-append or branch. Expires after an hour.
 
 **Forked from**:
-The source design and revision a fork started at.
+The source design and revision a fork started at: the head of the source's default branch when the fork was made. Shown on the fork's page; once the source is deleted, the line keeps naming it by the handle and slug it had, and says it is gone.
+_Avoid_: upstream, parent (a revision's parent is another thing)
 
 ### Files and storage
 

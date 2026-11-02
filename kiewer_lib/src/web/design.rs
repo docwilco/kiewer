@@ -16,11 +16,12 @@ use serde::Deserialize;
 
 use super::auth::{Settled, personal};
 use super::design_settings::SettingsView;
+use super::fork::{ForkView, ForkedFromView};
 use super::viewer::{BranchView, DesignView, FileView, Page, RecentView};
 use super::{AppState, blob, history, schematic};
 use crate::account::Handle;
 use crate::description::{self, Description};
-use crate::design::{self, At, BranchName, DesignHead, Slug};
+use crate::design::{self, At, BranchName, DesignHead, ForkSource, Slug};
 use crate::error::{Error, Refusal, Result};
 use crate::revision::RevisionHash;
 use crate::roles::{self, Membership};
@@ -55,13 +56,15 @@ pub(super) fn people_url(handle: &Handle, slug: &Slug) -> String {
 
 /// The design page for `shown`: the viewer at the revision shown, in the
 /// context of its branch, with the revision's details, the design's
-/// `description`, and `settings` as its settings block. Rendered here for
+/// `description`, `settings` as its settings block, and `forked_from`
+/// as its forked-from line when the design is a fork. Rendered here for
 /// the page, the branch and revision routes (`web/history.rs`) and the
 /// settings form's refusal, which shows the page again with the reason.
 pub(super) fn design_page(
     shown: &DesignHead,
     description: &Description,
     settings: SettingsView,
+    forked_from: Option<&ForkSource>,
 ) -> Result<String> {
     let board_url = shown.board().map(|entry| blob::url(&entry.blob));
     let schematic_url = shown
@@ -135,6 +138,8 @@ pub(super) fn design_page(
         people_url: people_url(&shown.owner, &shown.design.slug),
         description_html: description.html.clone(),
         settings,
+        fork: ForkView::of(&shown.owner, &shown.design, shown.branches.len()),
+        forked_from: forked_from.map(ForkedFromView::of),
     };
     let page = Page::new(shown.design.name.clone(), board_url, Some(view));
     Ok(page.render()?)
@@ -202,7 +207,14 @@ pub(super) async fn show(
     }
     let description = description::of(&state.db, shown.design.id).await?;
     let settings = SettingsView::of(&handle, &shown.design, &description);
-    Ok(Html(design_page(&shown, &description, settings)?).into_response())
+    let forked_from = design::fork_source(&state.db, shown.design.id).await?;
+    Ok(Html(design_page(
+        &shown,
+        &description,
+        settings,
+        forked_from.as_ref(),
+    )?)
+    .into_response())
 }
 
 /// Where the upload form was opened from (`/upload?design=&branch=&from=`,

@@ -29,6 +29,14 @@
   /* Visibility and the people link, under the details (roles, #21). */
   #people { margin: 0; padding: 0.3em 0.8em; border-top: 1px solid #444; opacity: 0.8; }
   #people a { color: inherit; }
+  /* The forked-from line and the fork form (docs/v1-scope.md, Storage
+     and history, Fork), under the people line; the form is in the page
+     for everyone and hidden until /api/me says the person is signed in,
+     and the block with it on a design that is no fork. */
+  #fork { padding: 0.3em 0.8em; border-top: 1px solid #444; opacity: 0.8; }
+  #fork a { color: inherit; }
+  #fork form:not([hidden]) { display: inline; margin-left: 1em; }
+  #fork select, #fork button { font: inherit; }
   /* The description (docs/v1-scope.md, Pages and URLs) inside the
      details, and the settings block below them: the owner's form, in the
      page for everyone and hidden until /api/me says so. */
@@ -148,6 +156,13 @@
   </ul>
 </details>
 <p id="people">{{ design.visibility }} · <a href="{{ design.people_url }}">people</a></p>
+<div id="fork"{% if design.forked_from.is_none() %} hidden{% endif %}>
+  {% if let Some(from) = design.forked_from %}Forked from {% if let Some(url) = from.url %}<a href="{{ url }}">{{ from.handle }}/{{ from.slug }}</a>{% else %}{{ from.handle }}/{{ from.slug }} (deleted){% endif %}{% if let Some(hash) = from.revision %} at {% if let Some(url) = from.revision_url %}<a href="{{ url }}"><code title="{{ hash }}">{{ from.short }}</code></a>{% else %}<code title="{{ hash }}">{{ from.short }}</code>{% endif %}{% endif %}{% endif %}
+  <form method="post" action="{{ design.fork.action }}" hidden>
+    <label>Fork <select name="take" title="which branches the fork takes"><option value="default">the {{ design.fork.default_branch }} branch</option>{% if design.fork.branch_count > 1 %}<option value="all">all {{ design.fork.branch_count }} branches</option>{% endif %}</select></label>
+    <button type="submit">into my account</button>
+  </form>
+</div>
 <details id="settings"{% if design.settings.error.is_some() %} open{% else %} hidden{% endif %}>
   <summary>Settings</summary>
   {% if let Some(error) = design.settings.error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
@@ -944,6 +959,20 @@ if (settingsBlock && settingsBlock.hidden) {
     .then(function (response) { return response.ok ? response.json() : null; })
     .then(function (me) { if (me && me.handle === "{{ design.handle }}") settingsBlock.hidden = false; })
     .catch(function () { /* signed out or offline: the block stays hidden */ });
+}
+</script>
+<script type="module">
+// The fork form (docs/v1-scope.md, Storage and history, Fork; the server
+// side is kiewer_lib/src/web/fork.rs). In the page hidden for the same
+// reason as the settings block, and shown to anyone signed in with a
+// handle: the POST needs no role, only a person to own the fork.
+const forkBlock = document.getElementById("fork");
+const forkForm = forkBlock && forkBlock.querySelector("form");
+if (forkForm) {
+  fetch("/api/me", { credentials: "same-origin" })
+    .then(function (response) { return response.ok ? response.json() : null; })
+    .then(function (me) { if (me && me.handle) forkBlock.hidden = forkForm.hidden = false; })
+    .catch(function () { /* signed out or offline: the form stays hidden */ });
 }
 </script>
 {% endif %}

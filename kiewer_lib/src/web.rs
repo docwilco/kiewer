@@ -7,7 +7,7 @@
 //! in `web/schematic.rs`; the branch, revision and history pages in
 //! `web/history.rs`; the people page in `web/people.rs`; a person's page
 //! in `web/person.rs`; the design settings form in
-//! `web/design_settings.rs`.
+//! `web/design_settings.rs`; the fork form in `web/fork.rs`.
 
 mod about;
 mod auth;
@@ -15,6 +15,7 @@ pub mod beacon;
 pub mod blob;
 mod design;
 pub mod design_settings;
+pub mod fork;
 pub mod history;
 mod people;
 mod person;
@@ -70,6 +71,7 @@ pub fn router(state: AppState) -> Router {
         .merge(history::routes())
         .merge(people::routes())
         .merge(design_settings::routes())
+        .merge(fork::routes())
         // The upload's body may hold a revision's worth of files; every
         // other route keeps axum's default limit. Static routes above win
         // over the design page's two segments (axum 0.8 matches the most

@@ -214,6 +214,11 @@ pub struct DesignView {
     /// The settings block: the form's values and a refusal's reason
     /// (`web/design_settings.rs`).
     pub settings: super::design_settings::SettingsView,
+    /// The fork form: where it posts and the branch choice
+    /// (`web/fork.rs`).
+    pub fork: super::fork::ForkView,
+    /// The forked-from line, for a design that is a fork.
+    pub forked_from: Option<super::fork::ForkedFromView>,
 }
 
 /// The viewer page: the hand-off board at `/viewer`, a design's revision
