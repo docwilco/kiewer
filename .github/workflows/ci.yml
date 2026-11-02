@@ -87,7 +87,7 @@ jobs:
       # The GCS emulator the step below starts; the tests gated on it
       # (kiewer_lib/tests/gcs_blob_store.rs) run here and skip on a box
       # without it.
-      KIEWER_GCS_EMULATOR: http://127.0.0.1:4443
+      KIEWER_GCS_EMULATOR: http://127.0.0.1:8092
     steps:
       - uses: actions/checkout@v5
       # The programs the code or its tests run. This list, the Dockerfile's
@@ -109,8 +109,8 @@ jobs:
           curl -fsSLO "https://github.com/fsouza/fake-gcs-server/releases/download/v$version/checksums.txt"
           grep "fake-gcs-server_${version}_Linux_amd64.tar.gz" checksums.txt | sha256sum -c -
           tar xzf "fake-gcs-server_${version}_Linux_amd64.tar.gz" fake-gcs-server
-          ./fake-gcs-server -scheme http -host 127.0.0.1 -port 4443 -backend memory -public-host 127.0.0.1 &
-          for _ in $(seq 1 20); do curl -fs http://127.0.0.1:4443/storage/v1/b >/dev/null && break; sleep 0.5; done
+          ./fake-gcs-server -scheme http -host 127.0.0.1 -port 8092 -backend memory -public-host 127.0.0.1 &
+          for _ in $(seq 1 20); do curl -fs http://127.0.0.1:8092/storage/v1/b >/dev/null && break; sleep 0.5; done
           rm -f "fake-gcs-server_${version}_Linux_amd64.tar.gz" checksums.txt
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/cargo-cached

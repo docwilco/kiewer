@@ -1,6 +1,6 @@
 //! The GCS blob store against the shared suite, on a GCS emulator
 //! (fake-gcs-server) named by `KIEWER_GCS_EMULATOR`, the base URL of its
-//! JSON API, for example `http://127.0.0.1:4443`. Each test makes a bucket
+//! JSON API, for example `http://127.0.0.1:8092`. Each test makes a bucket
 //! of its own on the emulator, so each runs against a fresh, empty store.
 //! Without the variable every test here returns at once with a line
 //! saying so: a machine without the emulator skips the store, it does not

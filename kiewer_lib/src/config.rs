@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 
 /// The port when `PORT` is unset: Cloud Run's default, so a dev box and
 /// the container agree.
-pub const DEFAULT_PORT: u16 = 8080;
+pub const DEFAULT_PORT: u16 = 8090;
 
 /// Where the filesystem blob store writes when `KIEWER_BLOB_DIR` is unset:
 /// under the working directory, git-ignored.
@@ -196,7 +196,7 @@ mod tests {
             }
         );
         assert_eq!(config.database_url, "postgres://x");
-        assert_eq!(config.public_url, "http://localhost:8080");
+        assert_eq!(config.public_url, "http://localhost:8090");
         assert!(config.oauth.is_empty(), "sign-in is off without an app");
     }
 
@@ -329,14 +329,14 @@ mod tests {
         let config = Config::from_vars(vars(&[
             ("DATABASE_URL", "postgres://x"),
             ("BLOB_BUCKET", "kiewer-dev"),
-            ("KIEWER_GCS_EMULATOR", "http://127.0.0.1:4443"),
+            ("KIEWER_GCS_EMULATOR", "http://127.0.0.1:8092"),
         ]))
         .expect("valid");
         assert_eq!(
             config.blobs,
             BlobStoreConfig::Gcs {
                 bucket: "kiewer-dev".to_owned(),
-                emulator: Some("http://127.0.0.1:4443".to_owned()),
+                emulator: Some("http://127.0.0.1:8092".to_owned()),
             }
         );
     }
@@ -345,7 +345,7 @@ mod tests {
     fn an_emulator_without_a_bucket_leaves_the_filesystem_store() {
         let config = Config::from_vars(vars(&[
             ("DATABASE_URL", "postgres://x"),
-            ("KIEWER_GCS_EMULATOR", "http://127.0.0.1:4443"),
+            ("KIEWER_GCS_EMULATOR", "http://127.0.0.1:8092"),
         ]))
         .expect("the test's export does not change the server's store");
         assert_eq!(
@@ -364,11 +364,11 @@ mod tests {
         assert_eq!(fs.to_string(), "directory blobs");
         let gcs = BlobStoreConfig::Gcs {
             bucket: "b".to_owned(),
-            emulator: Some("http://127.0.0.1:4443".to_owned()),
+            emulator: Some("http://127.0.0.1:8092".to_owned()),
         };
         assert_eq!(
             gcs.to_string(),
-            "bucket b on the emulator at http://127.0.0.1:4443"
+            "bucket b on the emulator at http://127.0.0.1:8092"
         );
     }
 

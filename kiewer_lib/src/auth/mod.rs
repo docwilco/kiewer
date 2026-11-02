@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test_case("https://kiewer.example", true; "https is secure")]
-    #[test_case("http://localhost:8080", false; "http on a dev box is not")]
+    #[test_case("http://localhost:8090", false; "http on a dev box is not")]
     fn cookies_are_secure_under_https(public_url: &str, secure: bool) {
         let auth = Auth::new(Vec::new(), public_url).unwrap();
         assert_eq!(auth.secure_cookies(), secure);

@@ -20,8 +20,8 @@ Running the server: `docker compose up -d` starts Postgres (`compose.yaml`),
 or `kicad_core`: it writes the browser viewer to `kiewer_viewer/dist`, which
 `cargo run` embeds; without it the server runs and the viewer page says the
 viewer is not built in), then `cargo run`. The first line on stdout is the
-build line; the page is at http://localhost:8080/, the viewer at
-http://localhost:8080/viewer, and `/healthz` says `ok` once the database
+build line; the page is at http://localhost:8090/, the viewer at
+http://localhost:8090/viewer, and `/healthz` says `ok` once the database
 answers.
 `kiewer_lib::config` is the list of variables the server reads and their
 defaults; the blob store writes under `blobs/` (git-ignored) unless
@@ -37,7 +37,7 @@ naming rule).
 
 Sign-in needs an OAuth app of your own at each provider you want, one per
 environment (docs/v1-scope.md, Q57). The callback URL to register is
-`PUBLIC_URL` (default `http://localhost:8080`, localhost on `PORT`) plus
+`PUBLIC_URL` (default `http://localhost:8090`, localhost on `PORT`) plus
 `/auth/<provider>/callback`; the client id and secret go in `.env` as
 `OAUTH_<PROVIDER>_CLIENT_ID` and `OAUTH_<PROVIDER>_CLIENT_SECRET`, the
 names `infra/` hands Cloud Run too. A provider with neither variable is
@@ -45,16 +45,16 @@ left off the front page and its `/auth/<provider>` answers 404; one
 variable without the other fails startup naming the missing one.
 
 - GitHub: https://github.com/settings/developers, New OAuth App, any name,
-  homepage `http://localhost:8080`, callback
-  `http://localhost:8080/auth/github/callback`; generate a client secret.
+  homepage `http://localhost:8090`, callback
+  `http://localhost:8090/auth/github/callback`; generate a client secret.
   Variables `OAUTH_GITHUB_*`.
 - Discord: https://discord.com/developers/applications, New Application,
-  OAuth2, add the redirect `http://localhost:8080/auth/discord/callback`;
+  OAuth2, add the redirect `http://localhost:8090/auth/discord/callback`;
   the client id and secret are on that page. The server asks the
   `identify` and `email` scopes. Variables `OAUTH_DISCORD_*`.
 - Google: https://console.cloud.google.com/apis/credentials, Create
   credentials, OAuth client ID, Web application, authorised redirect URI
-  `http://localhost:8080/auth/google/callback`; the consent screen needs
+  `http://localhost:8090/auth/google/callback`; the consent screen needs
   the `email` and `profile` scopes and, while it is in testing, your
   account as a test user. Variables `OAUTH_GOOGLE_*`.
 
@@ -68,8 +68,8 @@ when `KIEWER_GCS_EMULATOR` names a
 [fake-gcs-server](https://github.com/fsouza/fake-gcs-server) and skips when
 it is not set. On a dev box: the release binary for your platform (v1.56.1,
 the version CI pins), then
-`fake-gcs-server -scheme http -host 127.0.0.1 -port 4443 -backend memory -public-host 127.0.0.1`
-and `export KIEWER_GCS_EMULATOR=http://127.0.0.1:4443`.
+`fake-gcs-server -scheme http -host 127.0.0.1 -port 8092 -backend memory -public-host 127.0.0.1`
+and `export KIEWER_GCS_EMULATOR=http://127.0.0.1:8092`.
 
 Clippy is pedantic with no blanket allows: every finding is fixed or carries a
 site-level `#[expect(..., reason = "...")]` naming the invariant that makes it safe.
