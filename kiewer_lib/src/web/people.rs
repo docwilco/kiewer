@@ -329,20 +329,20 @@ async fn transfer(
     };
     let changed = roles::transfer(&state.db, access.design.id, &person).await?;
     tracing::info!(design = %access.design.slug, to = %person, ?changed, "transfer");
-    if changed == Changed::Done {
-        let keys = [
-            Key::Design(access.design.id),
-            Key::Handle(access.owner.clone()),
-            Key::Handle(person.clone()),
-            Key::Home,
-        ];
-        cache::after_write(state.purge.as_ref(), &keys).await;
-    }
     match changed {
-        Changed::Done => Ok(personal(
-            access.settled.jar,
-            Redirect::to(&people_url(&person, &access.design.slug)),
-        )),
+        Changed::Done => {
+            let keys = [
+                Key::Design(access.design.id),
+                Key::Handle(access.owner),
+                Key::Handle(person.clone()),
+                Key::Home,
+            ];
+            cache::after_write(state.purge.as_ref(), &keys).await;
+            Ok(personal(
+                access.settled.jar,
+                Redirect::to(&people_url(&person, &access.design.slug)),
+            ))
+        }
         // The person named is the owner already: nothing to move.
         Changed::TheOwner => Ok(done(access)),
         other => after(&state, access, &person, other).await,

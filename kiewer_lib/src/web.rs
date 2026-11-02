@@ -187,7 +187,7 @@ struct Index {
 
 /// A path no route has: a 404 kept briefly, like any other.
 async fn no_route() -> Response {
-    cache::not_found(&[], "not found\n")
+    cache::not_found("not found\n")
 }
 
 async fn index(State(state): State<AppState>) -> Result<Response> {

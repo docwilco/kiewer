@@ -69,9 +69,9 @@ pub fn history_url(handle: &Handle, slug: &Slug, branch: &BranchName) -> String 
     format!("/{handle}/{slug}/b/{branch}/history")
 }
 
-/// The 404 under `handle`, the first segment as the URL has it.
-fn not_found(handle: &str, what: &str) -> Response {
-    cache::not_found(&cache::handle_key(handle), format!("no such {what}\n"))
+/// The 404 under `segment`, the URL's first segment as it came.
+fn not_found(segment: &str, what: &str) -> Response {
+    cache::not_found_under(segment, format!("no such {what}\n"))
 }
 
 /// `GET /{handle}/{slug}/b/{branch}`: the viewer at the branch's head;
@@ -167,11 +167,11 @@ struct HistoryPage {
 /// newest first, or 404 when there is no such design or branch.
 async fn history(
     State(state): State<AppState>,
-    Path((text, slug, branch)): Path<(String, String, String)>,
+    Path((segment, slug, branch)): Path<(String, String, String)>,
 ) -> Result<Response> {
-    let not_found = |what| not_found(&text, what);
+    let not_found = |what| not_found(&segment, what);
     let (Ok(handle), Ok(slug), Ok(branch)) = (
-        text.parse::<Handle>(),
+        segment.parse::<Handle>(),
         slug.parse::<Slug>(),
         branch.parse::<BranchName>(),
     ) else {

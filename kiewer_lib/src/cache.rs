@@ -5,8 +5,11 @@
 //! kept briefly. A cacheable page carries [`Key`]s in `Surrogate-Key`,
 //! and the writes that change it purge those keys through the
 //! [`Purge`] client: [`Fastly`] in production, [`NoPurge`] on a dev box,
-//! [`Recorder`] in a test. The rule for a handler: every response names
-//! its policy, and a page under a design or a handle carries their keys.
+//! [`Recorder`] in a test. The rule for a handler: every response it
+//! builds names its policy, and a page under a design or a handle
+//! carries their keys. What axum answers by itself (a 405, an extractor's
+//! rejection) names none, and Fastly's `default_ttl = 0` keeps it out of
+//! the cache.
 //! What each write purges is [`Key`]'s documentation.
 
 use std::fmt;
@@ -14,7 +17,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::http::header::{CACHE_CONTROL, HeaderName};
+use axum::http::header::{ACCEPT_ENCODING, CACHE_CONTROL, HeaderName};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 
@@ -45,9 +48,10 @@ pub enum Policy {
     Immutable,
     /// A 404 for a design, a person or a blob that may exist soon, and
     /// the answer for a blocked blob, which a cleared takedown must be
-    /// able to undo: kept a minute at Fastly, never immutable. A 404
-    /// under a handle carries that handle's key ([`not_found`]), so the
-    /// push that creates the design clears it at once.
+    /// able to undo: kept a minute at Fastly, never immutable. A 404 for
+    /// a person or a design carries the handle's key
+    /// ([`not_found_under`]), so the write that makes it exist clears it
+    /// at once.
     NotFound,
 }
 
@@ -83,6 +87,7 @@ impl Policy {
 /// - a thumbnail that arrives after the push (the Cloud Tasks retry):
 ///   every design holding the revision, as a visibility change does,
 ///   since listings and Open Graph tags show it;
+/// - a handle chosen: the handle, since its page starts to exist;
 /// - a role change: nothing, since no cacheable page shows roles.
 ///
 /// A design's pages carry its design key alone, so one push does not
@@ -93,9 +98,10 @@ pub enum Key {
     /// The home page's recent list.
     Home,
     /// Every page of one design: the design, branch, revision, history
-    /// and schematic pages, and the redirect from a slug it left.
+    /// and schematic pages.
     Design(DesignId),
-    /// A person's page, and whatever else lists their designs by handle.
+    /// A person's page, and what answers under the handle for a design
+    /// that is not there: a 404, and the redirect from a slug it left.
     Handle(Handle),
 }
 
@@ -132,13 +138,6 @@ pub fn of_design(id: DesignId, owner: &Handle, visibility: Visibility) -> Vec<Ke
     keys
 }
 
-/// The key of the handle a URL's first segment names, or none for text
-/// that is not a handle: what a 404 under that segment carries.
-#[must_use]
-pub fn handle_key(segment: &str) -> Vec<Key> {
-    segment.parse().map(Key::Handle).into_iter().collect()
-}
-
 /// `response` with `policy` and `keys`.
 fn with_keys(policy: Policy, keys: &[Key], response: impl IntoResponse) -> Response {
     let mut response = ([policy.header()], response).into_response();
@@ -157,11 +156,20 @@ pub fn page(keys: &[Key], response: impl IntoResponse) -> Response {
     with_keys(Policy::Page, keys, response)
 }
 
-/// A 404 saying `body`: [`Policy::NotFound`], and `keys` so the write
-/// that makes the page exist clears it.
-pub fn not_found(keys: &[Key], body: impl Into<String>) -> Response {
+/// A 404 saying `body` for a path nothing can clear early:
+/// [`Policy::NotFound`].
+pub fn not_found(body: impl Into<String>) -> Response {
     let response = (StatusCode::NOT_FOUND, body.into());
-    with_keys(Policy::NotFound, keys, response)
+    with_keys(Policy::NotFound, &[], response)
+}
+
+/// The same under `segment`, a URL's first segment as it came: when it
+/// is a handle the response carries that handle's key, so the write that
+/// makes the page exist clears it.
+pub fn not_found_under(segment: &str, body: impl Into<String>) -> Response {
+    let keys: Vec<Key> = segment.parse().map(Key::Handle).into_iter().collect();
+    let response = (StatusCode::NOT_FOUND, body.into());
+    with_keys(Policy::NotFound, &keys, response)
 }
 
 /// What purges keys at the edge.
@@ -247,7 +255,7 @@ impl Purge for Recorder {
 }
 
 /// Where Fastly's API is.
-pub const FASTLY_API: &str = "https://api.fastly.com";
+const FASTLY_API: &str = "https://api.fastly.com";
 
 /// The most keys one purge call takes, as Fastly's purging reference
 /// says.
@@ -281,7 +289,7 @@ impl fmt::Debug for Fastly {
 }
 
 impl Fastly {
-    /// The client for `service_id` with `token`, against [`FASTLY_API`].
+    /// The client for `service_id` with `token`, against Fastly's API.
     ///
     /// # Errors
     ///
@@ -310,12 +318,6 @@ impl Fastly {
             api: api.into().trim_end_matches('/').to_owned(),
             http,
         })
-    }
-
-    /// The service purged on.
-    #[must_use]
-    pub fn service_id(&self) -> &str {
-        &self.service_id
     }
 }
 
@@ -365,45 +367,37 @@ impl Encoding {
         }
     }
 
-    /// The coding to send from what `Accept-Encoding` takes: brotli when
-    /// it is accepted, else gzip, else identity. A coding with `q=0` is
-    /// refused; `*` accepts any; no header accepts identity alone, as
-    /// curl sends.
+    /// Whether `Accept-Encoding` takes the coding `name`: named, or by
+    /// `*`, with any weight above zero. No header takes identity alone,
+    /// as curl sends.
     #[must_use]
-    pub fn negotiate(headers: &HeaderMap) -> Encoding {
-        let mut brotli = false;
-        let mut gzip = false;
-        for value in headers.get_all(axum::http::header::ACCEPT_ENCODING) {
-            let Ok(value) = value.to_str() else {
-                continue;
-            };
-            for coding in value.split(',') {
-                let coding = coding.trim();
-                let name = coding.split(';').next().unwrap_or(coding).trim();
-                let refused = coding.split(';').skip(1).any(|param| {
+    pub fn accepts(headers: &HeaderMap, name: &str) -> bool {
+        headers
+            .get_all(ACCEPT_ENCODING)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|coding| {
+                let mut parts = coding.split(';');
+                let named = parts.next().unwrap_or_default().trim();
+                let refused = parts.any(|param| {
                     param
                         .trim()
                         .strip_prefix("q=")
                         .and_then(|q| q.trim().parse::<f32>().ok())
                         .is_some_and(|q| q <= 0.0)
                 });
-                if refused {
-                    continue;
-                }
-                match name {
-                    "br" => brotli = true,
-                    "gzip" => gzip = true,
-                    "*" => {
-                        brotli = true;
-                        gzip = true;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if brotli {
+                (named == name || named == "*") && !refused
+            })
+    }
+
+    /// The coding to send: brotli when it is accepted, else gzip, else
+    /// identity.
+    #[must_use]
+    pub fn negotiate(headers: &HeaderMap) -> Encoding {
+        if Self::accepts(headers, "br") {
             Encoding::Brotli
-        } else if gzip {
+        } else if Self::accepts(headers, "gzip") {
             Encoding::Gzip
         } else {
             Encoding::Identity
@@ -468,14 +462,15 @@ mod tests {
 
     #[test]
     fn a_404_is_kept_briefly_and_carries_the_handle_it_is_under() {
-        let response = not_found(&handle_key("ada"), "no such design\n");
+        let response = not_found_under("ada", "no such design\n");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(
             response.headers().get(CACHE_CONTROL).unwrap(),
             "public, max-age=0, s-maxage=60"
         );
         assert_eq!(response.headers().get(SURROGATE_KEY).unwrap(), "handle-ada");
-        assert_eq!(handle_key("Not A Handle"), [], "not a handle: no key");
+        let unkeyed = not_found_under("Not A Handle", "no such design\n");
+        assert!(unkeyed.headers().get(SURROGATE_KEY).is_none());
     }
 
     #[test_case(Visibility::Public, true; "a public design is on the home page")]
@@ -534,6 +529,17 @@ mod tests {
         assert_eq!(Encoding::negotiate(&accept(value)), encoding);
     }
 
+    #[test_case(Some("gzip, deflate, br"), true; "a browser")]
+    #[test_case(Some("gzip;q=1.0, identity; q=0.5"), true; "weighted")]
+    #[test_case(Some("gzip;q=0.5"), true; "a weight that starts with a zero is no refusal")]
+    #[test_case(Some("*"), true; "anything")]
+    #[test_case(Some("gzip;q=0"), false; "gzip refused")]
+    #[test_case(Some("identity"), false; "identity only")]
+    #[test_case(None, false; "no header, as curl sends")]
+    fn gzip_is_accepted_only_by_a_client_that_takes_it(value: Option<&str>, gzip: bool) {
+        assert_eq!(Encoding::accepts(&accept(value), "gzip"), gzip);
+    }
+
     #[test]
     fn identity_sends_no_content_encoding() {
         assert_eq!(Encoding::Brotli.content_encoding(), Some("br"));
@@ -544,7 +550,6 @@ mod tests {
     #[test]
     fn the_fastly_client_names_its_service_and_hides_its_token() {
         let fastly = Fastly::new("SU1Z0isxPaozGVKXdv0eY", "secret").expect("a client");
-        assert_eq!(fastly.service_id(), "SU1Z0isxPaozGVKXdv0eY");
         let debug = format!("{fastly:?}");
         assert!(debug.contains("SU1Z0isxPaozGVKXdv0eY"), "{debug}");
         assert!(!debug.contains("secret"), "{debug}");

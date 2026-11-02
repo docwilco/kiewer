@@ -27,6 +27,7 @@ use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
 use sqlx::PgPool;
+use test_case::test_case;
 
 const BOARD: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pcb");
 const SCHEMATIC: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_sch");
@@ -201,65 +202,109 @@ fn comparable(response: &http::Response) -> (u16, Vec<(String, String)>, String)
     (response.status, headers, response.body.clone())
 }
 
+/// What a page test looks at: the owner's browser, a design of the
+/// hand-off files and one with a schematic alone.
+struct Site {
+    addr: SocketAddr,
+    owner: http::Browser,
+    handle: Handle,
+    path: String,
+    revision: String,
+    board: String,
+    nobody: String,
+    design: Design,
+    _dir: TempDir,
+}
+
+impl Site {
+    async fn up(db: PgPool) -> Site {
+        let (addr, dir) = server(db.clone()).await;
+        let (mut owner, owner_id, handle) = signed_in(&db, addr).await;
+        let path = uploaded(&mut owner).await;
+        assert_eq!(path, format!("/{handle}/midi8knob"));
+        let design = only_design(&db, owner_id).await;
+        let page = http::request(addr, "GET", &path, &[], "").await;
+        // The revision dropdown's option values are the revision URLs.
+        let revision = linked_hash(&page.body, &format!("{path}/r/"));
+        let board = linked_hash(&page.body, "fetch(\"/blob/");
+        // A design with a schematic alone opens on it: the bare URL
+        // answers 303 and `?design` keeps the design page.
+        let sheet_only = owner
+            .post_multipart(
+                "/upload",
+                &[
+                    Part::text("name", "sheet only"),
+                    Part::file("sheet.kicad_sch", SCHEMATIC),
+                ],
+            )
+            .await;
+        assert_eq!(sheet_only.status, 303, "{}", sheet_only.body);
+        Site {
+            addr,
+            owner,
+            handle,
+            path,
+            revision,
+            board,
+            nobody: fresh("nobody"),
+            design,
+            _dir: dir,
+        }
+    }
+
+    /// `template` with this site's values in place of its braces.
+    fn url(&self, template: &str) -> String {
+        template
+            .replace("{path}", &self.path)
+            .replace("{handle}", self.handle.as_str())
+            .replace("{revision}", &self.revision)
+            .replace("{board}", &self.board)
+            .replace("{nobody}", &self.nobody)
+            .replace("{design_key}", &Key::Design(self.design.id).to_string())
+    }
+}
+
+#[test_case("/"; "the home page")]
+#[test_case("/about"; "the about page")]
+#[test_case("/viewer"; "the hand-off viewer")]
+#[test_case("/viewer/midi8knob.kicad_pcb"; "the hand-off board")]
+#[test_case("/schematic"; "the hand-off schematic")]
+#[test_case("/schematic/midi8knob.kicad_sch"; "the hand-off sheet")]
+#[test_case("/{handle}"; "a person")]
+#[test_case("{path}"; "a design")]
+#[test_case("{path}/b/main"; "a branch")]
+#[test_case("{path}/r/{revision}"; "a revision")]
+#[test_case("{path}/b/main/history"; "a history")]
+#[test_case("{path}/schematic"; "a schematic")]
+#[test_case("{path}?design"; "a design asked to stay")]
+#[test_case("{path}/r/{revision}/f/midi8knob.kicad_pcb"; "a file")]
+#[test_case("{path}/r/{revision}/thumbnail/400x400.png"; "a thumbnail")]
+#[test_case("/blob/{board}"; "a blob")]
+#[test_case("/{handle}/no-such-design"; "a design that is not there")]
+#[test_case("/{nobody}"; "a person who is not there")]
+#[test_case("/{handle}/sheet-only"; "a schematic alone, which redirects")]
+#[test_case("/{handle}/sheet-only?design"; "a schematic alone asked to stay")]
 #[tokio::test]
-async fn every_cacheable_page_renders_the_same_bytes_with_a_session_as_without() {
+async fn a_cacheable_page_renders_the_same_bytes_with_a_session_as_without(template: &str) {
     let Some(db) = pool_from_env().await else {
         return;
     };
-    let (addr, _dir) = server(db.clone()).await;
-    let (mut owner, _, handle) = signed_in(&db, addr).await;
-    let design_path = uploaded(&mut owner).await;
-    assert_eq!(design_path, format!("/{handle}/midi8knob"));
-    let page = http::request(addr, "GET", &design_path, &[], "").await;
-    // The revision dropdown's option values are the revision URLs.
-    let revision = linked_hash(&page.body, &format!("{design_path}/r/"));
-    let board = linked_hash(&page.body, "fetch(\"/blob/");
-    // A design with a schematic alone opens on it: the bare URL answers
-    // 303 and `?design` keeps the design page.
-    let sheet_only = owner
-        .post_multipart(
-            "/upload",
-            &[
-                Part::text("name", "sheet only"),
-                Part::file("sheet.kicad_sch", SCHEMATIC),
-            ],
-        )
-        .await;
-    assert_eq!(sheet_only.status, 303, "{}", sheet_only.body);
-    let sheet_only = sheet_only
-        .header("location")
-        .expect("the design")
-        .to_owned();
-    let bare = http::request(addr, "GET", &sheet_only, &[], "").await;
-    assert_eq!(bare.status, 303, "a schematic alone opens on the schematic");
-
-    let pages = [
-        "/".to_owned(),
-        "/about".to_owned(),
-        "/viewer".to_owned(),
-        "/viewer/midi8knob.kicad_pcb".to_owned(),
-        "/schematic".to_owned(),
-        "/schematic/midi8knob.kicad_sch".to_owned(),
-        format!("/{handle}"),
-        design_path.clone(),
-        format!("{design_path}/b/main"),
-        format!("{design_path}/r/{revision}"),
-        format!("{design_path}/b/main/history"),
-        format!("{design_path}/schematic"),
-        format!("/blob/{board}"),
-        format!("/{handle}/no-such-design"),
-        format!("/{}", fresh("nobody")),
-        format!("{design_path}?design"),
-        sheet_only.clone(),
-        format!("{sheet_only}?design"),
-        format!("{design_path}/r/{revision}/f/midi8knob.kicad_pcb"),
-        format!("{design_path}/r/{revision}/thumbnail/400x400.png"),
-    ];
-    for path in &pages {
-        let anonymous = http::request(addr, "GET", path, &[], "").await;
-        let with_session = owner.get(path).await;
+    let mut site = Site::up(db).await;
+    let path = site.url(template);
+    // The home page lists every test's designs, and the other cases push
+    // while this one runs. Two anonymous reads either side of the session's
+    // show the page held still; only then does a difference mean the
+    // session.
+    for _ in 0..100 {
+        let before = http::request(site.addr, "GET", &path, &[], "").await;
+        let with_session = site.owner.get(&path).await;
+        let after = http::request(site.addr, "GET", &path, &[], "").await;
+        if comparable(&before) != comparable(&after) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            continue;
+        }
         assert_eq!(
-            comparable(&anonymous),
+            comparable(&before),
             comparable(&with_session),
             "{path} depends on the session"
         );
@@ -267,7 +312,9 @@ async fn every_cacheable_page_renders_the_same_bytes_with_a_session_as_without()
             with_session.header("set-cookie").is_none(),
             "{path} touched the session cookie"
         );
+        return;
     }
+    panic!("{path} never held still between two reads");
 }
 
 /// The server over `db` with a purge recorder.
@@ -294,82 +341,51 @@ fn caching(response: &http::Response) -> (Option<&str>, Option<&str>) {
     )
 }
 
+#[test_case("/", 200, Policy::Page, Some("home"); "the home page")]
+#[test_case("/{handle}", 200, Policy::Page, Some("handle-{handle}"); "a person")]
+#[test_case("{path}", 200, Policy::Page, Some("{design_key}"); "a design")]
+#[test_case("{path}/b/main", 200, Policy::Page, Some("{design_key}"); "a branch")]
+#[test_case("{path}/r/{revision}", 200, Policy::Page, Some("{design_key}"); "a revision")]
+#[test_case("{path}/b/main/history", 200, Policy::Page, Some("{design_key}"); "a history")]
+#[test_case("{path}/schematic", 200, Policy::Page, Some("{design_key}"); "a schematic")]
+#[test_case("/about", 200, Policy::Page, None; "the about page")]
+#[test_case("/viewer", 200, Policy::Page, None; "the hand-off viewer")]
+#[test_case("/schematic", 200, Policy::Page, None; "the hand-off schematic")]
+#[test_case("/{handle}/no-such-design", 404, Policy::NotFound, Some("handle-{handle}"); "no design")]
+#[test_case("/{nobody}", 404, Policy::NotFound, Some("handle-{nobody}"); "no person")]
+#[test_case("{path}/b/no-such-branch", 404, Policy::NotFound, Some("handle-{handle}"); "no branch")]
+#[test_case("{path}/r/not-a-hash", 404, Policy::NotFound, Some("handle-{handle}"); "no revision")]
+#[test_case("{path}/b/not..a@name/schematic", 404, Policy::NotFound, Some("handle-{handle}"); "no branch's schematic")]
+#[test_case("{path}/r/not-a-hash/schematic", 404, Policy::NotFound, Some("handle-{handle}"); "no revision's schematic")]
+#[test_case("/blob/0000000000000000000000000000000000000000000000000000000000000000", 404, Policy::NotFound, None; "no blob")]
+#[test_case("/a/path/no/route/has/at/all", 404, Policy::NotFound, None; "no route")]
+#[test_case("/blob/{board}", 200, Policy::Immutable, None; "a blob")]
+#[test_case("/upload", 200, Policy::Personal, None; "the upload form")]
+#[test_case("/settings", 200, Policy::Personal, None; "the settings page")]
+#[test_case("/settings/sessions", 200, Policy::Personal, None; "the sessions page")]
+#[test_case("/api/me", 200, Policy::Personal, None; "who is signed in")]
+#[test_case("{path}/people", 200, Policy::Personal, None; "the people page")]
+#[test_case("/healthz", 200, Policy::Personal, None; "the health route")]
 #[tokio::test]
-async fn every_kind_of_route_names_its_policy_and_its_keys() {
+async fn a_route_names_its_policy_and_its_keys(
+    template: &str,
+    status: u16,
+    policy: Policy,
+    key: Option<&str>,
+) {
     let Some(db) = pool_from_env().await else {
         return;
     };
-    let (addr, _dir) = server(db.clone()).await;
-    let (mut owner, owner_id, handle) = signed_in(&db, addr).await;
-    let path = uploaded(&mut owner).await;
-    let page = http::request(addr, "GET", &path, &[], "").await;
-    let revision = linked_hash(&page.body, &format!("{path}/r/"));
-    let board = linked_hash(&page.body, "fetch(\"/blob/");
-    let design = only_design(&db, owner_id).await;
-    let on_design = Key::Design(design.id).to_string();
-    let on_handle = Key::Handle(handle.clone()).to_string();
-
-    let cacheable = Some(Policy::Page.value());
-    for (url, key) in [
-        ("/".to_owned(), Some("home")),
-        (format!("/{handle}"), Some(on_handle.as_str())),
-        (path.clone(), Some(on_design.as_str())),
-        (format!("{path}/b/main"), Some(on_design.as_str())),
-        (format!("{path}/r/{revision}"), Some(on_design.as_str())),
-        (format!("{path}/b/main/history"), Some(on_design.as_str())),
-        (format!("{path}/schematic"), Some(on_design.as_str())),
-        ("/about".to_owned(), None),
-        ("/viewer".to_owned(), None),
-        ("/schematic".to_owned(), None),
-    ] {
-        let response = http::request(addr, "GET", &url, &[], "").await;
-        assert_eq!(response.status, 200, "{url}: {}", response.body);
-        assert_eq!(caching(&response), (cacheable, key), "{url}");
-    }
-
-    let brief = Some(Policy::NotFound.value());
-    for (url, key) in [
-        (
-            format!("/{handle}/no-such-design"),
-            Some(on_handle.as_str()),
-        ),
-        (format!("{path}/b/no-such-branch"), Some(on_handle.as_str())),
-        (
-            format!("{path}/b/not..a@name/schematic"),
-            Some(on_handle.as_str()),
-        ),
-        (
-            format!("{path}/r/not-a-hash/schematic"),
-            Some(on_handle.as_str()),
-        ),
-        (format!("{path}/r/not-a-hash"), Some(on_handle.as_str())),
-        (format!("/{}", fresh("nobody")), None),
-        (format!("/blob/{}", "0".repeat(64)), None),
-        ("/a/path/no/route/has/at/all".to_owned(), None),
-    ] {
-        let response = http::request(addr, "GET", &url, &[], "").await;
-        assert_eq!(response.status, 404, "{url}: {}", response.body);
-        assert_eq!(caching(&response), (brief, key), "{url}");
-    }
-
-    let blob = http::request(addr, "GET", &format!("/blob/{board}"), &[], "").await;
-    assert_eq!(blob.status, 200);
-    assert_eq!(caching(&blob), (Some(Policy::Immutable.value()), None));
-
-    let personal = Some(Policy::Personal.value());
-    for url in [
-        "/upload".to_owned(),
-        "/settings".to_owned(),
-        "/settings/sessions".to_owned(),
-        "/api/me".to_owned(),
-        format!("{path}/people"),
-    ] {
-        let response = owner.get(&url).await;
-        assert_eq!(response.status, 200, "{url}: {}", response.body);
-        assert_eq!(caching(&response), (personal, None), "{url}");
-    }
-    let health = http::request(addr, "GET", "/healthz", &[], "").await;
-    assert_eq!(caching(&health), (personal, None), "the health route");
+    let mut site = Site::up(db).await;
+    let url = site.url(template);
+    let expected = key.map(|key| site.url(key));
+    let response = site.owner.get(&url).await;
+    assert_eq!(response.status, status, "{url}: {}", response.body);
+    assert_eq!(
+        caching(&response),
+        (Some(policy.value()), expected.as_deref()),
+        "{url}"
+    );
 }
 
 #[tokio::test]
@@ -558,8 +574,10 @@ async fn the_settings_form_purges_the_design_and_its_listings() {
     );
 }
 
+#[test_case("unlisted"; "to unlisted")]
+#[test_case("public"; "to public")]
 #[tokio::test]
-async fn visibility_purges_all_three_whichever_way_it_goes() {
+async fn a_visibility_change_purges_all_three_whichever_way_it_goes(visibility: &str) {
     let Some(db) = pool_from_env().await else {
         return;
     };
@@ -567,32 +585,74 @@ async fn visibility_purges_all_three_whichever_way_it_goes() {
     let (mut owner, owner_id, handle) = signed_in(&db, addr).await;
     let path = uploaded(&mut owner).await;
     let design = only_design(&db, owner_id).await;
-    let all_three = vec![
-        Key::Design(design.id),
-        Key::Handle(handle.clone()),
-        Key::Home,
-    ];
-    for visibility in ["unlisted", "public"] {
-        purge.clear();
-        let set = owner
-            .post_form(
-                &format!("{path}/people/visibility"),
-                &format!("visibility={visibility}"),
-            )
-            .await;
-        assert_eq!(set.status, 303, "{visibility}: {}", set.body);
-        assert_eq!(
-            purge.calls(),
-            std::slice::from_ref(&all_three),
-            "{visibility}"
-        );
-    }
+    purge.clear();
+    let set = owner
+        .post_form(
+            &format!("{path}/people/visibility"),
+            &format!("visibility={visibility}"),
+        )
+        .await;
+    assert_eq!(set.status, 303, "{}", set.body);
+    assert_eq!(
+        purge.calls(),
+        [vec![Key::Design(design.id), Key::Handle(handle), Key::Home]]
+    );
+}
+
+#[tokio::test]
+async fn a_refused_visibility_purges_nothing() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, purge, _dir) = recording_server(db.clone()).await;
+    let (mut owner, _, _) = signed_in(&db, addr).await;
+    let path = uploaded(&mut owner).await;
     purge.clear();
     let refused = owner
         .post_form(&format!("{path}/people/visibility"), "visibility=secret")
         .await;
     assert_eq!(refused.status, 422, "{}", refused.body);
-    assert!(purge.calls().is_empty(), "a refused change purges nothing");
+    assert!(purge.calls().is_empty(), "{:?}", purge.calls());
+}
+
+#[tokio::test]
+async fn choosing_a_handle_clears_a_cached_404_at_that_handle() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, purge, _dir) = recording_server(db.clone()).await;
+    let signed_in = account::sign_in(
+        &db,
+        Provider::GitHub,
+        &ProviderUser {
+            id: fresh("gh"),
+            login: "newcomer".to_owned(),
+            email: None,
+        },
+    )
+    .await
+    .expect("sign in");
+    let id = session::start(&db, signed_in.account_id)
+        .await
+        .expect("a session");
+    let mut browser = http::Browser::new(addr);
+    browser.set_cookie("kiewer_session", &id.to_string());
+    let handle = fresh("n");
+    let before = http::request(addr, "GET", &format!("/{handle}"), &[], "").await;
+    assert_eq!(before.status, 404);
+    let held = before.header("surrogate-key").expect("the 404's key");
+    let chosen = browser
+        .post_form("/welcome", &format!("handle={handle}"))
+        .await;
+    assert_eq!(chosen.status, 303, "{}", chosen.body);
+    assert_eq!(
+        purge
+            .keys()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        [held]
+    );
 }
 
 #[tokio::test]

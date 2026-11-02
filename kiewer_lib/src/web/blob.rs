@@ -9,14 +9,12 @@
 
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
-use axum::http::header::{
-    ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE, VARY, X_CONTENT_TYPE_OPTIONS,
-};
+use axum::http::header::{CONTENT_ENCODING, CONTENT_TYPE, VARY, X_CONTENT_TYPE_OPTIONS};
 use axum::response::{IntoResponse, Response};
 
 use super::AppState;
 use crate::blob::{BlobHash, blocking, gunzip, verified};
-use crate::cache::{self, Policy};
+use crate::cache::{self, Encoding, Policy};
 use crate::design;
 use crate::error::{Error, Result};
 
@@ -30,21 +28,7 @@ pub fn url(hash: &BlobHash) -> String {
 const TEXT: &str = "text/plain; charset=utf-8";
 
 fn not_found() -> Response {
-    cache::not_found(&[], "no such blob\n")
-}
-
-/// Whether the request takes gzip, which every browser does.
-fn accepts_gzip(headers: &HeaderMap) -> bool {
-    headers
-        .get_all(ACCEPT_ENCODING)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .any(|coding| {
-            let coding = coding.trim();
-            let name = coding.split(';').next().unwrap_or(coding).trim();
-            (name == "gzip" || name == "*") && !coding.contains("q=0")
-        })
+    cache::not_found("no such blob\n")
 }
 
 /// `GET /blob/{hash}`.
@@ -103,7 +87,7 @@ pub(super) async fn stored(
         Policy::Immutable.header(),
         (VARY, "Accept-Encoding"),
     ];
-    Ok(Some(if accepts_gzip(headers) {
+    Ok(Some(if Encoding::accepts(headers, "gzip") {
         (common, [(CONTENT_ENCODING, "gzip")], compressed).into_response()
     } else {
         (common, bytes).into_response()
@@ -112,27 +96,7 @@ pub(super) async fn stored(
 
 #[cfg(test)]
 mod tests {
-    use test_case::test_case;
-
     use super::*;
-
-    fn headers(accept_encoding: Option<&str>) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        if let Some(value) = accept_encoding {
-            headers.insert(ACCEPT_ENCODING, value.parse().unwrap());
-        }
-        headers
-    }
-
-    #[test_case(Some("gzip, deflate, br"), true; "a browser")]
-    #[test_case(Some("gzip;q=1.0, identity; q=0.5"), true; "weighted")]
-    #[test_case(Some("*"), true; "anything")]
-    #[test_case(Some("gzip;q=0"), false; "gzip refused")]
-    #[test_case(Some("identity"), false; "identity only")]
-    #[test_case(None, false; "no header, as curl sends")]
-    fn gzip_is_sent_only_to_a_client_that_takes_it(accept: Option<&str>, gzip: bool) {
-        assert_eq!(accepts_gzip(&headers(accept)), gzip);
-    }
 
     #[test]
     fn a_blob_url_is_its_hash_under_blob() {

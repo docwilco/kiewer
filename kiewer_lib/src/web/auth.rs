@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::AppState;
 use crate::account::{self, AccountId, Handle, Linked};
 use crate::auth::Provider;
-use crate::cache::Policy;
+use crate::cache::{self, Key, Policy};
 use crate::error::{Error, Result};
 use crate::session::{self, LIFETIME_DAYS, Session, SessionId};
 
@@ -439,7 +439,10 @@ pub async fn choose_handle(
         Err(error) => return Err(error),
     };
     match account::choose_handle(&state.db, session.account_id, &handle).await {
-        Ok(()) => Ok(personal(jar, Redirect::to("/"))),
+        Ok(()) => {
+            cache::after_write(state.purge.as_ref(), &[Key::Handle(handle)]).await;
+            Ok(personal(jar, Redirect::to("/")))
+        }
         Err(Error::HandleTaken(_)) => refused(
             jar,
             StatusCode::CONFLICT,

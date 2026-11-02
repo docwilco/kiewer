@@ -98,85 +98,91 @@ fn decoded(encoding: Option<&str>, body: &[u8]) -> Vec<u8> {
     out
 }
 
-#[test_case("gzip, deflate, br", Some("br"); "a browser takes brotli")]
-#[test_case("gzip, deflate", Some("gzip"); "an older browser takes gzip")]
-#[test_case("identity", None; "a client that takes neither gets the bytes")]
+const SCRIPT: &str = "text/javascript; charset=utf-8";
+const WASM: &str = "application/wasm";
+const SCRIPT_MARK: &[u8] = b"export class Viewer";
+const WASM_MARK: &[u8] = b"\0asm";
+
+#[test_case(script_url, SCRIPT, SCRIPT_MARK, "gzip, deflate, br", Some("br"); "the script as brotli")]
+#[test_case(script_url, SCRIPT, SCRIPT_MARK, "gzip, deflate", Some("gzip"); "the script as gzip")]
+#[test_case(script_url, SCRIPT, SCRIPT_MARK, "identity", None; "the script as it is")]
+#[test_case(wasm_url, WASM, WASM_MARK, "gzip, deflate, br", Some("br"); "the wasm as brotli")]
+#[test_case(wasm_url, WASM, WASM_MARK, "gzip, deflate", Some("gzip"); "the wasm as gzip")]
+#[test_case(wasm_url, WASM, WASM_MARK, "identity", None; "the wasm as it is")]
 #[tokio::test]
-async fn the_script_and_the_wasm_are_served_hashed_immutable_and_in_the_coding_the_request_takes(
+async fn an_asset_is_served_hashed_immutable_and_in_the_coding_the_request_takes(
+    url: fn() -> String,
+    content_type: &str,
+    marker: &[u8],
     accept: &str,
     encoding: Option<&str>,
 ) {
     let (addr, _dir) = start().await;
+    let path = url();
     if !embedded() {
-        for path in [script_url(), wasm_url()] {
-            let response = http::request(addr, "GET", &path, &[], "").await;
-            assert_eq!(response.status, 503);
-            assert_eq!(response.body, NOT_BUILT);
-            assert_eq!(
-                response.header("cache-control"),
-                Some(Policy::Personal.value()),
-                "a 503 is never cached"
-            );
-        }
-        return;
-    }
-    let plain = http::request(addr, "GET", "/viewer/kiewer_viewer.js", &[], "").await;
-    assert_eq!(plain.status, 404, "the plain name is gone with the hash");
-    for (path, content_type, marker) in [
-        (
-            script_url(),
-            "text/javascript; charset=utf-8",
-            &b"export class Viewer"[..],
-        ),
-        (wasm_url(), "application/wasm", &b"\0asm"[..]),
-    ] {
-        let identity = http::send_raw(
-            addr,
-            "GET",
-            &path,
-            &[("Accept-Encoding", "identity")],
-            None,
-            b"",
-        )
-        .await;
-        assert_eq!(identity.status, 200);
-        assert!(
-            identity
-                .body
-                .windows(marker.len())
-                .any(|window| window == marker),
-            "{path}"
-        );
-        let response = http::send_raw(
-            addr,
-            "GET",
-            &path,
-            &[("Accept-Encoding", accept)],
-            None,
-            b"",
-        )
-        .await;
-        assert_eq!(response.status, 200);
-        assert_eq!(response.header("content-type"), Some(content_type));
-        assert_eq!(response.header("content-encoding"), encoding, "{path}");
-        assert_eq!(response.header("vary"), Some("Accept-Encoding"));
+        let response = http::request(addr, "GET", &path, &[], "").await;
+        assert_eq!(response.status, 503);
+        assert_eq!(response.body, NOT_BUILT);
         assert_eq!(
             response.header("cache-control"),
-            Some(Policy::Immutable.value()),
-            "a hashed name is immutable for a year"
+            Some(Policy::Personal.value()),
+            "a 503 is never cached"
         );
-        assert_eq!(
-            decoded(encoding, &response.body),
-            identity.body,
-            "{path} decodes to the plain bytes"
-        );
-        if encoding.is_some() {
-            assert!(
-                response.body.len() < identity.body.len() / 2,
-                "{path}: the prebuilt variant is worth sending"
-            );
-        }
+        return;
     }
+    let identity = http::send_raw(
+        addr,
+        "GET",
+        &path,
+        &[("Accept-Encoding", "identity")],
+        None,
+        b"",
+    )
+    .await;
+    assert_eq!(identity.status, 200);
+    assert!(
+        identity
+            .body
+            .windows(marker.len())
+            .any(|window| window == marker),
+        "{path}"
+    );
+    let response = http::send_raw(
+        addr,
+        "GET",
+        &path,
+        &[("Accept-Encoding", accept)],
+        None,
+        b"",
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    assert_eq!(response.header("content-type"), Some(content_type));
+    assert_eq!(response.header("content-encoding"), encoding, "{path}");
+    assert_eq!(response.header("vary"), Some("Accept-Encoding"));
+    assert_eq!(
+        response.header("cache-control"),
+        Some(Policy::Immutable.value()),
+        "a hashed name is immutable for a year"
+    );
+    assert_eq!(
+        decoded(encoding, &response.body),
+        identity.body,
+        "{path} decodes to the plain bytes"
+    );
+    if encoding.is_some() {
+        assert!(
+            response.body.len() < identity.body.len() / 2,
+            "{path}: the prebuilt variant is worth sending"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_plain_names_are_gone_with_the_hash() {
+    let (addr, _dir) = start().await;
+    let plain = http::request(addr, "GET", "/viewer/kiewer_viewer.js", &[], "").await;
+    assert_eq!(plain.status, if embedded() { 404 } else { 503 });
 }
 
 #[tokio::test]

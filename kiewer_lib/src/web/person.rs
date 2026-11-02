@@ -28,10 +28,10 @@ struct PersonPage {
 /// handle from ever being one of them.
 pub(super) async fn page(
     State(state): State<AppState>,
-    Path(handle): Path<String>,
+    Path(segment): Path<String>,
 ) -> Result<Response> {
-    let not_found = || cache::not_found(&[], "no such person\n");
-    let Ok(handle) = handle.parse::<Handle>() else {
+    let not_found = || cache::not_found_under(&segment, "no such person\n");
+    let Ok(handle) = segment.parse::<Handle>() else {
         return Ok(not_found());
     };
     let Some(account) = listing::account_at(&state.db, handle.as_str()).await? else {

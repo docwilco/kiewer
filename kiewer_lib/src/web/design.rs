@@ -206,7 +206,7 @@ pub(super) async fn show(
     at: At<'_>,
     stay: bool,
 ) -> Result<Response> {
-    let not_found = || cache::not_found(&cache::handle_key(handle), "no such design\n");
+    let not_found = || cache::not_found_under(handle, "no such design\n");
     let (Ok(handle), Ok(slug)) = (handle.parse::<Handle>(), slug.parse::<Slug>()) else {
         return Ok(not_found());
     };
@@ -640,14 +640,23 @@ pub(super) async fn upload(
         Ok(committed) => {
             // The thumbnail (ADR 0004): drawn within the render budget,
             // else queued for a retry; never fails the upload.
-            state
-                .thumbnails
-                .after_push(&state.db, state.blobs.as_ref(), committed.revision)
-                .await;
-            // After the render, so the purge covers a thumbnail drawn
-            // within the budget too.
+            // The render and then the purge, so it covers a thumbnail
+            // drawn within the budget. A task of their own: a browser
+            // that gives up during the render drops this handler, and a
+            // purge lost with it would leave the pages stale for the hour.
             let keys = cache::of_design(committed.design.id, &owner, committed.design.visibility);
-            cache::after_write(state.purge.as_ref(), &keys).await;
+            let revision = committed.revision;
+            let after = state.clone();
+            let settled_push = tokio::spawn(async move {
+                after
+                    .thumbnails
+                    .after_push(&after.db, after.blobs.as_ref(), revision)
+                    .await;
+                cache::after_write(after.purge.as_ref(), &keys).await;
+            });
+            if let Err(error) = settled_push.await {
+                tracing::warn!(%error, "the render and purge after a push did not finish");
+            }
             let next = history::branch_url(&owner, &committed.design, &committed.branch);
             if committed.warnings.is_empty() {
                 return Ok(personal(settled.jar, Redirect::to(&next)));

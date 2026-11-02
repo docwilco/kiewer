@@ -40,9 +40,19 @@ pub const BOARD_PATH: &str = "/viewer/midi8knob.kicad_pcb";
 /// The hand-off board, in the binary: the one design the tracer shows.
 const BOARD: &str = include_str!("../../../viewer-drop/board/midi8knob.kicad_pcb");
 
+/// What an embedded file is to the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetKind {
+    /// wasm-bindgen's ES module, which a page imports.
+    Script,
+    /// The viewer itself, which the script fetches.
+    Wasm,
+}
+
 /// One embedded file in its three codings.
 #[derive(Debug, Clone, Copy)]
 pub struct Asset {
+    pub kind: AssetKind,
     /// The hashed file name the route serves it under.
     pub name: &'static str,
     pub content_type: &'static str,
@@ -69,32 +79,29 @@ impl Asset {
     }
 }
 
-/// What the script's route answers with: wasm-bindgen's ES module.
-const SCRIPT_TYPE: &str = "text/javascript; charset=utf-8";
-/// What the wasm's route answers with: what
-/// `WebAssembly.instantiateStreaming` insists on.
-const WASM_TYPE: &str = "application/wasm";
-
 /// The embedded assets, when the build found the viewer.
 #[cfg(kiewer_viewer_embedded)]
-pub const ASSETS: &[Asset] = &[
+const ASSETS: &[Asset] = &[
     Asset {
+        kind: AssetKind::Script,
         name: env!("KIEWER_VIEWER_JS_NAME"),
-        content_type: SCRIPT_TYPE,
+        content_type: "text/javascript; charset=utf-8",
         identity: include_bytes!(env!("KIEWER_VIEWER_JS")),
         brotli: include_bytes!(env!("KIEWER_VIEWER_JS_BR")),
         gzip: include_bytes!(env!("KIEWER_VIEWER_JS_GZ")),
     },
     Asset {
+        kind: AssetKind::Wasm,
         name: env!("KIEWER_VIEWER_WASM_NAME"),
-        content_type: WASM_TYPE,
+        // What WebAssembly.instantiateStreaming insists on.
+        content_type: "application/wasm",
         identity: include_bytes!(env!("KIEWER_VIEWER_WASM")),
         brotli: include_bytes!(env!("KIEWER_VIEWER_WASM_BR")),
         gzip: include_bytes!(env!("KIEWER_VIEWER_WASM_GZ")),
     },
 ];
 #[cfg(not(kiewer_viewer_embedded))]
-pub const ASSETS: &[Asset] = &[];
+const ASSETS: &[Asset] = &[];
 
 /// Whether this build carries the viewer. `false` on a tree where
 /// `scripts/build-viewer.sh` has not run: the page then says so and the
@@ -104,11 +111,9 @@ pub fn embedded() -> bool {
     !ASSETS.is_empty()
 }
 
-/// The embedded asset of `content_type`, when the build carries one.
-fn asset_of(content_type: &str) -> Option<&'static Asset> {
-    ASSETS
-        .iter()
-        .find(|asset| asset.content_type == content_type)
+/// The embedded asset of `kind`, when the build carries one.
+fn asset_of(kind: AssetKind) -> Option<&'static Asset> {
+    ASSETS.iter().find(|asset| asset.kind == kind)
 }
 
 /// The URL a page imports the viewer's script from: the hashed name
@@ -116,13 +121,13 @@ fn asset_of(content_type: &str) -> Option<&'static Asset> {
 /// viewer is not built in.
 #[must_use]
 pub fn script_url() -> String {
-    asset_of(SCRIPT_TYPE).map_or_else(|| "/viewer/kiewer_viewer.js".to_owned(), Asset::url)
+    asset_of(AssetKind::Script).map_or_else(|| "/viewer/kiewer_viewer.js".to_owned(), Asset::url)
 }
 
 /// The URL the script fetches the wasm from.
 #[must_use]
 pub fn wasm_url() -> String {
-    asset_of(WASM_TYPE).map_or_else(|| "/viewer/kiewer_viewer_bg.wasm".to_owned(), Asset::url)
+    asset_of(AssetKind::Wasm).map_or_else(|| "/viewer/kiewer_viewer_bg.wasm".to_owned(), Asset::url)
 }
 
 /// What the asset routes say when the viewer is not in the binary.
@@ -294,12 +299,7 @@ async fn asset(Path(name): Path<String>, headers: HeaderMap) -> Response {
             NOT_BUILT,
         )
             .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            [Policy::NotFound.header()],
-            "no such asset\n",
-        )
-            .into_response(),
+        None => cache::not_found("no such asset\n"),
     }
 }
 
@@ -348,10 +348,10 @@ mod tests {
                 hashed(&wasm, "/viewer/kiewer_viewer_bg.", ".wasm"),
                 "{wasm}"
             );
-            let asset = asset_of(SCRIPT_TYPE).expect("the script");
+            let asset = asset_of(AssetKind::Script).expect("the script");
             let text = std::str::from_utf8(asset.bytes(Encoding::Identity)).expect("UTF-8");
             assert!(
-                text.contains(asset_of(WASM_TYPE).expect("the wasm").name),
+                text.contains(asset_of(AssetKind::Wasm).expect("the wasm").name),
                 "the script fetches the wasm by its hashed name"
             );
         } else {

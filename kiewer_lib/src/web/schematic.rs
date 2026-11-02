@@ -266,7 +266,7 @@ async fn sheets_of(state: &AppState, shown: &DesignHead) -> Result<Vec<SheetView
 /// revision holds no schematic. Two segments that are not a handle and a
 /// slug are 404 before any lookup, as on the design page.
 async fn show(state: &AppState, handle: &str, slug: &str, at: At<'_>) -> Result<Response> {
-    let not_found = || cache::not_found(&cache::handle_key(handle), "no such schematic\n");
+    let not_found = || cache::not_found_under(handle, "no such schematic\n");
     let (Ok(handle), Ok(slug)) = (handle.parse::<Handle>(), slug.parse::<Slug>()) else {
         return Ok(not_found());
     };
@@ -331,10 +331,7 @@ async fn at_branch(
     Path((handle, slug, branch)): Path<(String, String, String)>,
 ) -> Result<Response> {
     let Ok(branch) = branch.parse::<BranchName>() else {
-        return Ok(cache::not_found(
-            &cache::handle_key(&handle),
-            "no such branch\n",
-        ));
+        return Ok(cache::not_found_under(&handle, "no such branch\n"));
     };
     show(&state, &handle, &slug, At::Branch(&branch)).await
 }
@@ -347,10 +344,7 @@ async fn at_revision(
     Query(linked): Query<Linked>,
 ) -> Result<Response> {
     let Ok(hash) = hash.parse::<RevisionHash>() else {
-        return Ok(cache::not_found(
-            &cache::handle_key(&handle),
-            "no such revision\n",
-        ));
+        return Ok(cache::not_found_under(&handle, "no such revision\n"));
     };
     let branch = linked.b.and_then(|name| name.parse::<BranchName>().ok());
     let at = At::Revision {

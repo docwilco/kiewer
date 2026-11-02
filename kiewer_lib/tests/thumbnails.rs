@@ -747,6 +747,50 @@ async fn a_render_that_lands_on_the_retry_purges_every_design_holding_the_revisi
 }
 
 #[tokio::test]
+async fn a_browser_that_gives_up_during_the_render_still_gets_the_push_purged() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    if !can_render() {
+        return;
+    }
+    let dir = scratch_dir!();
+    let purge = Arc::new(Recorder::default());
+    // The budget holds the request open after the commit: the window in
+    // which a browser closing its tab ends the connection.
+    let (addr, _tasks) = serve_purging(
+        db.clone(),
+        Arc::new(FsBlobStore::new(dir.path())),
+        |thumbnails| {
+            thumbnails
+                .with_budget(Duration::from_secs(2))
+                .with_render_delay(Duration::from_secs(3))
+        },
+        purge.clone(),
+    )
+    .await;
+    let (mut browser, account, _) = signed_in(&db, addr).await;
+    let upload = tokio::spawn(async move {
+        push(&mut browser, "", &[("midi8knob.kicad_pcb", BOARD)]).await;
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while design::by_owner(&db, account).await.unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the push commits");
+    upload.abort();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while purge.calls().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the purge ran though the browser left");
+}
+
+#[tokio::test]
 async fn a_render_that_fails_saves_the_revision_and_queues_a_retry() {
     let Some(db) = pool_from_env().await else {
         return;
