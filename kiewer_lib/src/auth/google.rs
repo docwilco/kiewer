@@ -6,8 +6,8 @@ use super::{App, Credentials, Provider, ProviderUser};
 use crate::error::{Error, Result};
 
 /// The app registered at Google (README, Development), on Google's own
-/// endpoints. `openid` and `profile` give `sub` and the name, `email` the
-/// address.
+/// endpoints. `openid` gives `sub`, `profile` the name. The `email`
+/// scope is not asked: the account is found by `sub` alone.
 #[must_use]
 pub fn app(credentials: Credentials) -> App {
     App {
@@ -16,18 +16,15 @@ pub fn app(credentials: Credentials) -> App {
         auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_owned(),
         token_url: "https://oauth2.googleapis.com/token".to_owned(),
         user_url: "https://openidconnect.googleapis.com/v1/userinfo".to_owned(),
-        scopes: vec![
-            "openid".to_owned(),
-            "email".to_owned(),
-            "profile".to_owned(),
-        ],
+        scopes: vec!["openid".to_owned(), "profile".to_owned()],
     }
 }
 
 /// The person behind the userinfo endpoint: `sub`, Google's stable id,
-/// never the email, which changes hands; the `name` as the login, or the
-/// email's local part when the profile has no name; the `email` when
-/// `email_verified` says Google checked it.
+/// never an email, which changes hands; the `name` as the login, or the
+/// `given_name`, or `sub` itself when the profile names nothing (the
+/// welcome page asks for a handle anyway). No email is kept: the scope
+/// is not asked, and an address in the body is ignored.
 pub(super) fn parse_user(body: &serde_json::Value) -> Result<ProviderUser> {
     let missing = |field: &str| Error::OAuth {
         provider: Provider::Google,
@@ -39,19 +36,11 @@ pub(super) fn parse_user(body: &serde_json::Value) -> Result<ProviderUser> {
             .filter(|value| !value.is_empty())
     };
     let id = text("sub").ok_or_else(|| missing("a sub"))?;
-    let email = text("email");
-    let login = text("name")
-        .or_else(|| email.and_then(|email| email.split('@').next()))
-        .filter(|login| !login.is_empty())
-        .ok_or_else(|| missing("a name or an email"))?;
-    let verified = body
-        .get("email_verified")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let login = text("name").or_else(|| text("given_name")).unwrap_or(id);
     Ok(ProviderUser {
         id: id.to_owned(),
         login: login.to_owned(),
-        email: email.filter(|_| verified).map(ToOwned::to_owned),
+        email: None,
     })
 }
 
@@ -60,7 +49,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_user_is_sub_the_name_and_the_verified_email() {
+    fn the_user_is_sub_and_the_name_without_an_email() {
         let body = serde_json::json!({
             "sub": "110248495921238986420",
             "name": "Jane Doe",
@@ -74,7 +63,7 @@ mod tests {
             ProviderUser {
                 id: "110248495921238986420".to_owned(),
                 login: "Jane Doe".to_owned(),
-                email: Some("jane@example.com".to_owned()),
+                email: None,
             }
         );
     }
@@ -87,15 +76,11 @@ mod tests {
         assert!(err.to_string().contains("sub"), "{err}");
     }
 
-    #[test]
-    fn without_a_name_the_emails_local_part_is_the_login() {
-        let body = serde_json::json!({
-            "sub": "1",
-            "email": "jane.doe@example.com",
-            "email_verified": false
-        });
-        let user = parse_user(&body).unwrap();
-        assert_eq!(user.login, "jane.doe");
-        assert_eq!(user.email, None, "unverified: not kept");
+    #[test_case::test_case(&serde_json::json!({"sub": "1", "given_name": "Jane"}), "Jane"; "the given name")]
+    #[test_case::test_case(&serde_json::json!({"sub": "1"}), "1"; "the sub itself")]
+    fn without_a_name_the_login_falls_back(body: &serde_json::Value, login: &str) {
+        let user = parse_user(body).unwrap();
+        assert_eq!(user.login, login);
+        assert_eq!(user.email, None);
     }
 }

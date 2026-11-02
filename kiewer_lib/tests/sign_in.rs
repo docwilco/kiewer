@@ -444,7 +444,7 @@ async fn pick_a_handle(browser: &mut http::Browser, db: &PgPool) -> String {
 }
 
 #[test_case(Provider::Discord, "identify", false; "discord with identify, no email")]
-#[test_case(Provider::Google, "openid email profile", true; "google with openid email and profile")]
+#[test_case(Provider::Google, "openid profile", false; "google with openid and profile, no email")]
 #[tokio::test]
 async fn a_person_signs_in_with_another_provider(
     provider: Provider,
@@ -607,10 +607,8 @@ async fn a_signed_in_person_links_another_provider_from_settings_and_signs_in_wi
     assert!(browser.cookie("kiewer_oauth").is_none());
     let settings = browser.get("/settings").await;
     assert!(
-        settings.body.contains(provider.name())
-            && settings.body.contains("octo_d")
-            && settings.body.contains(&email),
-        "the new identity is listed with its login and email: {}",
+        settings.body.contains(provider.name()) && settings.body.contains("octo_d"),
+        "the new identity is listed with its login: {}",
         settings.body
     );
     assert!(

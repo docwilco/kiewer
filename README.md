@@ -59,8 +59,8 @@ variable without the other fails startup naming the missing one.
 - Google: https://console.cloud.google.com/apis/credentials, Create
   credentials, OAuth client ID, Web application, authorised redirect URI
   `http://localhost:8090/auth/google/callback`; the consent screen needs
-  the `email` and `profile` scopes and, while it is in testing, your
-  account as a test user. Variables `OAUTH_GOOGLE_*`.
+  the `profile` scope only and, while it is in testing, your account as
+  a test user. Variables `OAUTH_GOOGLE_*`.
 
 Cookies are `Secure` under an `https` `PUBLIC_URL`, so a dev box over
 `http` works in every browser. The sign-in tests use a fake of each
