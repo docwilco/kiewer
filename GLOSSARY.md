@@ -86,9 +86,20 @@ _Avoid_: preset, layer set
 **Run**:
 A chain of connected, near-collinear track segments of one net on one layer. The unit a net label is placed on.
 
+**Net label**:
+Text the viewer writes on a board item as it zooms in: a pad's number, or the net of a pad, a via, a run or a zone. Placed once when the board loads; the label gate decides when each shows.
+_Avoid_: label (a schematic's net name on a wire), annotation, overlay
+
+**Label class**:
+Which of the five things a net label names: a pad number, a pad net, a via net, a track net or a zone net. The unit the toggles show or hide, and the rank when two labels collide: pads first, then vias, zones, tracks.
+
 **Label gate**:
 The rule that a net label draws only when its text height on screen reaches the threshold.
 _Avoid_: level of detail, LOD
+
+**Pole of inaccessibility**:
+The point inside a zone's fill farthest from every edge of it; where the zone's net label sits.
+_Avoid_: centroid, centre (both can fall outside a fill with a hole)
 
 **Stroke font**:
 Newstroke, KiCad's built-in line font, bundled in kiewer and used for every text item that names no face. Its glyph table is regenerated from the font's CC0 sources by `newstroke_dev`.

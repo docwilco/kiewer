@@ -396,6 +396,18 @@ impl Tessellator {
         builder.finish()
     }
 
+    /// `polylines` stroked at `width` with round ends and joins, in
+    /// whatever unit they come in: a glyph's strokes in em units for the
+    /// viewer's net labels, which scale each glyph on the GPU.
+    #[must_use]
+    pub fn polylines(&self, polylines: &[Vec<Point>], width: f64) -> Mesh {
+        let mut builder = MeshBuilder::new(self.tolerance);
+        for points in polylines {
+            builder.stroke(points, width, false);
+        }
+        builder.finish()
+    }
+
     /// The text on `layer` in Newstroke: every visible board text and
     /// footprint text (its variables resolved, placed in the footprint's
     /// frame, kept upright when the footprint asks), stroked at its pen

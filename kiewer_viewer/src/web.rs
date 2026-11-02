@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use kicad_core::font::outline::{self, FaceMetrics};
 use kicad_core::font::placed_texts;
+use kicad_core::labels::LabelClass;
 use kicad_core::model::{Board, LayerId, Point};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
@@ -22,10 +23,11 @@ use crate::atlas::{self, Plan, Quads};
 use crate::camera::{Camera, DOUBLE_CLICK, Size};
 use crate::error::{Error, Result};
 use crate::render::atlas_pipeline::Coverage;
+use crate::render::label_pipeline::LabelFrame;
 use crate::render::{Backend, MSAA_SAMPLES, Renderer, Target, device_descriptor};
 use crate::scene::{Scene, clear_color};
 use crate::schematic::{self, SheetScene};
-use crate::view::{Layer, Side, View, ViewState, palette};
+use crate::view::{Layer, Side, View, ViewState, label_key, palette, parse_label_key};
 
 /// The viewer over one canvas.
 #[wasm_bindgen]
@@ -358,6 +360,7 @@ impl Viewer {
         let scene = Scene::build(&board).ok_or(Error::NothingToDraw)?;
         self.renderer
             .upload(&self.device, &scene.vertices, &scene.indices);
+        self.renderer.upload_labels(&self.device, &scene.labels);
         self.renderer.clear_text();
         self.system_faces.clear();
         self.state = ViewState::new(scene.stack.default_view());
@@ -379,6 +382,7 @@ impl Viewer {
         let sheet = schematic::build(&parsed, self.config.format).ok_or(Error::EmptySheet)?;
         self.renderer
             .upload(&self.device, &sheet.vertices, &sheet.indices);
+        self.renderer.clear_labels();
         self.renderer.clear_text();
         self.system_faces.clear();
         self.scene = None;
@@ -415,7 +419,7 @@ impl Viewer {
     pub fn set_view(&mut self, number: usize) {
         let Some(scene) = &self.scene else { return };
         if (1..=scene.views.len()).contains(&number) {
-            self.state = ViewState::new(number);
+            self.state = self.state.with_view(number);
             self.mirror_for_view();
         }
     }
@@ -529,6 +533,49 @@ impl Viewer {
         warnings
     }
 
+    /// The net label classes the page toggles, by key, in their order:
+    /// `pad.number`, `pad.net`, `via.net`, `track.net`, `zone.net`.
+    #[must_use]
+    pub fn label_classes(&self) -> Vec<String> {
+        LabelClass::ALL
+            .into_iter()
+            .map(|class| label_key(class).to_owned())
+            .collect()
+    }
+
+    /// Whether the label class `key` names is shown; false for an
+    /// unknown key.
+    #[must_use]
+    pub fn label_shown(&self, key: &str) -> bool {
+        parse_label_key(key).is_some_and(|class| self.state.labels.shown(class))
+    }
+
+    /// Show or hide the label class `key` names.
+    pub fn set_label(&mut self, key: &str, shown: bool) {
+        if let Some(class) = parse_label_key(key) {
+            self.state.labels.set_shown(class, shown);
+        }
+    }
+
+    /// The text height on screen, in device pixels, a label starts to
+    /// show at.
+    #[must_use]
+    pub fn label_threshold(&self) -> f64 {
+        f64::from(self.state.labels.threshold)
+    }
+
+    /// Set the label threshold in device pixels; clamped to the range
+    /// the fragment carries ([`LABEL_THRESHOLD_RANGE`]).
+    ///
+    /// [`LABEL_THRESHOLD_RANGE`]: crate::view::LABEL_THRESHOLD_RANGE
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a threshold is a few pixels, which f32 holds to the tenth the state keeps"
+    )]
+    pub fn set_label_threshold(&mut self, px: f64) {
+        self.state.labels.set_threshold(px as f32);
+    }
+
     /// The view the state names, for the loaded board.
     fn current_view(&self) -> Option<&View> {
         self.scene.as_ref()?.view(&self.state)
@@ -547,6 +594,33 @@ impl Viewer {
     fn named_text_shown(&self) -> bool {
         self.layer_state(&Layer::Silk(Side::Front).to_string())
             .is_some()
+    }
+
+    /// What this frame draws the net labels with: the camera's scale and
+    /// mirror, the state's threshold and toggles, and the copper layers
+    /// the view shows in its draw order. `None` without a board.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "pixels per millimetre is of order 1e-3 to 1e7, well within f32"
+    )]
+    fn label_frame(&self) -> Option<LabelFrame> {
+        let scene = self.scene.as_ref()?;
+        let view = scene.view(&self.state)?;
+        let layers = scene
+            .stack
+            .order(view.top)
+            .into_iter()
+            .filter(|layer| {
+                matches!(layer, Layer::Copper(_)) && self.state.opacity(view, layer).is_some()
+            })
+            .collect();
+        Some(LabelFrame {
+            px_per_mm: self.camera.scale() as f32,
+            threshold_px: self.state.labels.threshold,
+            mirrored: self.camera.mirrored(),
+            classes: self.state.labels.mask(),
+            layers,
+        })
     }
 
     /// Mirror the camera as the view in force asks.
@@ -680,6 +754,7 @@ impl Viewer {
                 clear_color(self.config.format),
             ),
         };
+        self.renderer.set_label_frame(self.label_frame());
         self.renderer.render(
             &self.device,
             &self.queue,
@@ -912,6 +987,7 @@ impl Viewer {
         if let Some(scene) = Scene::build(&stroke) {
             self.renderer
                 .upload(&self.device, &scene.vertices, &scene.indices);
+            self.renderer.upload_labels(&self.device, &scene.labels);
             self.scene = Some(scene);
         }
     }

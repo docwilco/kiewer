@@ -42,6 +42,14 @@
   #layers .swatch { width: 0.8em; height: 0.8em; border-radius: 2px; border: 1px solid #666; }
   #layers input[type=range] { width: 6em; margin: 0; }
   #warning { margin: 0.3em 0; padding: 0.3em 0.5em; background: #4a3f1e; border-radius: 4px; }
+  /* The net labels (docs/v1-scope.md, Net labels): a toggle per class
+     and the threshold slider, folded above the hint at the stage's
+     bottom left. */
+  #labels { position: absolute; left: 0.8em; bottom: 2.4em; padding: 0.3em 0.6em; background: rgba(43, 43, 43, 0.9); border: 1px solid #444; border-radius: 4px; font-size: 13px; }
+  #labels summary { cursor: pointer; }
+  #labels label { display: flex; gap: 0.4em; align-items: center; margin: 0.2em 0; }
+  #labels input[type=range] { width: 8em; margin: 0; }
+  #labels .threshold { font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -64,6 +72,13 @@
     </details>
   </div>
   <div id="fonts" hidden></div>
+  <div id="labels" hidden>
+    <details>
+      <summary>Labels</summary>
+      <div id="label-list"></div>
+      <label>show from <input id="label-threshold" type="range" min="2" max="40" step="0.5" title="text height on screen at which a label shows"> <span class="threshold" id="label-threshold-value"></span></label>
+    </details>
+  </div>
 </div>
 {% if let Some(design) = design %}
 <details id="design">
@@ -648,6 +663,82 @@ window.addEventListener("kiewer-board", function (e) {
   scheduleFrame = e.detail.schedule;
   buildViews();
   applyHash();
+});
+</script>
+<script type="module">
+// Net labels (docs/v1-scope.md, Net labels; the placement is
+// kicad_core/src/labels.rs, the drawing kiewer_viewer/src/render/
+// label_pipeline.rs). The labels are placed once at load; this block
+// only mirrors the toggles and the threshold into the panel, sends every
+// change back, and keeps the URL fragment equal to viewer.fragment(), as
+// the layers block does for the layers. The gate itself runs in the
+// vertex shader: a change here is one uniform on the next frame. It
+// wakes on kiewer-board, after the layers block has applied the hash,
+// and refreshes on hashchange, which the layers block applies first.
+const labelsPanel = document.getElementById("labels");
+const labelList = document.getElementById("label-list");
+const thresholdSlider = document.getElementById("label-threshold");
+const thresholdValue = document.getElementById("label-threshold-value");
+const LABEL_NAMES = {
+  "pad.number": "pad numbers",
+  "pad.net": "pad nets",
+  "via.net": "via nets",
+  "track.net": "track nets",
+  "zone.net": "zone nets",
+};
+let labelsViewer = null;
+let labelsSchedule = null;
+const labelBoxes = new Map();
+
+function syncLabelsFragment() {
+  const fragment = "#" + labelsViewer.fragment();
+  if (location.hash !== fragment) history.replaceState(null, "", fragment);
+}
+function showThreshold() {
+  const px = labelsViewer.label_threshold();
+  thresholdSlider.value = String(px);
+  thresholdValue.textContent = px + " px";
+}
+function buildLabels() {
+  labelList.replaceChildren();
+  labelBoxes.clear();
+  for (const key of labelsViewer.label_classes()) {
+    const row = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = labelsViewer.label_shown(key);
+    box.addEventListener("change", function () {
+      labelsViewer.set_label(key, box.checked);
+      syncLabelsFragment();
+      labelsSchedule();
+    });
+    const name = document.createElement("span");
+    name.textContent = LABEL_NAMES[key] || key;
+    row.append(box, name);
+    labelList.append(row);
+    labelBoxes.set(key, box);
+  }
+}
+function refreshLabels() {
+  for (const [key, box] of labelBoxes) box.checked = labelsViewer.label_shown(key);
+  showThreshold();
+}
+thresholdSlider.addEventListener("input", function () {
+  if (!labelsViewer) return;
+  labelsViewer.set_label_threshold(Number(thresholdSlider.value));
+  showThreshold();
+  syncLabelsFragment();
+  labelsSchedule();
+});
+window.addEventListener("hashchange", function () {
+  if (labelsViewer) refreshLabels();
+});
+window.addEventListener("kiewer-board", function (e) {
+  labelsViewer = e.detail.viewer;
+  labelsSchedule = e.detail.schedule;
+  buildLabels();
+  showThreshold();
+  labelsPanel.hidden = false;
 });
 </script>
 </body>

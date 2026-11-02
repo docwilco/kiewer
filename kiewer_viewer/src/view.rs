@@ -11,9 +11,10 @@
 //! ([`ViewState::fragment`], [`ViewState::from_fragment`]), so a link
 //! opens on the same picture.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use kicad_core::labels::LabelClass;
 use kicad_core::model::Board;
 
 use crate::render::Rgb;
@@ -58,6 +59,10 @@ pub mod palette {
     pub const F_CRTYD: Rgb = Rgb(0xff, 0x26, 0xe2);
     /// The back courtyard in the KiCad default theme.
     pub const B_CRTYD: Rgb = Rgb(0x26, 0xe9, 0xff);
+    /// A net label's glyphs: the hand-off's near-white.
+    pub const LABEL_FILL: Rgb = Rgb(0xf8, 0xf8, 0xf8);
+    /// The halo around a net label's glyphs: the hand-off's near-black.
+    pub const LABEL_HALO: Rgb = Rgb(0x20, 0x20, 0x20);
 }
 
 /// A side of the board.
@@ -371,9 +376,96 @@ impl View {
 
 /// The key of the view number in the fragment.
 const VIEW_KEY: &str = "view";
+/// The key of the label gate's threshold in the fragment, in pixels.
+const LABELS_KEY: &str = "labels";
 
-/// A view with toggles and opacities set on top of it: what the panel
-/// edits and the fragment carries.
+/// The text height on screen, in device pixels, a label starts to show
+/// at unless the link says otherwise (docs/v1-scope.md, Net labels).
+pub const DEFAULT_LABEL_THRESHOLD: f32 = 7.0;
+/// The thresholds the slider and the fragment accept, in pixels.
+pub const LABEL_THRESHOLD_RANGE: std::ops::RangeInclusive<f32> = 2.0..=40.0;
+
+/// The fragment and panel key of a label class: `pad.number`,
+/// `pad.net`, `via.net`, `track.net`, `zone.net`.
+#[must_use]
+pub fn label_key(class: LabelClass) -> &'static str {
+    match class {
+        LabelClass::PadNumber => "pad.number",
+        LabelClass::PadNet => "pad.net",
+        LabelClass::ViaNet => "via.net",
+        LabelClass::TrackNet => "track.net",
+        LabelClass::ZoneNet => "zone.net",
+    }
+}
+
+/// The label class a key names ([`label_key`]), or `None`.
+#[must_use]
+pub fn parse_label_key(key: &str) -> Option<LabelClass> {
+    LabelClass::ALL
+        .into_iter()
+        .find(|&class| label_key(class) == key)
+}
+
+/// The net label toggles and the gate's threshold: what the labels
+/// block of the page edits and the fragment carries beside the layers.
+/// Not a view's: a view change keeps them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelSettings {
+    /// The classes toggled off; every other class shows.
+    pub hidden: BTreeSet<LabelClass>,
+    /// The text height on screen, in device pixels, a label starts to
+    /// show at.
+    pub threshold: f32,
+}
+
+impl Default for LabelSettings {
+    fn default() -> Self {
+        Self {
+            hidden: BTreeSet::new(),
+            threshold: DEFAULT_LABEL_THRESHOLD,
+        }
+    }
+}
+
+impl LabelSettings {
+    /// Whether `class` shows.
+    #[must_use]
+    pub fn shown(&self, class: LabelClass) -> bool {
+        !self.hidden.contains(&class)
+    }
+
+    /// Show or hide `class`.
+    pub fn set_shown(&mut self, class: LabelClass, shown: bool) {
+        if shown {
+            self.hidden.remove(&class);
+        } else {
+            self.hidden.insert(class);
+        }
+    }
+
+    /// Whether each class shows, in [`LabelClass::ALL`] order.
+    #[must_use]
+    pub fn mask(&self) -> [bool; 5] {
+        LabelClass::ALL.map(|class| self.shown(class))
+    }
+
+    /// Set the threshold, clamped to [`LABEL_THRESHOLD_RANGE`] and
+    /// rounded to a tenth of a pixel, what the fragment carries; a
+    /// value that is not a number is ignored.
+    pub fn set_threshold(&mut self, px: f32) {
+        if px.is_finite() {
+            self.threshold = round_threshold(px);
+        }
+    }
+}
+
+/// A threshold as the fragment carries it: to a tenth, in range.
+fn round_threshold(px: f32) -> f32 {
+    (px.clamp(*LABEL_THRESHOLD_RANGE.start(), *LABEL_THRESHOLD_RANGE.end()) * 10.0).round() / 10.0
+}
+
+/// A view with toggles and opacities set on top of it, and the label
+/// settings: what the panels edit and the fragment carries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewState {
     /// The view, numbered from 1 as the hand-off numbers them.
@@ -382,15 +474,28 @@ pub struct ViewState {
     /// hidden (`None`). A layer set back to the view's own value leaves
     /// the map.
     pub overrides: BTreeMap<Layer, Option<f32>>,
+    /// The net label toggles and threshold.
+    pub labels: LabelSettings,
 }
 
 impl ViewState {
-    /// View `view` as it is.
+    /// View `view` as it is, with the labels at their defaults.
     #[must_use]
     pub fn new(view: usize) -> Self {
         Self {
             view,
             overrides: BTreeMap::new(),
+            labels: LabelSettings::default(),
+        }
+    }
+
+    /// View `view` as it is, keeping this state's label settings: a
+    /// view change is not a reason to lose the toggles.
+    #[must_use]
+    pub fn with_view(&self, view: usize) -> Self {
+        Self {
+            labels: self.labels.clone(),
+            ..Self::new(view)
         }
     }
 
@@ -417,7 +522,9 @@ impl ViewState {
     }
 
     /// The fragment for this state, without the `#`: `view=5`, then one
-    /// `layer=opacity` or `layer=off` per override, in [`Layer`] order.
+    /// `layer=opacity` or `layer=off` per override, in [`Layer`] order,
+    /// then `labels=px` when the threshold is not the default and one
+    /// `class=off` per hidden label class, in class order.
     #[must_use]
     pub fn fragment(&self) -> String {
         let mut out = format!("{VIEW_KEY}={}", self.view);
@@ -430,14 +537,26 @@ impl ViewState {
                 None => out.push_str("off"),
             }
         }
+        if self.labels.threshold != DEFAULT_LABEL_THRESHOLD {
+            out.push('&');
+            out.push_str(LABELS_KEY);
+            out.push('=');
+            out.push_str(&format_opacity(self.labels.threshold));
+        }
+        for class in &self.labels.hidden {
+            out.push('&');
+            out.push_str(label_key(*class));
+            out.push_str("=off");
+        }
         out
     }
 
     /// The state a fragment names (with or without its `#`) for `stack`:
     /// the view number when the stack has it, else the stack's default
     /// view; every `layer=value` with a layer [`Layer::parse`] knows and
-    /// a value that is `off` or a number, clamped to 0..=1; anything
-    /// else ignored.
+    /// a value that is `off` or a number, clamped to 0..=1; `labels=px`
+    /// as the threshold, clamped to its range; a label class key
+    /// ([`label_key`]) set `off`, or `on`; anything else ignored.
     #[must_use]
     pub fn from_fragment(fragment: &str, stack: &Stack) -> Self {
         let mut state = Self::new(stack.default_view());
@@ -451,6 +570,20 @@ impl ViewState {
                     && (1..=view_count).contains(&view)
                 {
                     state.view = view;
+                }
+                continue;
+            }
+            if key == LABELS_KEY {
+                if let Ok(px) = value.parse::<f32>() {
+                    state.labels.set_threshold(px);
+                }
+                continue;
+            }
+            if let Some(class) = parse_label_key(key) {
+                match value {
+                    "off" => state.labels.set_shown(class, false),
+                    "on" => state.labels.set_shown(class, true),
+                    _ => {}
                 }
                 continue;
             }
@@ -474,7 +607,8 @@ fn round_opacity(opacity: f32) -> f32 {
     (opacity.clamp(0.0, 1.0) * 100.0).round() / 100.0
 }
 
-/// An opacity as the fragment writes it: `1`, `0.7`, `0.85`.
+/// An opacity (or a threshold) as the fragment writes it: `1`, `0.7`,
+/// `0.85`, `12.5`.
 fn format_opacity(opacity: f32) -> String {
     let text = format!("{opacity:.2}");
     text.trim_end_matches('0').trim_end_matches('.').to_owned()
@@ -678,6 +812,70 @@ mod tests {
         let state = ViewState::from_fragment(fragment, &four_layers());
         assert_eq!(state.view, view);
         assert!(state.overrides.is_empty());
+    }
+
+    #[test]
+    fn the_label_toggles_and_threshold_round_trip_and_survive_a_view_change() {
+        let mut state = ViewState::new(5);
+        assert_eq!(state.labels, LabelSettings::default());
+        assert!(state.labels.shown(LabelClass::ViaNet));
+        assert_eq!(state.labels.mask(), [true; 5]);
+        state.labels.set_shown(LabelClass::ViaNet, false);
+        state.labels.set_shown(LabelClass::PadNumber, false);
+        state.labels.set_threshold(12.04);
+        state.set(&four_layers().views()[4], copper("F.Cu"), Some(0.5));
+        assert_eq!(
+            state.fragment(),
+            "view=5&F.Cu=0.5&labels=12&pad.number=off&via.net=off"
+        );
+        assert_eq!(state.labels.mask(), [false, true, false, true, true]);
+        let parsed = ViewState::from_fragment(&state.fragment(), &four_layers());
+        assert_eq!(parsed, state);
+        // A view change keeps the labels and drops the layer overrides.
+        let changed = parsed.with_view(2);
+        assert_eq!(changed.view, 2);
+        assert!(changed.overrides.is_empty());
+        assert_eq!(changed.labels, state.labels);
+        // Back on: no key.
+        state.labels.set_shown(LabelClass::ViaNet, true);
+        state.labels.set_shown(LabelClass::PadNumber, true);
+        state.labels.set_threshold(DEFAULT_LABEL_THRESHOLD);
+        assert_eq!(state.fragment(), "view=5&F.Cu=0.5");
+    }
+
+    #[test_case("labels=100", 40.0; "a threshold past the range is clamped")]
+    #[test_case("labels=0", 2.0; "a threshold under the range is clamped")]
+    #[test_case("labels=9.96", 10.0; "a threshold is rounded to a tenth")]
+    #[test_case("labels=nan", 7.0; "a threshold that is not a number is the default")]
+    #[test_case("labels=big", 7.0; "a threshold that is not numeric is the default")]
+    fn a_label_threshold_is_kept_in_range(fragment: &str, threshold: f32) {
+        let state = ViewState::from_fragment(fragment, &four_layers());
+        assert!(
+            (state.labels.threshold - threshold).abs() < 1e-6,
+            "{}",
+            state.labels.threshold
+        );
+    }
+
+    #[test_case("pad.number", Some(LabelClass::PadNumber))]
+    #[test_case("zone.net", Some(LabelClass::ZoneNet))]
+    #[test_case("pad.Cu", None)]
+    #[test_case("labels", None)]
+    fn a_label_key_parses_and_prints_back_and_is_never_a_layer(
+        key: &str,
+        class: Option<LabelClass>,
+    ) {
+        assert_eq!(parse_label_key(key), class);
+        if let Some(class) = class {
+            assert_eq!(label_key(class), key);
+            assert_eq!(Layer::parse(key), None);
+        }
+    }
+
+    #[test]
+    fn a_label_key_with_an_odd_value_changes_nothing() {
+        let state = ViewState::from_fragment("view=1&via.net=maybe&track.net=on", &four_layers());
+        assert_eq!(state.labels, LabelSettings::default());
     }
 
     #[test]

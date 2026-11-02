@@ -13,6 +13,7 @@ use kicad_core::geometry::Bounds;
 use kicad_core::model::{Board, Point};
 use kicad_core::tessellate::{Mesh, Tessellator};
 
+use crate::labels::LabelBatch;
 use crate::render::{Draw, Rgb, Vertex};
 use crate::view::{Layer, Side, Stack, View, ViewState, palette};
 
@@ -64,6 +65,9 @@ pub struct Scene {
     pub views: Vec<View>,
     /// How many zones are drawn hatched for want of a stored fill.
     pub unfilled_zones: usize,
+    /// The net labels, placed once (`crate::labels`), relative to
+    /// [`Scene::origin`] like the vertices.
+    pub labels: LabelBatch,
 }
 
 impl Scene {
@@ -92,6 +96,7 @@ impl Scene {
             views: stack.views(),
             stack: stack.clone(),
             unfilled_zones: board.unfilled_zones(),
+            labels: LabelBatch::build(board, bounds.center()),
         };
         for layer in stack.order(Side::Front) {
             // A KiCad layer's key is its canonical name in the board's

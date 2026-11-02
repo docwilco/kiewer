@@ -15,6 +15,7 @@
 //! a device, a format and a texture view to draw into.
 
 pub mod atlas_pipeline;
+pub mod label_pipeline;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod offscreen;
 
@@ -27,7 +28,9 @@ use wgpu::util::DeviceExt as _;
 
 use crate::atlas::TextVertex;
 use crate::camera::View;
+use crate::labels::LabelBatch;
 use crate::render::atlas_pipeline::{Coverage, TextPass};
+use crate::render::label_pipeline::{LabelFrame, LabelPass};
 
 /// The shader source, compiled at pipeline creation.
 pub const SHADER: &str = include_str!("shader.wgsl");
@@ -178,6 +181,8 @@ pub struct Renderer {
     /// Named-face text through the glyph atlas (`atlas_pipeline`), drawn
     /// after the flat geometry.
     text: TextPass,
+    /// Net labels (`label_pipeline`), drawn last.
+    labels: LabelPass,
 }
 
 struct Geometry {
@@ -295,6 +300,7 @@ impl Renderer {
             cache: None,
         });
         let text = TextPass::new(device, format, sample_count, &bind_group_layout);
+        let labels = LabelPass::new(device, format, sample_count, &bind_group_layout);
         Self {
             pipeline,
             uniform,
@@ -306,7 +312,24 @@ impl Renderer {
             sample_count,
             msaa: None,
             text,
+            labels,
         }
+    }
+
+    /// Replace the net labels (`crate::labels`) with `batch`'s.
+    pub fn upload_labels(&mut self, device: &wgpu::Device, batch: &LabelBatch) {
+        self.labels.upload(device, batch);
+    }
+
+    /// Drop the net labels: a new board, or a sheet.
+    pub fn clear_labels(&mut self) {
+        self.labels.clear();
+    }
+
+    /// What the next frames draw the labels with: the gate, the toggles,
+    /// the mirror and the layers shown; `None` draws none.
+    pub fn set_label_frame(&mut self, frame: Option<LabelFrame>) {
+        self.labels.set_frame(frame);
     }
 
     /// Replace the glyph atlas and the quads of one face of text
@@ -406,6 +429,7 @@ impl Renderer {
             }
             queue.write_buffer(&paints.buffer, 0, &packed);
         }
+        self.labels.write(queue);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame"),
         });
@@ -456,6 +480,9 @@ impl Renderer {
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 self.text.draw(&mut pass);
             }
+            // The net labels over everything, as the hand-off draws them.
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            self.labels.draw(&mut pass);
         }
         queue.submit(std::iter::once(encoder.finish()));
     }
