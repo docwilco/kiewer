@@ -138,6 +138,10 @@ pub enum Refusal {
     /// as the form carried it (`handle/slug`).
     #[display("there is no design {slug}")]
     NoSuchDesign { slug: String },
+    /// The settings form was built for a design at `slug`, and the design
+    /// is no longer there: someone moved it while the form was open.
+    #[display("the design is no longer at {slug}; open its page again and retry")]
+    SlugMoved { slug: String },
     /// The branch's head moved while the upload was in flight. Pending
     /// revisions (docs/v1-scope.md, Push) are not built yet, so the upload
     /// is retried.

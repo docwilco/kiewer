@@ -166,7 +166,9 @@ fn status(refusal: &Refusal) -> StatusCode {
         | Refusal::DoesNotParse { .. }
         | Refusal::ParseTimeout { .. }
         | Refusal::Blocked { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-        Refusal::SlugTaken { .. } | Refusal::HeadMoved { .. } => StatusCode::CONFLICT,
+        Refusal::SlugTaken { .. } | Refusal::SlugMoved { .. } | Refusal::HeadMoved { .. } => {
+            StatusCode::CONFLICT
+        }
         Refusal::NoSuchDesign { .. } => StatusCode::NOT_FOUND,
         Refusal::Unreadable { .. } => StatusCode::BAD_REQUEST,
     }

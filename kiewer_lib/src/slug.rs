@@ -1,6 +1,6 @@
 //! A design's slug: its name in its URL (GLOSSARY, People, Slug). The
 //! rules, the slug a name suggests at creation, the change of a slug by
-//! its owner, and the redirect the old slug leaves behind until a design
+//! its owner or an admin, and the redirect the old slug leaves until a design
 //! reuses it (docs/v1-scope.md, Accounts and access, Q29). A redirect row
 //! names the design, not the new slug, so a slug changed twice still
 //! reaches the design from either old one.
@@ -17,7 +17,7 @@ use crate::error::{Error, Refusal, Result};
 /// A design's name in its URL: lowercase letters, digits and hyphens, 1
 /// to 64 characters, no hyphen at either end, unique per owner. Picked
 /// from the upload's name at creation ([`Slug::suggest`]) and changed by
-/// the owner on the design page ([`change`]).
+/// the owner or an admin on the design page ([`change`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Slug(String);
 
@@ -136,7 +136,7 @@ pub(crate) async fn release(tx: &mut PgConnection, owner: AccountId, slug: &Slug
 /// # Errors
 ///
 /// [`Error::Refused`] with [`Refusal::SlugTaken`] when a design of the
-/// owner's is at `new`, with [`Refusal::NoSuchDesign`] when the design is
+/// owner's is at `new`, with [`Refusal::SlugMoved`] when the design is
 /// no longer at `old`; [`Error::Db`] when Postgres refuses otherwise.
 pub async fn change(
     tx: &mut PgConnection,
@@ -158,7 +158,7 @@ pub async fn change(
     match moved {
         Ok(done) if done.rows_affected() == 1 => {}
         Ok(_) => {
-            return Err(Error::Refused(Refusal::NoSuchDesign {
+            return Err(Error::Refused(Refusal::SlugMoved {
                 slug: old.to_string(),
             }));
         }

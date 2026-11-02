@@ -19,8 +19,10 @@ pub const MAX_NAME_LEN: usize = 100;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     /// The name, as the person typed it; trimmed and checked by
-    /// [`Settings::name`].
+    /// [`Settings::check`].
     pub name: String,
+    /// The slug the design is to be at: its own, or a new one, which
+    /// moves it.
     pub slug: Slug,
     /// The description's Markdown, at most [`description::MAX_LEN`]
     /// bytes.
@@ -28,23 +30,14 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// The settings a design has now: what its form starts with.
-    #[must_use]
-    pub fn of(design: &Design, description: &description::Description) -> Self {
-        Self {
-            name: design.name.clone(),
-            slug: design.slug.clone(),
-            description: description.markdown.clone(),
-        }
-    }
-
-    /// The name as the row stores it: trimmed, not empty, at most
-    /// [`MAX_NAME_LEN`] characters.
+    /// The name as the row stores it (trimmed, not empty, at most
+    /// [`MAX_NAME_LEN`] characters), once the description is within its
+    /// length: the one check a save makes before it writes.
     ///
     /// # Errors
     ///
     /// [`Error::Malformed`] with the words the form shows.
-    pub fn name(&self) -> Result<&str> {
+    pub fn check(&self) -> Result<&str> {
         let name = self.name.trim();
         if name.is_empty() {
             return Err(Error::Malformed("the name is empty".to_owned()));
@@ -54,24 +47,13 @@ impl Settings {
                 "the name is longer than {MAX_NAME_LEN} characters"
             )));
         }
-        Ok(name)
-    }
-
-    /// Why the settings cannot be saved as they are, or `Ok` when they
-    /// can: the name's rules and the description's length.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Malformed`] with the words the form shows.
-    pub fn check(&self) -> Result<()> {
-        self.name()?;
         if self.description.len() > description::MAX_LEN {
             return Err(Error::Malformed(format!(
                 "the description is longer than {} KB",
                 description::MAX_LEN / 1024
             )));
         }
-        Ok(())
+        Ok(name)
     }
 }
 
@@ -94,12 +76,14 @@ pub async fn save(
     design: &Design,
     settings: &Settings,
 ) -> Result<Slug> {
-    settings.check()?;
-    let name = settings.name()?;
+    let name = settings.check()?;
     let mut tx = db.begin().await?;
     // The role is read inside the transaction, as the gate of the writes
     // that follow it, so a role revoked in the same instant refuses the
-    // whole save rather than half of it.
+    // whole save rather than half of it. A read first, against the usual
+    // write-first rule: the roles seam is the one place roles are read,
+    // so the gate cannot fold into the first UPDATE, and Postgres takes no
+    // lock on a read that a later write would have to upgrade.
     roles::require(&mut *tx, design.id, editor, Role::Admin).await?;
     description::set(&mut tx, design.id, &settings.description).await?;
     sqlx::query("UPDATE design SET name = $2 WHERE id = $1")
@@ -142,26 +126,30 @@ mod tests {
     #[test_case("", None; "empty")]
     #[test_case("   ", None; "blank")]
     fn the_name_is_trimmed_and_not_empty(typed: &str, name: Option<&str>) {
-        assert_eq!(settings(typed, "").name().ok(), name);
+        assert_eq!(settings(typed, "").check().ok(), name);
     }
 
-    #[test]
-    fn the_name_and_the_description_have_a_longest() {
-        let long = "ä".repeat(MAX_NAME_LEN);
-        assert_eq!(
-            settings(&long, "").name().unwrap(),
-            long,
-            "characters, not bytes"
-        );
-        let over = "a".repeat(MAX_NAME_LEN + 1);
-        let err = settings(&over, "").check().expect_err("too long");
-        assert!(err.to_string().contains("100 characters"), "{err}");
-        let err = settings("ok", &"m".repeat(description::MAX_LEN + 1))
-            .check()
-            .expect_err("too long");
-        assert!(err.to_string().contains("64 KB"), "{err}");
-        settings("ok", &"m".repeat(description::MAX_LEN))
-            .check()
-            .expect("at the cap");
+    #[test_case("ä".repeat(MAX_NAME_LEN), String::new(), Ok(()); "a name at the cap, in characters not bytes")]
+    #[test_case("a".repeat(MAX_NAME_LEN + 1), String::new(), Err("100 characters"); "a name one over")]
+    #[test_case("ok".to_owned(), "m".repeat(description::MAX_LEN), Ok(()); "a description at the cap")]
+    #[test_case("ok".to_owned(), "m".repeat(description::MAX_LEN + 1), Err("64 KB"); "a description one over")]
+    fn the_name_and_the_description_have_a_longest(
+        name: String,
+        description: String,
+        outcome: std::result::Result<(), &str>,
+    ) {
+        let settings = Settings {
+            name,
+            slug: "x".parse().unwrap(),
+            description,
+        };
+        let checked = settings.check();
+        match outcome {
+            Ok(()) => assert_eq!(checked.expect("within the caps"), settings.name.trim()),
+            Err(words) => {
+                let err = checked.expect_err("over a cap");
+                assert!(err.to_string().contains(words), "{err}");
+            }
+        }
     }
 }

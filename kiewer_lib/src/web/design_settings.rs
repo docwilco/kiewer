@@ -40,10 +40,14 @@ pub fn url(handle: &Handle, slug: &Slug) -> String {
 pub struct SettingsView {
     /// Where the form posts.
     pub action: String,
+    /// The name, as the row has it or as the refused attempt typed it.
     pub name: String,
+    /// The slug as text, not a [`Slug`]: a refused attempt may be one
+    /// that does not parse, and the form shows it back as typed.
     pub slug: String,
     /// The description's Markdown.
     pub description: String,
+    /// Why the last save was refused, or none; set, it opens the block.
     pub error: Option<String>,
 }
 
@@ -115,26 +119,20 @@ pub(super) async fn save(
         description: form.description.clone(),
         error: None,
     };
-    let new_slug = match attempt.slug.parse::<Slug>() {
-        Ok(new_slug) => new_slug,
-        Err(Error::Malformed(reason)) => {
-            return refused(
-                settled,
-                StatusCode::UNPROCESSABLE_ENTITY,
-                &shown,
-                &description,
-                attempt,
-                reason,
-            );
+    // The slug that does not parse is a malformed value like any the
+    // save refuses, so both go through the one match below.
+    let outcome = match attempt.slug.parse::<Slug>() {
+        Ok(new_slug) => {
+            let settings = Settings {
+                name: form.name,
+                slug: new_slug,
+                description: form.description,
+            };
+            design_settings::save(&state.db, settled.account_id, &shown.design, &settings).await
         }
-        Err(error) => return Err(error),
+        Err(error) => Err(error),
     };
-    let settings = Settings {
-        name: form.name,
-        slug: new_slug,
-        description: form.description,
-    };
-    match design_settings::save(&state.db, settled.account_id, &shown.design, &settings).await {
+    match outcome {
         Ok(slug) => Ok(personal(
             settled.jar,
             Redirect::to(&format!("/{handle}/{slug}")),

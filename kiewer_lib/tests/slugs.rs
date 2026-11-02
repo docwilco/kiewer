@@ -261,7 +261,7 @@ async fn a_slug_another_design_of_the_owner_has_is_refused_and_nothing_moves() {
         .await
         .expect_err("the design is no longer at the slug the form was built from");
     assert!(
-        matches!(stale, Error::Refused(Refusal::NoSuchDesign { ref slug }) if slug == "mine"),
+        matches!(stale, Error::Refused(Refusal::SlugMoved { ref slug }) if slug == "mine"),
         "{stale}"
     );
 }
