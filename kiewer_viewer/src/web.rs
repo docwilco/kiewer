@@ -31,6 +31,9 @@ pub struct Viewer {
     scene: Option<Scene>,
     backend: Backend,
     fallback: Vec<String>,
+    /// The scale the board was last fitted at, 0 before a board: the
+    /// zoom the page shows is relative to it.
+    fit_scale: f64,
 }
 
 /// What the browser gave: the surface on the canvas, the adapter and the
@@ -194,7 +197,26 @@ impl Viewer {
             scene: None,
             backend: gpu.backend,
             fallback: gpu.fallback,
+            fit_scale: 0.0,
         })
+    }
+
+    /// The scale, in device pixels per millimetre.
+    #[must_use]
+    pub fn scale(&self) -> f64 {
+        self.camera.scale()
+    }
+
+    /// The zoom relative to the fitted board: 1 right after a fit, 1000
+    /// when a millimetre spans a thousand times the pixels it did then.
+    /// 0 before a board is loaded.
+    #[must_use]
+    pub fn zoom(&self) -> f64 {
+        if self.fit_scale > 0.0 {
+            self.camera.scale() / self.fit_scale
+        } else {
+            0.0
+        }
     }
 
     /// `webgpu` or `webgl2`.
@@ -226,6 +248,7 @@ impl Viewer {
         self.renderer
             .upload(&self.device, &scene.vertices, &scene.indices);
         self.camera.fit(scene.bounds);
+        self.fit_scale = self.camera.scale();
         self.scene = Some(scene);
         Ok(())
     }
@@ -306,6 +329,7 @@ impl Viewer {
     pub fn fit(&mut self) {
         if let Some(scene) = &self.scene {
             self.camera.fit(scene.bounds);
+            self.fit_scale = self.camera.scale();
         }
     }
 
