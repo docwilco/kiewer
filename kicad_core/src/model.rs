@@ -348,6 +348,53 @@ pub struct Pad {
     /// The shapes a [`PadShape::Custom`] pad is built from, in the pad's
     /// frame.
     pub primitives: Vec<Drawing>,
+    /// The pad's own mask and paste clearances; `None` for each the pad
+    /// leaves to its footprint and the board.
+    pub clearances: Clearances,
+}
+
+/// How far a solder mask opening grows past the copper and how far the
+/// paste shrinks inside it, as KiCad's local clearance overrides: each
+/// level (pad, footprint, board) sets what it sets and leaves the rest to
+/// the level above. Millimetres.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Clearances {
+    /// The mask opening's growth around the pad; negative shrinks it.
+    pub solder_mask_margin: Option<f64>,
+    /// The paste's growth from the pad's edge; negative, as usual, shrinks.
+    pub solder_paste_margin: Option<f64>,
+    /// The same as a fraction of the pad's size, added to the margin.
+    pub solder_paste_ratio: Option<f64>,
+}
+
+impl Clearances {
+    /// These clearances with every unset value taken from `fallback`: the
+    /// pad's over the footprint's, the footprint's over the board's.
+    #[must_use]
+    pub fn or(self, fallback: Clearances) -> Clearances {
+        Clearances {
+            solder_mask_margin: self.solder_mask_margin.or(fallback.solder_mask_margin),
+            solder_paste_margin: self.solder_paste_margin.or(fallback.solder_paste_margin),
+            solder_paste_ratio: self.solder_paste_ratio.or(fallback.solder_paste_ratio),
+        }
+    }
+
+    /// How far the mask opening of a pad of `size` sits past its edge: the
+    /// margin, 0 when none is set.
+    #[must_use]
+    pub fn mask_expansion(self) -> f64 {
+        self.solder_mask_margin.unwrap_or(0.0)
+    }
+
+    /// How far the paste of a pad of `size` sits past its edge (negative:
+    /// inside it): the margin plus the ratio of the pad's shorter side,
+    /// each 0 when unset. KiCad applies the ratio per axis; one value of
+    /// the shorter side is what a uniform offset can take.
+    #[must_use]
+    pub fn paste_expansion(self, size: Size) -> f64 {
+        self.solder_paste_margin.unwrap_or(0.0)
+            + self.solder_paste_ratio.unwrap_or(0.0) * size.width.min(size.height)
+    }
 }
 
 /// Flags from a footprint's `(attr ...)`.
@@ -403,6 +450,9 @@ pub struct Footprint {
     pub pads: Vec<Pad>,
     /// Zones the footprint carries, in the footprint's frame.
     pub zones: Vec<Zone>,
+    /// The footprint's own mask and paste clearances, for pads that set
+    /// none.
+    pub clearances: Clearances,
 }
 
 impl Footprint {
@@ -554,6 +604,18 @@ pub struct Zone {
     pub fills: Vec<Fill>,
 }
 
+impl Zone {
+    /// Whether the zone is copper on `layer` with no stored fill there: a
+    /// zone saved before its fill was computed, or unfilled on purpose.
+    /// A keepout is never unfilled; it is not copper.
+    #[must_use]
+    pub fn is_unfilled_on(&self, layer: LayerId) -> bool {
+        !self.keepout
+            && self.layers.contains(&layer)
+            && !self.fills.iter().any(|fill| fill.layer == layer)
+    }
+}
+
 /// A parsed board.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Board {
@@ -584,6 +646,9 @@ pub struct Board {
     pub vias: Vec<Via>,
     /// Board-level zones.
     pub zones: Vec<Zone>,
+    /// The board's mask and paste clearances from `(setup ...)`, the last
+    /// fallback for pads and footprints that set none.
+    pub clearances: Clearances,
 }
 
 /// The canonical name of the layer the board outline is drawn on.
@@ -647,5 +712,22 @@ impl Board {
         self.zones
             .iter()
             .chain(self.footprints.iter().flat_map(|fp| fp.zones.iter()))
+    }
+
+    /// How many zones lack a stored fill on at least one of their copper
+    /// layers ([`Zone::is_unfilled_on`]): the viewer draws them hatched
+    /// and says so.
+    #[must_use]
+    pub fn unfilled_zones(&self) -> usize {
+        self.all_zones()
+            .filter(|zone| zone.layers.iter().any(|&layer| zone.is_unfilled_on(layer)))
+            .count()
+    }
+
+    /// The clearances `pad` of `footprint` is drawn with: its own, then
+    /// the footprint's, then the board's.
+    #[must_use]
+    pub fn pad_clearances(&self, footprint: &Footprint, pad: &Pad) -> Clearances {
+        pad.clearances.or(footprint.clearances).or(self.clearances)
     }
 }

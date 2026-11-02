@@ -21,8 +21,9 @@ use crate::atlas::{self, Plan, Quads, Rect};
 use crate::camera::{Camera, DOUBLE_CLICK, Size};
 use crate::error::{Error, Result};
 use crate::render::atlas_pipeline::Atlas;
-use crate::render::{Backend, MSAA_SAMPLES, Renderer, device_descriptor};
-use crate::scene::{SILK_LAYER, Scene, palette};
+use crate::render::{Backend, MSAA_SAMPLES, Renderer, Target, device_descriptor};
+use crate::scene::{Scene, clear_color};
+use crate::view::{Layer, Side, View, ViewState, palette};
 
 /// The viewer over one canvas.
 #[wasm_bindgen]
@@ -34,6 +35,9 @@ pub struct Viewer {
     renderer: Renderer,
     camera: Camera,
     scene: Option<Scene>,
+    /// The view in force and the toggles on it; the page's layer panel
+    /// and the URL fragment mirror it.
+    state: ViewState,
     backend: Backend,
     fallback: Vec<String>,
     /// The adapter's vendor as [`vendor_name`] read it, for the beacon.
@@ -254,6 +258,7 @@ impl Viewer {
             renderer,
             camera,
             scene: None,
+            state: ViewState::new(1),
             backend: gpu.backend,
             fallback: gpu.fallback,
             vendor,
@@ -308,21 +313,171 @@ impl Viewer {
         self.renderer.sample_count()
     }
 
-    /// Parse a `.kicad_pcb` text, tessellate its outline, front copper
-    /// and front silkscreen, upload them and fit the view to the board. A
-    /// parse error is the error's message with its line.
+    /// Parse a `.kicad_pcb` text, tessellate every layer, upload them,
+    /// open on the board's default view ([`Stack::default_view`]) and
+    /// fit the camera to the board. A parse error is the error's message
+    /// with its line.
+    ///
+    /// [`Stack::default_view`]: crate::view::Stack::default_view
     pub fn load_board(&mut self, text: &str) -> core::result::Result<(), JsError> {
         let board = kicad_core::parse_board(text).map_err(Error::from)?;
-        let scene = Scene::build(&board, self.config.format).ok_or(Error::NothingToDraw)?;
+        let scene = Scene::build(&board).ok_or(Error::NothingToDraw)?;
         self.renderer
             .upload(&self.device, &scene.vertices, &scene.indices);
         self.renderer.clear_text();
         self.system_faces.clear();
+        self.state = ViewState::new(scene.stack.default_view());
         self.camera.fit(scene.bounds);
         self.fit_scale = self.camera.scale();
         self.scene = Some(scene);
         self.board = Some(board);
+        self.mirror_for_view();
         Ok(())
+    }
+
+    /// The views of the loaded board, their titles in order; the view
+    /// numbers the page shows count from 1. Empty before a board.
+    #[must_use]
+    pub fn views(&self) -> Vec<String> {
+        self.scene.as_ref().map_or_else(Vec::new, |scene| {
+            scene
+                .stack
+                .views()
+                .into_iter()
+                .map(|view| view.title)
+                .collect()
+        })
+    }
+
+    /// The view in force, numbered from 1.
+    #[must_use]
+    pub fn view(&self) -> usize {
+        self.state.view
+    }
+
+    /// Switch to view `number` (from 1), dropping every toggle set on the
+    /// view before. A number past the last view is ignored.
+    pub fn set_view(&mut self, number: usize) {
+        let Some(scene) = &self.scene else { return };
+        if (1..=scene.stack.views().len()).contains(&number) {
+            self.state = ViewState::new(number);
+            self.mirror_for_view();
+        }
+    }
+
+    /// Every layer the panel lists, by key, in the view's draw order
+    /// (bottom first): the board, the outline, the copper, mask, paste,
+    /// silkscreen and courtyard of both sides, the holes.
+    #[must_use]
+    pub fn layers(&self) -> Vec<String> {
+        match (&self.scene, self.current_view()) {
+            (Some(scene), Some(view)) => scene
+                .stack
+                .order(view.top)
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether the layer `key` names is shown under the view in force.
+    #[must_use]
+    pub fn layer_shown(&self, key: &str) -> bool {
+        self.layer_state(key).is_some()
+    }
+
+    /// The opacity the layer `key` names draws at, 0 to 1; 1 for a layer
+    /// that is hidden and has no opacity of its own.
+    #[must_use]
+    pub fn layer_opacity(&self, key: &str) -> f64 {
+        f64::from(self.layer_state(key).unwrap_or(1.0))
+    }
+
+    /// Show the layer `key` names at `opacity`, or hide it: a toggle on
+    /// top of the view in force.
+    pub fn set_layer(&mut self, key: &str, shown: bool, opacity: f64) {
+        let Some(layer) = Layer::parse(key) else {
+            return;
+        };
+        let Some(view) = self.current_view() else {
+            return;
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "an opacity is 0 to 1, which f32 holds to the hundredth the state keeps"
+        )]
+        let opacity = opacity as f32;
+        self.state.set(&view, layer, shown.then_some(opacity));
+    }
+
+    /// The state as the URL fragment carries it, without the `#`:
+    /// `view=5&F.Cu=0.5&F.SilkS=off`.
+    #[must_use]
+    pub fn fragment(&self) -> String {
+        self.state.fragment()
+    }
+
+    /// Set the state from a URL fragment, `#` or not: the view it names
+    /// when the board has it (else the default view) with the toggles it
+    /// lists. Nothing before a board.
+    pub fn apply_fragment(&mut self, fragment: &str) {
+        let Some(scene) = &self.scene else { return };
+        self.state = ViewState::from_fragment(
+            fragment,
+            scene.stack.default_view(),
+            scene.stack.views().len(),
+        );
+        self.mirror_for_view();
+    }
+
+    /// Whether the view in force is mirrored, seen from the back.
+    #[must_use]
+    pub fn mirrored(&self) -> bool {
+        self.camera.mirrored()
+    }
+
+    /// One line per thing the page should say about the board: a zone
+    /// drawn hatched for want of a stored fill. Empty when all is well.
+    #[must_use]
+    pub fn warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if let Some(scene) = &self.scene
+            && scene.unfilled_zones > 0
+        {
+            let zones = if scene.unfilled_zones == 1 {
+                "1 zone has".to_owned()
+            } else {
+                format!("{} zones have", scene.unfilled_zones)
+            };
+            warnings.push(format!(
+                "{zones} no stored fill and is drawn hatched: fill the zones in KiCad and save the board"
+            ));
+        }
+        warnings
+    }
+
+    /// The view the state names, for the loaded board.
+    fn current_view(&self) -> Option<View> {
+        let scene = self.scene.as_ref()?;
+        scene
+            .stack
+            .views()
+            .into_iter()
+            .nth(self.state.view.checked_sub(1)?)
+    }
+
+    /// The opacity of the layer `key` names, or `None` when hidden or
+    /// unknown.
+    fn layer_state(&self, key: &str) -> Option<f32> {
+        let layer = Layer::parse(key)?;
+        self.state.opacity(&self.current_view()?, &layer)
+    }
+
+    /// Mirror the camera as the view in force asks.
+    fn mirror_for_view(&mut self) {
+        let mirrored = self.current_view().is_some_and(|view| view.mirrored);
+        self.camera.set_mirrored(mirrored);
     }
 
     /// The canvas's backing size changed.
@@ -432,13 +587,19 @@ impl Viewer {
             .scene
             .as_ref()
             .map_or(Point::default(), |scene| scene.origin);
+        let draws = self.scene.as_ref().map_or_else(Vec::new, |scene| {
+            scene.draw_list(&self.state, self.config.format)
+        });
         self.renderer.render(
             &self.device,
             &self.queue,
-            &target,
-            (self.config.width, self.config.height),
+            &Target {
+                view: &target,
+                size: (self.config.width, self.config.height),
+                clear: clear_color(self.config.format),
+            },
             self.camera.view(origin),
-            palette::PAGE.clear_for_format(self.config.format),
+            &draws,
         );
         self.queue.present(frame);
         Ok(())
@@ -623,7 +784,8 @@ impl Viewer {
     /// The board and the layer whose text the viewer draws.
     fn silk(&self) -> Option<(&Board, LayerId)> {
         let board = self.board.as_ref()?;
-        Some((board, board.layer_named(SILK_LAYER)?))
+        let silk = Layer::Silk(Side::Front).to_string();
+        Some((board, board.layer_named(&silk)?))
     }
 
     /// The pixels per em `face` wants at the camera's scale.
@@ -635,14 +797,14 @@ impl Viewer {
     }
 
     /// Rebuild the Newstroke scene with the system faces' texts left
-    /// out, keeping the camera where it is.
+    /// out, keeping the camera and the view state where they are.
     fn rebuild_scene(&mut self) {
         let Some(board) = &self.board else {
             return;
         };
         let system: BTreeSet<String> = self.system_faces.keys().cloned().collect();
         let stroke = atlas::stroke_board(board, &system);
-        if let Some(scene) = Scene::build(&stroke, self.config.format) {
+        if let Some(scene) = Scene::build(&stroke) {
             self.renderer
                 .upload(&self.device, &scene.vertices, &scene.indices);
             self.scene = Some(scene);

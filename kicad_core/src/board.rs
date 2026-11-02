@@ -11,9 +11,9 @@ use std::collections::BTreeMap;
 
 use crate::error::{Error, MIN_BOARD_VERSION, Result};
 use crate::model::{
-    Board, Drawing, Drill, Fill, Font, Footprint, FootprintAttributes, Graphic, Horizontal,
-    Justify, Layer, LayerId, LayerKind, Net, NetId, Pad, PadKind, PadShape, Point, Property,
-    Segment, Shape, Size, Text, TextRole, TrackArc, Vertical, Via, ViaKind, Zone,
+    Board, Clearances, Drawing, Drill, Fill, Font, Footprint, FootprintAttributes, Graphic,
+    Horizontal, Justify, Layer, LayerId, LayerKind, Net, NetId, Pad, PadKind, PadShape, Point,
+    Property, Segment, Shape, Size, Text, TextRole, TrackArc, Vertical, Via, ViaKind, Zone,
 };
 use crate::sexpr::{self, Node};
 
@@ -64,12 +64,21 @@ pub fn parse_board(source: &str) -> Result<Board> {
         arcs: Vec::new(),
         vias: Vec::new(),
         zones: Vec::new(),
+        clearances: Clearances::default(),
     };
     for node in root.lists() {
         match node.head()? {
             "generator" => board.generator = Some(node.atom(0)?.to_owned()),
             "generator_version" => board.generator_version = Some(node.atom(0)?.to_owned()),
             "general" => board.thickness = optional_number(node, "thickness")?,
+            // The board's clearances go by other names than a pad's.
+            "setup" => {
+                board.clearances = Clearances {
+                    solder_mask_margin: optional_number(node, "pad_to_mask_clearance")?,
+                    solder_paste_margin: optional_number(node, "pad_to_paste_clearance")?,
+                    solder_paste_ratio: optional_number(node, "pad_to_paste_clearance_ratio")?,
+                };
+            }
             "footprint" => board.footprints.push(parser.footprint(node)?),
             "segment" => board.segments.push(parser.segment(node)?),
             "arc" => board.arcs.push(parser.track_arc(node)?),
@@ -255,6 +264,7 @@ impl Parser {
             graphics: Vec::new(),
             pads: Vec::new(),
             zones: Vec::new(),
+            clearances: clearances(node)?,
         };
         if let Some(attr) = node.child("attr") {
             footprint.attributes = FootprintAttributes {
@@ -365,6 +375,7 @@ impl Parser {
             pin_type: optional_text(node, "pintype")?,
             round_radius_ratio,
             primitives,
+            clearances: clearances(node)?,
         })
     }
 
@@ -541,6 +552,16 @@ fn optional_text(node: &Node, name: &str) -> Result<Option<String>> {
 /// present.
 fn optional_number(node: &Node, name: &str) -> Result<Option<f64>> {
     node.child(name).map(|child| child.number(0)).transpose()
+}
+
+/// A pad's or a footprint's local mask and paste clearances, each absent
+/// when the file leaves it to the level above.
+fn clearances(node: &Node) -> Result<Clearances> {
+    Ok(Clearances {
+        solder_mask_margin: optional_number(node, "solder_mask_margin")?,
+        solder_paste_margin: optional_number(node, "solder_paste_margin")?,
+        solder_paste_ratio: optional_number(node, "solder_paste_ratio")?,
+    })
 }
 
 /// A `(start x y)`, `(end x y)`, `(xy x y)`: two numbers.

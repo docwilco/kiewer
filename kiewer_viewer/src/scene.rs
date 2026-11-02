@@ -1,41 +1,48 @@
-//! A board as the renderer draws it: the outline, the front copper and
-//! the front silkscreen tessellated and coloured, positions relative to
-//! the board's centre so the GPU's f32 holds them to a few nanometres.
+//! A board as the renderer draws it: every layer the views can show,
+//! tessellated once into one vertex buffer and one index buffer, each
+//! layer a run of indices ([`Slice`]) so a toggle or an opacity is a
+//! change to what is drawn and never a new tessellation. Positions are
+//! relative to the board's centre so the GPU's f32 holds them to a few
+//! nanometres. Colours are not here: a slice names its layer, and the
+//! view in force colours it when the frame is drawn
+//! ([`Scene::draw_list`]).
+
+use std::ops::Range;
 
 use kicad_core::geometry::Bounds;
-use kicad_core::model::{Board, Point};
+use kicad_core::model::{Board, LayerId, Point};
 use kicad_core::tessellate::{Mesh, Tessellator};
 
-use crate::render::{Rgb, Vertex};
+use crate::render::{Draw, Rgb, Vertex};
+use crate::view::{Layer, Side, Stack, ViewState, palette};
 
 /// How far a flattened curve may sit from the true one, in millimetres:
 /// a micrometre, a tenth of a pixel at the thousandfold zoom the tracer
 /// asks for.
 pub const TOLERANCE: f64 = 0.001;
 
-/// The colours of the hand-off's first view (viewer-drop/README.md).
-pub mod palette {
-    use super::Rgb;
-
-    /// The page behind the board.
-    pub const PAGE: Rgb = Rgb(0x2b, 0x2b, 0x2b);
-    /// The board outline, `Edge.Cuts`.
-    pub const OUTLINE: Rgb = Rgb(0xd0, 0xd2, 0xcd);
-    /// The front copper, KiCad's default theme.
-    pub const F_CU: Rgb = Rgb(0xc8, 0x34, 0x34);
-    /// The front silkscreen, KiCad's default theme.
-    pub const F_SILKS: Rgb = Rgb(0xf2, 0xed, 0xa1);
+/// What a slice is coloured with when it is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Paint {
+    /// The colour its layer has in the view in force.
+    Layer,
+    /// The page colour: a hole, drawn over the copper so a track that
+    /// runs into it does not fill it back in.
+    Page,
 }
 
-/// The one copper layer the tracer shows.
-pub const COPPER_LAYER: &str = "F.Cu";
+/// One run of the index buffer: part of one layer, in one paint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slice {
+    /// The layer the run belongs to; what shows or hides it.
+    pub layer: Layer,
+    /// What colours it.
+    pub paint: Paint,
+    /// The indices, a multiple of three.
+    pub range: Range<u32>,
+}
 
-/// The silkscreen drawn over it: its graphics and its text in Newstroke
-/// (every text item, a named face included, until the font picker of the
-/// scope's Fonts decision exists).
-pub const SILK_LAYER: &str = "F.SilkS";
-
-/// Triangles ready for upload, with where they came from.
+/// Triangles ready for upload, with what each run of them is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scene {
     /// The world point the positions are relative to: the middle of the
@@ -43,63 +50,150 @@ pub struct Scene {
     pub origin: Point,
     /// What the camera fits to, in world millimetres.
     pub bounds: Bounds,
-    /// Positions relative to [`Scene::origin`], coloured.
+    /// Positions relative to [`Scene::origin`].
     pub vertices: Vec<Vertex>,
     /// Three per triangle.
     pub indices: Vec<u32>,
+    /// The runs of [`Scene::indices`], in the order they were built;
+    /// a frame draws them in the view's order.
+    pub slices: Vec<Slice>,
+    /// The board's copper, which names the views.
+    pub stack: Stack,
+    /// How many zones are drawn hatched for want of a stored fill.
+    pub unfilled_zones: usize,
 }
 
 impl Scene {
-    /// The outline, the front copper, the holes through it and the front
-    /// silkscreen of `board`, coloured for a target of `format`; `None`
-    /// for a board with neither outline nor copper.
+    /// Every layer of `board` the views can show; `None` for a board
+    /// with neither outline nor copper.
     #[must_use]
-    pub fn build(board: &Board, format: wgpu::TextureFormat) -> Option<Self> {
+    pub fn build(board: &Board) -> Option<Self> {
         let tessellator = Tessellator::new(TOLERANCE);
-        let outline = tessellator.outline(board);
-        let front = board.layer_named(COPPER_LAYER);
-        let copper = front
-            .map(|layer| tessellator.copper(board, layer))
-            .unwrap_or_default();
-        let holes = front
-            .map(|layer| tessellator.holes(board, layer))
-            .unwrap_or_default();
+        let stack = Stack::of(board);
         let bounds = tessellator
             .outline_bounds(board)
-            .or_else(|| outline.bounds())
-            .or_else(|| copper.bounds())?;
-        let origin = bounds.center();
+            .or_else(|| tessellator.outline(board).bounds())
+            .or_else(|| {
+                stack
+                    .copper
+                    .first()
+                    .and_then(|name| board.layer_named(name))
+                    .and_then(|layer| tessellator.copper(board, layer).bounds())
+            })?;
         let mut scene = Self {
-            origin,
+            origin: bounds.center(),
             bounds,
             vertices: Vec::new(),
             indices: Vec::new(),
+            slices: Vec::new(),
+            stack: stack.clone(),
+            unfilled_zones: board.unfilled_zones(),
         };
-        scene.add(&outline, palette::OUTLINE.for_format(format));
-        scene.add(&copper, palette::F_CU.for_format(format));
-        // After the copper, in the page colour: a track ending in a via
-        // covers the hole the via's ring left open, and the hole must win.
-        scene.add(&holes, palette::PAGE.for_format(format));
-        // The silkscreen is printed over everything.
-        if let Some(silk) = board.layer_named(SILK_LAYER) {
-            let color = palette::F_SILKS.for_format(format);
-            scene.add(&tessellator.graphics(board, silk), color);
-            scene.add(&tessellator.text(board, silk), color);
+        let named = |name: &str| board.layer_named(name);
+        for layer in stack.order(Side::Front) {
+            match &layer {
+                Layer::Board => scene.add(&layer, Paint::Layer, &tessellator.board_fill(board)),
+                Layer::Outline => scene.add(&layer, Paint::Layer, &tessellator.outline(board)),
+                Layer::Copper(name) => {
+                    if let Some(id) = named(name) {
+                        scene.add(&layer, Paint::Layer, &tessellator.copper(board, id));
+                        // After the copper, in the page colour: a track
+                        // ending in a via covers the hole the via's ring
+                        // left open, and the hole must win.
+                        scene.add(&layer, Paint::Page, &tessellator.holes(board, id));
+                    }
+                }
+                Layer::Mask(side) => {
+                    if let Some(id) = kicad_layer(board, *side, "Mask") {
+                        scene.add(&layer, Paint::Layer, &tessellator.mask(board, id));
+                    }
+                }
+                Layer::Paste(side) => {
+                    if let Some(id) = kicad_layer(board, *side, "Paste") {
+                        scene.add(&layer, Paint::Layer, &tessellator.paste(board, id));
+                    }
+                }
+                Layer::Silk(side) => {
+                    if let Some(id) = kicad_layer(board, *side, "SilkS") {
+                        let mut silk = tessellator.graphics(board, id);
+                        silk.append(&tessellator.text(board, id));
+                        scene.add(&layer, Paint::Layer, &silk);
+                    }
+                }
+                Layer::Courtyard(side) => {
+                    if let Some(id) = kicad_layer(board, *side, "CrtYd") {
+                        scene.add(&layer, Paint::Layer, &tessellator.graphics(board, id));
+                    }
+                }
+                Layer::Holes => {
+                    scene.add(&layer, Paint::Page, &tessellator.all_holes(board));
+                    scene.add(&layer, Paint::Layer, &tessellator.rims(board));
+                }
+            }
         }
         Some(scene)
     }
 
-    /// Append `mesh` in `color`, positions made relative to the origin.
-    fn add(&mut self, mesh: &Mesh, color: [f32; 4]) {
+    /// Append `mesh` as a slice of `layer` in `paint`, positions made
+    /// relative to the origin. An empty mesh adds no slice.
+    fn add(&mut self, layer: &Layer, paint: Paint, mesh: &Mesh) {
+        if mesh.is_empty() {
+            return;
+        }
         let base = u32::try_from(self.vertices.len()).unwrap_or(u32::MAX);
+        let start = u32::try_from(self.indices.len()).unwrap_or(u32::MAX);
         self.vertices
             .extend(mesh.positions.iter().map(|position| Vertex {
                 position: relative(*position, self.origin),
-                color,
             }));
         self.indices
             .extend(mesh.indices.iter().map(|index| index + base));
+        let end = u32::try_from(self.indices.len()).unwrap_or(u32::MAX);
+        self.slices.push(Slice {
+            layer: layer.clone(),
+            paint,
+            range: start..end,
+        });
     }
+
+    /// The draws of one frame under `state`: every slice of every shown
+    /// layer, in the view's draw order (bottom first), coloured for a
+    /// target of `format` with the layer's opacity as alpha.
+    #[must_use]
+    pub fn draw_list(&self, state: &ViewState, format: wgpu::TextureFormat) -> Vec<Draw> {
+        let views = self.stack.views();
+        let Some(view) = state.view.checked_sub(1).and_then(|index| views.get(index)) else {
+            return Vec::new();
+        };
+        let mut draws = Vec::new();
+        for layer in self.stack.order(view.top) {
+            let Some(opacity) = state.opacity(view, &layer) else {
+                continue;
+            };
+            for slice in self.slices.iter().filter(|slice| slice.layer == layer) {
+                let rgb = match slice.paint {
+                    Paint::Layer => view.color(&self.stack, &layer),
+                    Paint::Page => palette::PAGE,
+                };
+                let mut color = rgb.for_format(format);
+                color[3] = opacity;
+                draws.push(Draw {
+                    range: slice.range.clone(),
+                    color,
+                });
+            }
+        }
+        draws
+    }
+}
+
+/// The id of the KiCad layer `<side>.<kind>`, when the board has it.
+fn kicad_layer(board: &Board, side: Side, kind: &str) -> Option<LayerId> {
+    let letter = match side {
+        Side::Front => 'F',
+        Side::Back => 'B',
+    };
+    board.layer_named(&format!("{letter}.{kind}"))
 }
 
 /// `position` (millimetres, f32) relative to `origin`: the difference is
@@ -115,6 +209,12 @@ fn relative(position: [f32; 2], origin: Point) -> [f32; 2] {
     ]
 }
 
+/// The page colour as the frame is cleared to, for a target of `format`.
+#[must_use]
+pub fn clear_color(format: wgpu::TextureFormat) -> wgpu::Color {
+    Rgb::clear_for_format(palette::PAGE, format)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,23 +225,19 @@ mod tests {
         "/../viewer-drop/board/midi8knob.kicad_pcb"
     );
 
-    fn hand_off() -> &'static Board {
-        static BOARD: OnceLock<Board> = OnceLock::new();
-        BOARD.get_or_init(|| {
+    fn hand_off() -> &'static Scene {
+        static SCENE: OnceLock<Scene> = OnceLock::new();
+        SCENE.get_or_init(|| {
             let source =
                 std::fs::read_to_string(BOARD_PATH).expect("the hand-off board is in the repo");
-            kicad_core::parse_board(&source).expect("the hand-off board parses")
+            let board = kicad_core::parse_board(&source).expect("the hand-off board parses");
+            Scene::build(&board).expect("a board with an outline")
         })
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "the colours compared were produced by the same conversion of the same bytes, so they are bit-identical"
-    )]
     fn the_hand_off_board_becomes_a_scene_around_its_centre() {
-        let scene = Scene::build(hand_off(), wgpu::TextureFormat::Bgra8UnormSrgb)
-            .expect("a board with an outline");
+        let scene = hand_off();
         // The outline runs from (50, 50) to (162, 108).
         assert!((scene.origin.x - 106.0).abs() < 1e-6, "{:?}", scene.origin);
         assert!((scene.origin.y - 79.0).abs() < 1e-6, "{:?}", scene.origin);
@@ -156,14 +252,123 @@ mod tests {
         }
         let max_index = scene.indices.iter().max().copied().unwrap_or(0);
         assert!(usize::try_from(max_index).expect("fits") < scene.vertices.len());
-        // All three colours are present: the outline's, the copper's and
-        // the silkscreen's.
-        let outline = palette::OUTLINE.for_format(wgpu::TextureFormat::Bgra8UnormSrgb);
-        let copper = palette::F_CU.for_format(wgpu::TextureFormat::Bgra8UnormSrgb);
-        let silk = palette::F_SILKS.for_format(wgpu::TextureFormat::Bgra8UnormSrgb);
-        assert!(scene.vertices.iter().any(|v| v.color == outline));
-        assert!(scene.vertices.iter().any(|v| v.color == copper));
-        assert!(scene.vertices.iter().any(|v| v.color == silk));
+        assert_eq!(scene.unfilled_zones, 0);
+        assert_eq!(scene.stack.copper, ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]);
+    }
+
+    #[test]
+    fn the_slices_tile_the_index_buffer_and_name_every_layer_the_board_has() {
+        let scene = hand_off();
+        let mut next = 0;
+        for slice in &scene.slices {
+            assert_eq!(slice.range.start, next, "{slice:?}");
+            assert!(slice.range.end > slice.range.start, "{slice:?}");
+            assert_eq!((slice.range.end - slice.range.start) % 3, 0);
+            next = slice.range.end;
+        }
+        assert_eq!(usize::try_from(next).expect("fits"), scene.indices.len());
+        let has = |layer: Layer, paint: Paint| {
+            scene
+                .slices
+                .iter()
+                .any(|slice| slice.layer == layer && slice.paint == paint)
+        };
+        for name in ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"] {
+            assert!(has(Layer::Copper(name.to_owned()), Paint::Layer), "{name}");
+            assert!(
+                has(Layer::Copper(name.to_owned()), Paint::Page),
+                "{name} holes"
+            );
+        }
+        assert!(has(Layer::Board, Paint::Layer));
+        assert!(has(Layer::Outline, Paint::Layer));
+        assert!(has(Layer::Mask(Side::Front), Paint::Layer));
+        assert!(has(Layer::Mask(Side::Back), Paint::Layer));
+        assert!(has(Layer::Paste(Side::Front), Paint::Layer));
+        assert!(has(Layer::Silk(Side::Front), Paint::Layer));
+        assert!(has(Layer::Courtyard(Side::Front), Paint::Layer));
+        assert!(has(Layer::Holes, Paint::Page));
+        assert!(has(Layer::Holes, Paint::Layer));
+        // The hand-off board has nothing on the back silkscreen or the
+        // back courtyard, so neither gets a slice.
+        assert!(!has(Layer::Silk(Side::Back), Paint::Layer));
+        assert!(!has(Layer::Courtyard(Side::Back), Paint::Layer));
+    }
+
+    #[test]
+    fn the_front_as_built_draws_board_copper_mask_paste_silk_and_holes_in_that_order() {
+        let scene = hand_off();
+        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let draws = scene.draw_list(&ViewState::new(5), format);
+        let colors: Vec<[f32; 4]> = draws.iter().map(|draw| draw.color).collect();
+        let rgba = |rgb: Rgb, alpha: f32| {
+            let mut color = rgb.for_format(format);
+            color[3] = alpha;
+            color
+        };
+        assert_eq!(
+            colors,
+            [
+                rgba(palette::BOARD, 1.0),
+                rgba(palette::COPPER, 1.0),
+                rgba(palette::PAGE, 1.0),
+                rgba(palette::MASK, 0.7),
+                rgba(palette::PASTE, 1.0),
+                rgba(palette::F_SILKS, 1.0),
+                rgba(palette::PAGE, 1.0),
+                rgba(palette::COPPER, 1.0),
+            ]
+        );
+        // Each draw is a slice's own range.
+        for draw in &draws {
+            assert!(scene.slices.iter().any(|slice| slice.range == draw.range));
+        }
+    }
+
+    #[test]
+    fn a_toggle_and_an_opacity_change_the_draws_and_nothing_else() {
+        let scene = hand_off();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let views = scene.stack.views();
+        let mut state = ViewState::new(1);
+        let plain = scene.draw_list(&state, format);
+        // View 1: outline, F.Cu and its holes, F.Paste.
+        assert_eq!(plain.len(), 4);
+        state.set(&views[0], Layer::Paste(Side::Front), None);
+        state.set(&views[0], Layer::Copper("F.Cu".to_owned()), Some(0.5));
+        let changed = scene.draw_list(&state, format);
+        assert_eq!(changed.len(), 3);
+        assert!((changed[1].color[3] - 0.5).abs() < 1e-6, "{:?}", changed[1]);
+        assert_eq!(changed[0], plain[0]);
+    }
+
+    #[test]
+    fn the_back_as_built_draws_the_back_copper_over_the_front() {
+        let scene = hand_off();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let views = scene.stack.views();
+        let mut state = ViewState::new(6);
+        state.set(&views[5], Layer::Copper("F.Cu".to_owned()), Some(1.0));
+        let draws = scene.draw_list(&state, format);
+        let range_of = |layer: Layer| {
+            scene
+                .slices
+                .iter()
+                .find(|slice| slice.layer == layer && slice.paint == Paint::Layer)
+                .map(|slice| slice.range.clone())
+                .expect("the layer is in the scene")
+        };
+        let position = |layer: Layer| {
+            let range = range_of(layer);
+            draws
+                .iter()
+                .position(|draw| draw.range == range)
+                .expect("drawn")
+        };
+        assert!(
+            position(Layer::Copper("F.Cu".to_owned())) < position(Layer::Copper("B.Cu".to_owned()))
+        );
+        assert!(position(Layer::Copper("B.Cu".to_owned())) < position(Layer::Mask(Side::Back)));
     }
 
     #[test]
@@ -172,6 +377,6 @@ mod tests {
             r#"(kicad_pcb (version 20241229) (generator "pcbnew") (layers (0 "F.Cu" signal)))"#,
         )
         .expect("parses");
-        assert_eq!(Scene::build(&board, wgpu::TextureFormat::Rgba8Unorm), None);
+        assert_eq!(Scene::build(&board), None);
     }
 }

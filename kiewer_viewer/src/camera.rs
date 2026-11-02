@@ -31,12 +31,14 @@ const MAX_SCALE: f64 = 1e7;
 
 /// A view of the board: the world point at the viewport's centre, the
 /// scale in device pixels per millimetre, the viewport's size in device
-/// pixels.
+/// pixels, and whether the view is mirrored: seen from the back, with
+/// screen x running against world x about the viewport's centre.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Camera {
     center: Point,
     scale: f64,
     viewport: Size,
+    mirrored: bool,
 }
 
 /// A size in device pixels.
@@ -65,6 +67,7 @@ impl Camera {
             center: Point::default(),
             scale: 1.0,
             viewport,
+            mirrored: false,
         }
     }
 
@@ -80,17 +83,35 @@ impl Camera {
         self.scale
     }
 
+    /// Whether the view is mirrored left to right.
+    #[must_use]
+    pub fn mirrored(&self) -> bool {
+        self.mirrored
+    }
+
+    /// Mirror the view left to right, or stop: the back of the board is
+    /// seen as if turned over. The centre and the scale stay, so the
+    /// board flips about the viewport's middle.
+    pub fn set_mirrored(&mut self, mirrored: bool) {
+        self.mirrored = mirrored;
+    }
+
     /// The viewport changed size: the centre and the scale stay, so the
     /// view grows or shrinks around its middle.
     pub fn set_viewport(&mut self, viewport: Size) {
         self.viewport = viewport;
     }
 
+    /// Which way screen x runs along world x: against it when mirrored.
+    fn x_sign(&self) -> f64 {
+        if self.mirrored { -1.0 } else { 1.0 }
+    }
+
     /// The world point under a screen point.
     #[must_use]
     pub fn screen_to_world(&self, screen: Point) -> Point {
         Point {
-            x: self.center.x + (screen.x - self.viewport.width / 2.0) / self.scale,
+            x: self.center.x + self.x_sign() * (screen.x - self.viewport.width / 2.0) / self.scale,
             y: self.center.y + (screen.y - self.viewport.height / 2.0) / self.scale,
         }
     }
@@ -99,7 +120,7 @@ impl Camera {
     #[must_use]
     pub fn world_to_screen(&self, world: Point) -> Point {
         Point {
-            x: self.viewport.width / 2.0 + (world.x - self.center.x) * self.scale,
+            x: self.viewport.width / 2.0 + self.x_sign() * (world.x - self.center.x) * self.scale,
             y: self.viewport.height / 2.0 + (world.y - self.center.y) * self.scale,
         }
     }
@@ -142,7 +163,7 @@ impl Camera {
     /// a wheel with ctrl (horizontal) or shift (vertical) held.
     pub fn pan(&mut self, from: Point, to: Point) {
         self.center = Point {
-            x: self.center.x - (to.x - from.x) / self.scale,
+            x: self.center.x - self.x_sign() * (to.x - from.x) / self.scale,
             y: self.center.y - (to.y - from.y) / self.scale,
         };
     }
@@ -195,7 +216,7 @@ impl Camera {
                 (self.center.y - origin.y) as f32,
             ],
             scale: [
-                (2.0 * self.scale / self.viewport.width) as f32,
+                (self.x_sign() * 2.0 * self.scale / self.viewport.width) as f32,
                 (-2.0 * self.scale / self.viewport.height) as f32,
             ],
         }
@@ -254,6 +275,33 @@ mod tests {
         assert!(pixels_apart(&camera, before, cursor) < 1e-9);
         camera.wheel(cursor, 250.0);
         assert!(pixels_apart(&camera, before, cursor) < 1e-9);
+    }
+
+    #[test]
+    fn a_mirrored_camera_flips_x_about_the_middle_and_keeps_every_gesture_true() {
+        let mut camera = fitted();
+        let left_edge = at(50.0, 79.0);
+        let before = camera.world_to_screen(left_edge);
+        camera.set_mirrored(true);
+        let after = camera.world_to_screen(left_edge);
+        // The board's left edge lands where its right edge did: at 1520.
+        assert!((before.x - 80.0).abs() < 1e-9 && (after.x - 1520.0).abs() < 1e-9);
+        assert!((after.y - before.y).abs() < 1e-9, "y is not mirrored");
+        let scale_x = f64::from(camera.view(at(0.0, 0.0)).scale[0]);
+        assert!((scale_x + 2.0 * camera.scale() / 1600.0).abs() < 1e-6);
+        // A zoom keeps the world point under the cursor where it is.
+        let cursor = at(300.0, 200.0);
+        let under = camera.screen_to_world(cursor);
+        camera.wheel(cursor, -150.0);
+        assert!(pixels_apart(&camera, under, cursor) < 1e-9);
+        // A drag brings what was under `from` under `to`.
+        let (from, to) = (at(400.0, 400.0), at(700.0, 450.0));
+        let dragged = camera.screen_to_world(from);
+        camera.pan(from, to);
+        assert!(pixels_apart(&camera, dragged, to) < 1e-9);
+        // Back to normal puts the edge back.
+        camera.set_mirrored(false);
+        assert!(!camera.mirrored());
     }
 
     #[test]

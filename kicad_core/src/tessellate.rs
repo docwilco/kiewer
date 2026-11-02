@@ -1,11 +1,16 @@
 //! Triangles from a board: what the viewer uploads to the GPU and the
 //! thumbnail renderer will draw. One copper layer at a time (tracks, track
-//! arcs, vias, pads and stored zone fills, holes left open), the holes
-//! drilled through that layer (drawn last, in the page colour, so a track
-//! ending in a via does not fill the hole back in), the outline as the
-//! strokes of `Edge.Cuts`, the graphics of any other layer (a silkscreen's
-//! lines and filled shapes), and the text of a layer in Newstroke
-//! ([`crate::font`]), a knockout as its box with the glyphs cut out.
+//! arcs, vias, pads and stored zone fills, holes left open; a zone without
+//! a stored fill as its outline hatched), the holes drilled through that
+//! layer (drawn last, in the page colour, so a track ending in a via does
+//! not fill the hole back in), the outline as the strokes of `Edge.Cuts`
+//! and the board as the fill of the loops they chain into, a mask layer as
+//! the board less its openings (a polygon boolean, so the overlay is one
+//! mesh like any other layer), a paste layer as the pads shrunk by the
+//! paste clearance, every hole with a copper rim around the plated ones,
+//! the graphics of any other layer (a silkscreen's lines and filled
+//! shapes), and the text of a layer in Newstroke ([`crate::font`]), a
+//! knockout as its box with the glyphs cut out.
 //!
 //! Everything is computed in f64 and handed to lyon in f32 at the last
 //! step; positions in the [`Mesh`] are millimetres in the file's frame,
@@ -25,9 +30,13 @@ use lyon_tessellation::{
 use crate::font::{self, Placement, TextShape};
 use crate::geometry::{Arc, Bounds, Transform, segments_for};
 use crate::model::{
-    Board, Drawing, Drill, EDGE_CUTS, LayerId, Pad, PadKind, PadShape, Point, Shape, Size, Text,
-    Via, Zone,
+    Board, Drawing, Drill, EDGE_CUTS, Footprint, LayerId, Pad, PadKind, PadShape, Point, Shape,
+    Size, Text, Via, Zone,
 };
+
+/// A polygon as `i_overlay` takes it: contours of `[x, y]` pairs, the first
+/// the outer boundary and the rest holes.
+type OverlayShape = Vec<Vec<[f64; 2]>>;
 
 /// Triangles: positions in millimetres, indices in threes.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -61,6 +70,15 @@ impl Mesh {
                 };
                 Some([corner(a)?, corner(b)?, corner(c)?])
             })
+    }
+
+    /// Add `other`'s triangles after this mesh's own: one mesh for a
+    /// layer built in two parts (a silkscreen's graphics and its text).
+    pub fn append(&mut self, other: &Mesh) {
+        let base = u32::try_from(self.positions.len()).unwrap_or(u32::MAX);
+        self.positions.extend_from_slice(&other.positions);
+        self.indices
+            .extend(other.indices.iter().map(|index| index + base));
     }
 
     /// The box around every vertex, or `None` for an empty mesh.
@@ -106,6 +124,22 @@ fn cross(a: Point, b: Point, c: Point) -> f64 {
 /// default for a new edge.
 const MIN_OUTLINE_WIDTH: f64 = 0.05;
 
+/// How far apart two outline strokes' ends may sit and still join into
+/// one loop: KiCad snaps edges to its grid, and an edge drawn by hand can
+/// miss by a hundredth of a millimetre.
+pub const JOIN_TOLERANCE: f64 = 0.01;
+
+/// The copper a plated hole shows around its drill, in millimetres: the
+/// hand-off's `holes.py` draws the same rim, so barrels show on layers
+/// where no pad is drawn.
+pub const HOLE_RIM: f64 = 0.1;
+
+/// The hatch an unfilled zone draws across its outline: lines this far
+/// apart (measured across them), at 45 degrees, this wide; the outline
+/// itself is stroked at the same width.
+pub const HATCH_PITCH: f64 = 1.0;
+pub const HATCH_WIDTH: f64 = 0.1;
+
 /// Turns board items into a [`Mesh`] at one tolerance: how far a chord
 /// may sit from the curve it flattens, in millimetres.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,9 +155,10 @@ impl Tessellator {
     }
 
     /// The copper on `layer`: tracks and track arcs with round ends, vias
-    /// and pads that reach the layer as rings around their holes, and the
-    /// zone fills KiCad stored. An unplated hole whose pad is no bigger
-    /// than the hole is no copper.
+    /// and pads that reach the layer as rings around their holes, the
+    /// zone fills KiCad stored, and the outline of a zone without a
+    /// stored fill on the layer, hatched ([`HATCH_PITCH`]). An unplated
+    /// hole whose pad is no bigger than the hole is no copper.
     #[must_use]
     pub fn copper(&self, board: &Board, layer: LayerId) -> Mesh {
         let mut builder = MeshBuilder::new(self.tolerance);
@@ -151,11 +186,134 @@ impl Tessellator {
                 builder.pad(pad, &frame);
             }
             for zone in &footprint.zones {
-                builder.zone_fills(zone, &frame, layer);
+                builder.zone(zone, &frame, layer);
             }
         }
         for zone in &board.zones {
-            builder.zone_fills(zone, &Transform::identity(), layer);
+            builder.zone(zone, &Transform::identity(), layer);
+        }
+        builder.finish()
+    }
+
+    /// The board itself: the `Edge.Cuts` strokes chained into loops
+    /// ([`JOIN_TOLERANCE`]), the largest filled and the others cut out of
+    /// it. Empty for a board whose outline does not close.
+    #[must_use]
+    pub fn board_fill(&self, board: &Board) -> Mesh {
+        let mut builder = MeshBuilder::new(self.tolerance);
+        if let Some((outer, cutouts)) = outline_loops(board, self.tolerance) {
+            builder.fill(&[outer], &cutouts);
+        }
+        builder.finish()
+    }
+
+    /// The solder mask overlay of a mask `layer`: the board
+    /// ([`Tessellator::board_fill`]) less every opening on the layer, as
+    /// one polygon difference. An opening is a pad that reaches the layer,
+    /// grown by its mask clearance ([`Board::pad_clearances`]; its hole
+    /// grown the same, so an unplated hole opens the mask), and any
+    /// graphic drawn on the layer. Empty for a board without a closed
+    /// outline.
+    #[must_use]
+    pub fn mask(&self, board: &Board, layer: LayerId) -> Mesh {
+        let mut builder = MeshBuilder::new(self.tolerance);
+        let Some((outer, cutouts)) = outline_loops(board, self.tolerance) else {
+            return builder.finish();
+        };
+        let mut openings: Vec<Vec<Point>> = Vec::new();
+        for (footprint, pad) in pads_on(board, layer) {
+            let shape = pad_frame(pad, &Transform::new(footprint.at, footprint.rotation));
+            let grow = board.pad_clearances(footprint, pad).mask_expansion();
+            openings.push(builder.pad_outline(pad, &shape, grow));
+            if let Some(drill) = pad.drill {
+                openings.push(builder.hole(drill, &shape, grow));
+            }
+            openings.extend(builder.primitive_polygons(pad, &shape));
+        }
+        for drawing in layer_drawings(board, layer) {
+            openings.extend(drawing_polygons(&drawing, self.tolerance));
+        }
+        let mut subject: OverlayShape = vec![wound(&outer, true)];
+        subject.extend(cutouts.iter().map(|cutout| wound(cutout, false)));
+        let clip: OverlayShape = openings
+            .iter()
+            .map(|polygon| wound(polygon, true))
+            .collect();
+        let shapes = subject.overlay(&clip, OverlayRule::Difference, OverlayFill::NonZero);
+        builder.fill_shapes(shapes);
+        builder.finish()
+    }
+
+    /// The solder paste on a paste `layer`: every pad that reaches it,
+    /// grown (shrunk, as the clearance is normally negative) by its paste
+    /// clearance, the hole of a through-hole pad left open.
+    #[must_use]
+    pub fn paste(&self, board: &Board, layer: LayerId) -> Mesh {
+        let mut builder = MeshBuilder::new(self.tolerance);
+        for (footprint, pad) in pads_on(board, layer) {
+            let shape = pad_frame(pad, &Transform::new(footprint.at, footprint.rotation));
+            let grow = board
+                .pad_clearances(footprint, pad)
+                .paste_expansion(pad.size);
+            let mut positives = vec![builder.pad_outline(pad, &shape, grow)];
+            positives.extend(builder.primitive_polygons(pad, &shape));
+            let holes = match pad.drill {
+                Some(drill) => vec![builder.hole(drill, &shape, 0.0)],
+                None => Vec::new(),
+            };
+            builder.fill(&positives, &holes);
+        }
+        builder.finish()
+    }
+
+    /// Every hole drilled through the board, whatever layers it reaches:
+    /// vias of every kind and every drilled pad, plated or not, as filled
+    /// discs and slots. Drawn in the page colour over the whole stack,
+    /// under the rims.
+    #[must_use]
+    pub fn all_holes(&self, board: &Board) -> Mesh {
+        let mut builder = MeshBuilder::new(self.tolerance);
+        for via in &board.vias {
+            let hole = circle(via.at, via.drill / 2.0, self.tolerance);
+            builder.fill(&[hole], &[]);
+        }
+        for footprint in &board.footprints {
+            let frame = Transform::new(footprint.at, footprint.rotation);
+            for pad in &footprint.pads {
+                if let Some(drill) = pad.drill {
+                    let hole = builder.hole(drill, &pad_frame(pad, &frame), 0.0);
+                    builder.fill(&[hole], &[]);
+                }
+            }
+        }
+        builder.finish()
+    }
+
+    /// The copper rim of every plated hole: a band [`HOLE_RIM`] wide
+    /// around the drill of every via and every through-hole pad. An
+    /// unplated hole has none.
+    #[must_use]
+    pub fn rims(&self, board: &Board) -> Mesh {
+        let mut builder = MeshBuilder::new(self.tolerance);
+        for via in &board.vias {
+            let ring = circle(via.at, via.drill / 2.0 + HOLE_RIM, self.tolerance);
+            let hole = circle(via.at, via.drill / 2.0, self.tolerance);
+            builder.fill(&[ring], &[hole]);
+        }
+        for footprint in &board.footprints {
+            let frame = Transform::new(footprint.at, footprint.rotation);
+            for pad in footprint
+                .pads
+                .iter()
+                .filter(|pad| pad.kind == PadKind::ThroughHole)
+            {
+                if let Some(drill) = pad.drill {
+                    let shape = pad_frame(pad, &frame);
+                    let ring = builder.hole(drill, &shape, HOLE_RIM);
+                    let hole = builder.hole(drill, &shape, 0.0);
+                    builder.fill(&[ring], &[hole]);
+                }
+            }
         }
         builder.finish()
     }
@@ -181,7 +339,7 @@ impl Tessellator {
                 .filter(|pad| pad.layers.contains(&layer))
             {
                 if let Some(drill) = pad.drill {
-                    let hole = builder.hole(drill, &pad_frame(pad, &frame));
+                    let hole = builder.hole(drill, &pad_frame(pad, &frame), 0.0);
                     builder.fill(&[hole], &[]);
                 }
             }
@@ -254,6 +412,105 @@ impl Tessellator {
         }
         builder.finish()
     }
+}
+
+/// Every pad that reaches `layer`, with its footprint.
+fn pads_on(board: &Board, layer: LayerId) -> impl Iterator<Item = (&Footprint, &Pad)> {
+    board.footprints.iter().flat_map(move |footprint| {
+        footprint
+            .pads
+            .iter()
+            .filter(move |pad| pad.layers.contains(&layer))
+            .map(move |pad| (footprint, pad))
+    })
+}
+
+/// The `Edge.Cuts` strokes chained into closed loops: the outer one (the
+/// largest by area) and the cutouts inside it, or `None` when no loop
+/// closes. A closed shape (a circle, a rectangle, a polygon) is a loop on
+/// its own; open strokes join end to end within [`JOIN_TOLERANCE`], and a
+/// chain that never meets its start is dropped.
+fn outline_loops(board: &Board, tolerance: f64) -> Option<(Vec<Point>, Vec<Vec<Point>>)> {
+    let edge = board.layer_named(EDGE_CUTS)?;
+    let mut loops: Vec<Vec<Point>> = Vec::new();
+    let mut open: Vec<Vec<Point>> = Vec::new();
+    for drawing in layer_drawings(board, edge) {
+        let (points, closed) = outline_points(&drawing, tolerance);
+        if points.len() < 2 {
+            continue;
+        }
+        if closed {
+            loops.push(points);
+        } else {
+            open.push(points);
+        }
+    }
+    let near = |a: Option<&Point>, b: Point| {
+        a.is_some_and(|a| {
+            (a.x - b.x).abs() <= JOIN_TOLERANCE && (a.y - b.y).abs() <= JOIN_TOLERANCE
+        })
+    };
+    while let Some(mut chain) = open.pop() {
+        while let Some(&end) = chain.last() {
+            if chain.len() > 2 && near(chain.first(), end) {
+                chain.pop();
+                loops.push(chain);
+                break;
+            }
+            let Some(index) = open
+                .iter()
+                .position(|next| near(next.first(), end) || near(next.last(), end))
+            else {
+                // A chain that closes on nothing: not an outline.
+                break;
+            };
+            let mut next = open.swap_remove(index);
+            if !near(next.first(), end) {
+                next.reverse();
+            }
+            chain.extend(next.into_iter().skip(1));
+        }
+    }
+    let outer = loops
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| signed_area(a).abs().total_cmp(&signed_area(b).abs()))
+        .map(|(index, _)| index)?;
+    let outer = loops.swap_remove(outer);
+    Some((outer, loops))
+}
+
+/// `polygon` as `i_overlay` takes it, wound counter-clockwise in the file's
+/// frame when `positive` and clockwise otherwise, so a positive and a
+/// hole cancel under the non-zero rule.
+fn wound(polygon: &[Point], positive: bool) -> Vec<[f64; 2]> {
+    let mut points: Vec<[f64; 2]> = polygon.iter().map(|p| [p.x, p.y]).collect();
+    if (signed_area(polygon) > 0.0) != positive {
+        points.reverse();
+    }
+    points
+}
+
+/// The polygons a drawing covers, for a boolean: a filled closed shape is
+/// its outline, anything else the stadium of each stroked segment at the
+/// drawing's width (at least [`MIN_OUTLINE_WIDTH`]).
+fn drawing_polygons(drawing: &Drawing, tolerance: f64) -> Vec<Vec<Point>> {
+    let (points, closed) = outline_points(drawing, tolerance);
+    if drawing.filled && closed {
+        return vec![points];
+    }
+    let width = drawing.width.max(MIN_OUTLINE_WIDTH);
+    let mut polygons: Vec<Vec<Point>> = points
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [a, b] => Some(stadium(*a, *b, width, tolerance)),
+            _ => None,
+        })
+        .collect();
+    if closed && let (Some(&last), Some(&first)) = (points.last(), points.first()) {
+        polygons.push(stadium(last, first, width, tolerance));
+    }
+    polygons
 }
 
 /// Every drawing on `layer`: the board's own as written, a footprint's
@@ -458,6 +715,11 @@ fn circle(center: Point, radius: f64, tolerance: f64) -> Vec<Point> {
 fn rounded_rect(size: Size, radius: f64, tolerance: f64) -> Vec<Point> {
     let half_w = size.width / 2.0;
     let half_h = size.height / 2.0;
+    if half_w <= 0.0 || half_h <= 0.0 {
+        // A pad shrunk past nothing (a paste clearance larger than the
+        // pad) is no shape.
+        return Vec::new();
+    }
     let radius = radius.clamp(0.0, half_w.min(half_h));
     let inner_w = half_w - radius;
     let inner_h = half_h - radius;
@@ -651,39 +913,58 @@ impl MeshBuilder {
         {
             return;
         }
-        let min_side = pad.size.width.min(pad.size.height);
-        let local = match pad.shape {
-            PadShape::Circle => rounded_rect(pad.size, pad.size.width / 2.0, self.tolerance),
-            // A custom pad's anchor as well: KiCad's default anchor is a
-            // circle and the model does not carry the choice, so the
-            // stadium of the (usually square) anchor size stands for it.
-            PadShape::Oval | PadShape::Custom => {
-                rounded_rect(pad.size, min_side / 2.0, self.tolerance)
-            }
-            // The chamfer sizes and the trapezoid's delta are not in the
-            // model; the plain rectangle is the nearest drawing.
-            PadShape::Rect | PadShape::Trapezoid | PadShape::ChamferedRect => {
-                rounded_rect(pad.size, 0.0, self.tolerance)
-            }
-            PadShape::RoundRect => rounded_rect(
-                pad.size,
-                pad.round_radius_ratio.unwrap_or(0.25) * min_side,
-                self.tolerance,
-            ),
-        };
-        let mut positives = vec![local.into_iter().map(|p| shape.apply(p)).collect()];
+        let mut positives = vec![self.pad_outline(pad, &shape, 0.0)];
         let mut strokes = Vec::new();
         for primitive in &pad.primitives {
             self.primitive(primitive, &shape, &mut positives, &mut strokes);
         }
         let holes = match pad.drill {
-            Some(drill) => vec![self.hole(drill, &shape)],
+            Some(drill) => vec![self.hole(drill, &shape, 0.0)],
             None => Vec::new(),
         };
         self.fill(&positives, &holes);
         for (points, width) in strokes {
             self.stroke(&points, width, false);
         }
+    }
+
+    /// The outline of `pad`'s shape on the board (in its `shape` frame),
+    /// grown by `grow` on every side: a mask opening's margin, a paste
+    /// clearance (negative), or 0 for the copper. Growing rounds the
+    /// corners by the same amount, as KiCad's own expansion does; a shape
+    /// shrunk to nothing is empty.
+    fn pad_outline(&self, pad: &Pad, shape: &Transform, grow: f64) -> Vec<Point> {
+        let min_side = pad.size.width.min(pad.size.height);
+        let radius = match pad.shape {
+            PadShape::Circle => pad.size.width / 2.0,
+            // A custom pad's anchor as well: KiCad's default anchor is a
+            // circle and the model does not carry the choice, so the
+            // stadium of the (usually square) anchor size stands for it.
+            PadShape::Oval | PadShape::Custom => min_side / 2.0,
+            // The chamfer sizes and the trapezoid's delta are not in the
+            // model; the plain rectangle is the nearest drawing.
+            PadShape::Rect | PadShape::Trapezoid | PadShape::ChamferedRect => 0.0,
+            PadShape::RoundRect => pad.round_radius_ratio.unwrap_or(0.25) * min_side,
+        };
+        let grown = Size {
+            width: pad.size.width + 2.0 * grow,
+            height: pad.size.height + 2.0 * grow,
+        };
+        rounded_rect(grown, radius + grow, self.tolerance)
+            .into_iter()
+            .map(|p| shape.apply(p))
+            .collect()
+    }
+
+    /// The polygons a custom pad's primitives cover on the board, for a
+    /// mask opening or a paste shape: filled closed shapes as they are,
+    /// strokes as stadiums. Empty for any other pad.
+    fn primitive_polygons(&self, pad: &Pad, shape: &Transform) -> Vec<Vec<Point>> {
+        pad.primitives
+            .iter()
+            .flat_map(|primitive| drawing_polygons(primitive, self.tolerance))
+            .map(|polygon| polygon.into_iter().map(|p| shape.apply(p)).collect())
+            .collect()
     }
 
     /// A custom pad's primitive, in the pad's `shape` frame: a filled
@@ -712,22 +993,102 @@ impl MeshBuilder {
         }
     }
 
-    /// A pad's hole on the board: a circle, or a stadium for a slot,
-    /// offset from the pad's centre in the pad's frame.
-    fn hole(&self, drill: Drill, shape: &Transform) -> Vec<Point> {
+    /// A pad's hole on the board, grown by `grow` on every side (0 for the
+    /// hole itself, [`HOLE_RIM`] for the outside of its rim): a circle, or
+    /// a stadium for a slot, offset from the pad's centre in the pad's
+    /// frame.
+    fn hole(&self, drill: Drill, shape: &Transform, grow: f64) -> Vec<Point> {
         let min_side = drill.size.width.min(drill.size.height);
         let turned = shape.then(Transform::new(drill.offset, 0.0));
-        rounded_rect(drill.size, min_side / 2.0, self.tolerance)
+        let grown = Size {
+            width: drill.size.width + 2.0 * grow,
+            height: drill.size.height + 2.0 * grow,
+        };
+        rounded_rect(grown, min_side / 2.0 + grow, self.tolerance)
             .into_iter()
             .map(|p| turned.apply(p))
             .collect()
     }
 
-    /// The stored fills of `zone` on `layer`, in `frame`.
-    fn zone_fills(&mut self, zone: &Zone, frame: &Transform, layer: LayerId) {
+    /// `zone` on `layer`, in `frame`: its stored fills, or its outline
+    /// hatched when it has none there.
+    fn zone(&mut self, zone: &Zone, frame: &Transform, layer: LayerId) {
+        if zone.is_unfilled_on(layer) {
+            self.zone_hatch(zone, frame);
+            return;
+        }
         for fill in zone.fills.iter().filter(|fill| fill.layer == layer) {
             let polygon: Vec<Point> = fill.points.iter().map(|&p| frame.apply(p)).collect();
             self.fill(&[polygon], &[]);
+        }
+    }
+
+    /// An unfilled zone's outline, stroked at [`HATCH_WIDTH`], with lines
+    /// at 45 degrees every [`HATCH_PITCH`] across it, clipped to the
+    /// outline. The lines are `x - y = k * pitch * sqrt(2)` for integer
+    /// `k`, so one passes through the origin and the pattern of two zones
+    /// lines up.
+    fn zone_hatch(&mut self, zone: &Zone, frame: &Transform) {
+        let outline: Vec<Point> = zone.outline.iter().map(|&p| frame.apply(p)).collect();
+        let Some(bounds) = Bounds::around(outline.iter().copied()) else {
+            return;
+        };
+        self.stroke(&outline, HATCH_WIDTH, true);
+        // Along the lines the spacing is the pitch times the square root
+        // of two; across them, the pitch.
+        let step = HATCH_PITCH * std::f64::consts::SQRT_2;
+        let first = ((bounds.min.x - bounds.max.y) / step).ceil();
+        let last = ((bounds.max.x - bounds.min.y) / step).floor();
+        // Half the line width, along the normal (1, -1) / sqrt(2).
+        let normal = HATCH_WIDTH / 2.0 / std::f64::consts::SQRT_2;
+        let mut stripes: OverlayShape = Vec::new();
+        let mut k = first;
+        while k <= last {
+            let c = k * step;
+            // The line from left of the box to right of it.
+            let (x0, x1) = (bounds.min.x - 1.0, bounds.max.x + 1.0);
+            let (a, b) = (Point { x: x0, y: x0 - c }, Point { x: x1, y: x1 - c });
+            let stripe = vec![
+                Point {
+                    x: a.x + normal,
+                    y: a.y - normal,
+                },
+                Point {
+                    x: b.x + normal,
+                    y: b.y - normal,
+                },
+                Point {
+                    x: b.x - normal,
+                    y: b.y + normal,
+                },
+                Point {
+                    x: a.x - normal,
+                    y: a.y + normal,
+                },
+            ];
+            stripes.push(wound(&stripe, true));
+            k += 1.0;
+        }
+        let subject: OverlayShape = vec![wound(&outline, true)];
+        let shapes = subject.overlay(&stripes, OverlayRule::Intersect, OverlayFill::NonZero);
+        self.fill_shapes(shapes);
+    }
+
+    /// Fill the shapes a boolean produced: each one its outer contour with
+    /// the rest as holes.
+    fn fill_shapes(&mut self, shapes: Vec<OverlayShape>) {
+        for polygons in shapes {
+            let mut contours = polygons.into_iter().map(|contour| {
+                contour
+                    .into_iter()
+                    .map(|[x, y]| Point { x, y })
+                    .collect::<Vec<Point>>()
+            });
+            let Some(outer) = contours.next() else {
+                continue;
+            };
+            let holes: Vec<Vec<Point>> = contours.collect();
+            self.fill(&[outer], &holes);
         }
     }
 
@@ -772,8 +1133,8 @@ impl MeshBuilder {
             return;
         };
         let to_pair = |p: Point| [p.x, p.y];
-        let subject: Vec<Vec<[f64; 2]>> = vec![corners.iter().copied().map(to_pair).collect()];
-        let mut clip: Vec<Vec<[f64; 2]>> = Vec::new();
+        let subject: OverlayShape = vec![corners.iter().copied().map(to_pair).collect()];
+        let mut clip: OverlayShape = Vec::new();
         for stroke in &shape.strokes {
             match stroke.as_slice() {
                 [] => {}
@@ -799,19 +1160,7 @@ impl MeshBuilder {
             }
         }
         let shapes = subject.overlay(&clip, OverlayRule::Difference, OverlayFill::NonZero);
-        for polygons in shapes {
-            let mut contours = polygons.into_iter().map(|contour| {
-                contour
-                    .into_iter()
-                    .map(|[x, y]| Point { x, y })
-                    .collect::<Vec<Point>>()
-            });
-            let Some(outer) = contours.next() else {
-                continue;
-            };
-            let holes: Vec<Vec<Point>> = contours.collect();
-            self.fill(&[outer], &holes);
-        }
+        self.fill_shapes(shapes);
     }
 
     fn finish(self) -> Mesh {

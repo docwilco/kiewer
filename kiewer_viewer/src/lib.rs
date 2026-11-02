@@ -14,6 +14,7 @@ pub mod camera;
 pub mod error;
 pub mod render;
 pub mod scene;
+pub mod view;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 

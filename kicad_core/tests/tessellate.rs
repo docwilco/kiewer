@@ -30,16 +30,27 @@ fn hand_off_board() -> &'static Board {
     })
 }
 
-/// A board with four copper layers, an outline layer and a front
-/// silkscreen, holding `items`.
+/// A board with four copper layers, an outline layer, both mask and
+/// paste layers and a front silkscreen, holding `items`.
 fn board(items: &str) -> Board {
     let source = format!(
         r#"(kicad_pcb (version 20241229) (generator "pcbnew")
-  (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user) (37 "F.SilkS" user "F.Silkscreen"))
+  (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) (2 "B.Cu" signal)
+    (25 "Edge.Cuts" user) (37 "F.SilkS" user "F.Silkscreen")
+    (39 "F.Mask" user) (38 "B.Mask" user) (35 "F.Paste" user) (34 "B.Paste" user))
   {items}
 )"#
     );
     parse_board(&source).expect("the test board parses")
+}
+
+/// A 20 by 10 millimetre board outline from the origin.
+const RECT_OUTLINE: &str = r#"(gr_rect (start 0 0) (end 20 10) (stroke (width 0.1) (type default)) (fill no) (layer "Edge.Cuts"))"#;
+
+fn on_layer(board: &Board, name: &str) -> kicad_core::model::LayerId {
+    board
+        .layer_named(name)
+        .expect("the test board has the layer")
 }
 
 fn silk_text(board: &Board) -> Mesh {
@@ -692,5 +703,228 @@ fn the_hand_off_board_tessellates_within_its_outline() {
         mesh.area() > 0.5 * bounds.width() * bounds.height(),
         "area {}",
         mesh.area()
+    );
+}
+
+#[test]
+fn the_board_fill_is_the_outline_with_its_cutouts_open() {
+    // The 20 by 10 board with one rounded corner of radius 2, and a round
+    // cutout of radius 1 at (5, 5).
+    let board = board(
+        r#"(gr_line (start 0 0) (end 20 0) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+           (gr_line (start 20 0) (end 20 8) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+           (gr_arc (start 20 8) (mid 19.414214 9.414214) (end 18 10) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+           (gr_line (start 18 10) (end 0 10) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+           (gr_line (start 0 10) (end 0 0) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+           (gr_circle (center 5 5) (end 6 5) (stroke (width 0.1) (type default)) (fill no) (layer "Edge.Cuts"))"#,
+    );
+    let mesh = Tessellator::new(TOLERANCE).board_fill(&board);
+    // The corner loses a square less a quarter disc; the cutout a disc.
+    assert_close(
+        mesh.area(),
+        200.0 - (4.0 - PI) - PI,
+        0.01,
+        "board fill area",
+    );
+    assert!(mesh.covers(Point { x: 10.0, y: 2.0 }), "the board");
+    assert!(!mesh.covers(Point { x: 5.0, y: 5.0 }), "the cutout");
+    assert!(
+        !mesh.covers(Point { x: 19.9, y: 9.9 }),
+        "the rounded corner"
+    );
+    assert!(mesh.covers(Point { x: 0.1, y: 9.9 }), "a square corner");
+}
+
+#[test]
+fn a_board_without_a_closed_outline_has_no_fill() {
+    let board = board(
+        r#"(gr_line (start 0 0) (end 20 0) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))"#,
+    );
+    assert!(Tessellator::new(TOLERANCE).board_fill(&board).is_empty());
+}
+
+#[test]
+fn the_mask_overlay_is_the_board_minus_the_openings_grown_by_the_margin() {
+    // Two 2 by 1 pads on the front: the footprint's margin of 0.1 grows
+    // the first pad's opening, the second pad sets its own margin of 0.
+    // Neither is on the back, whose mask stays whole.
+    let board = board(&format!(
+        r#"{RECT_OUTLINE}
+           (footprint "R" (layer "F.Cu") (at 0 0) (solder_mask_margin 0.1)
+             (pad "1" smd rect (at 5 5) (size 2 1) (layers "F.Cu" "F.Mask" "F.Paste"))
+             (pad "2" smd rect (at 15 5) (size 2 1) (layers "F.Cu" "F.Mask") (solder_mask_margin 0)))"#
+    ));
+    let tessellator = Tessellator::new(TOLERANCE);
+    let front = tessellator.mask(&board, on_layer(&board, "F.Mask"));
+    // A margin rounds the opening's corners to its radius.
+    let grown = 2.2 * 1.2 - (4.0 - PI) * 0.1 * 0.1;
+    assert_close(front.area(), 200.0 - grown - 2.0, 1e-3, "front mask area");
+    assert!(
+        front.covers(Point { x: 1.0, y: 1.0 }),
+        "mask between the pads"
+    );
+    assert!(!front.covers(Point { x: 5.0, y: 5.0 }), "the first opening");
+    assert!(
+        !front.covers(Point { x: 5.0, y: 5.55 }),
+        "the margin around the first pad"
+    );
+    assert!(
+        front.covers(Point { x: 5.0, y: 5.7 }),
+        "mask past the margin"
+    );
+    assert!(
+        !front.covers(Point { x: 15.0, y: 5.0 }),
+        "the second opening"
+    );
+    assert!(
+        front.covers(Point { x: 15.0, y: 5.55 }),
+        "no margin around the second pad"
+    );
+    let back = tessellator.mask(&board, on_layer(&board, "B.Mask"));
+    assert_close(back.area(), 200.0, 1e-6, "back mask area");
+}
+
+#[test]
+fn a_mask_graphic_and_a_through_hole_pad_open_the_mask_as_well() {
+    // A filled rectangle drawn on F.Mask is an opening; a through-hole pad
+    // on every mask layer opens both sides, with the board's own clearance
+    // from the setup.
+    let board = board(&format!(
+        r#"{RECT_OUTLINE}
+           (setup (pad_to_mask_clearance 0.05))
+           (gr_rect (start 1 1) (end 3 3) (stroke (width 0) (type default)) (fill yes) (layer "F.Mask"))
+           (footprint "J" (layer "F.Cu") (at 10 5)
+             (pad "1" thru_hole circle (at 0 0) (size 2 2) (drill 1) (layers "*.Cu" "*.Mask")))"#
+    ));
+    let tessellator = Tessellator::new(TOLERANCE);
+    let front = tessellator.mask(&board, on_layer(&board, "F.Mask"));
+    let disc = PI * 1.05 * 1.05;
+    assert_close(front.area(), 200.0 - 4.0 - disc, 2e-3, "front mask area");
+    assert!(!front.covers(Point { x: 2.0, y: 2.0 }), "the drawn opening");
+    let back = tessellator.mask(&board, on_layer(&board, "B.Mask"));
+    assert_close(back.area(), 200.0 - disc, 2e-3, "back mask area");
+    assert!(!back.covers(Point { x: 10.0, y: 5.0 }), "the pad's opening");
+}
+
+#[test_case::test_case("(solder_paste_margin -0.1)", 1.8 * 0.8; "a margin shrinks the pad by it on every side")]
+#[test_case::test_case("(solder_paste_margin -0.1) (solder_paste_ratio -0.1)", 1.6 * 0.6; "a ratio of the shorter side adds to the margin")]
+#[test_case::test_case("", 2.0; "no clearance is the pad itself")]
+fn paste_is_the_pad_shape_shrunk_by_the_paste_clearance(clearance: &str, area: f64) {
+    let board = board(&format!(
+        r#"{RECT_OUTLINE}
+           (footprint "R" (layer "F.Cu") (at 0 0) {clearance}
+             (pad "1" smd rect (at 5 5) (size 2 1) (layers "F.Cu" "F.Mask" "F.Paste"))
+             (pad "2" smd rect (at 15 5) (size 2 1) (layers "F.Cu" "F.Mask")))"#
+    ));
+    let tessellator = Tessellator::new(TOLERANCE);
+    let paste = tessellator.paste(&board, on_layer(&board, "F.Paste"));
+    assert_close(paste.area(), area, 1e-6, "paste area");
+    assert!(paste.covers(Point { x: 5.0, y: 5.0 }), "the pasted pad");
+    assert!(
+        !paste.covers(Point { x: 15.0, y: 5.0 }),
+        "the pad without paste"
+    );
+    assert!(
+        tessellator
+            .paste(&board, on_layer(&board, "B.Paste"))
+            .is_empty(),
+        "nothing on the back"
+    );
+}
+
+#[test]
+fn a_plated_hole_has_a_copper_rim_and_an_unplated_one_has_none() {
+    let board = board(
+        r#"(footprint "H" (layer "F.Cu") (at 0 0)
+             (pad "1" thru_hole circle (at 5 5) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask"))
+             (pad "" np_thru_hole circle (at 10 5) (size 1 1) (drill 1) (layers "*.Cu" "*.Mask")))
+           (via (at 15 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net "GND"))"#,
+    );
+    let tessellator = Tessellator::new(TOLERANCE);
+    let rims = tessellator.rims(&board);
+    // The rim is 0.1 mm of copper around the drill, as the hand-off's
+    // holes.py draws it: an annulus from the drill's radius out by 0.1.
+    let annulus = |radius: f64| PI * ((radius + 0.1).powi(2) - radius.powi(2));
+    assert_close(rims.area(), annulus(0.4) + annulus(0.15), 5e-3, "rim area");
+    assert!(rims.covers(Point { x: 5.45, y: 5.0 }), "the pad's rim");
+    assert!(rims.covers(Point { x: 15.2, y: 5.0 }), "the via's rim");
+    assert!(!rims.covers(Point { x: 5.0, y: 5.0 }), "the hole itself");
+    assert!(
+        !rims.covers(Point { x: 10.55, y: 5.0 }),
+        "no rim on an unplated hole"
+    );
+    let holes = tessellator.all_holes(&board);
+    assert_close(
+        holes.area(),
+        PI * (0.4 * 0.4 + 0.5 * 0.5 + 0.15 * 0.15),
+        5e-3,
+        "hole area",
+    );
+    assert!(holes.covers(Point { x: 10.0, y: 5.0 }), "the unplated hole");
+}
+
+#[test]
+fn an_unfilled_zone_is_hatched_across_its_outline() {
+    // A 10 by 10 zone on F.Cu saved without a fill.
+    let board = board(
+        r#"(zone (net "GND") (layers "F.Cu") (hatch edge 0.5) (fill yes)
+             (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10))))"#,
+    );
+    assert_eq!(board.unfilled_zones(), 1);
+    let mesh = f_cu(&board);
+    // Hatch lines 0.1 wide a millimetre apart cover about a tenth of the
+    // zone, plus the outline stroked at the same width.
+    let area = mesh.area();
+    assert!((8.0..20.0).contains(&area), "hatched area {area}");
+    assert_bounds(&mesh, (-0.05, -0.05), (10.05, 10.05), 0.01);
+    assert!(
+        mesh.covers(Point { x: 5.0, y: 5.0 }),
+        "on the diagonal line"
+    );
+    assert!(
+        !mesh.covers(Point { x: 5.5, y: 5.0 }),
+        "between two hatch lines"
+    );
+    assert!(mesh.covers(Point { x: 5.0, y: 0.0 }), "the outline");
+}
+
+#[test]
+fn a_filled_zone_is_not_counted_as_unfilled_and_a_keepout_never_is() {
+    let board = board(
+        r#"(zone (net "GND") (layers "F.Cu") (hatch edge 0.5) (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))
+             (filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10))))
+           (zone (layers "F.Cu" "B.Cu") (hatch edge 0.5) (keepout (tracks not_allowed))
+             (polygon (pts (xy 12 0) (xy 14 0) (xy 14 2) (xy 12 2))))"#,
+    );
+    assert_eq!(board.unfilled_zones(), 0);
+    assert_close(f_cu(&board).area(), 100.0, 1e-6, "the fill alone");
+}
+
+#[test]
+fn the_hand_off_board_fills_its_outline_and_opens_its_mask_at_the_pads() {
+    let board = hand_off_board();
+    let tessellator = Tessellator::new(TOLERANCE);
+    let bounds = tessellator
+        .outline_bounds(board)
+        .expect("the board has an outline");
+    let fill = tessellator.board_fill(board);
+    let box_area = bounds.width() * bounds.height();
+    // Rounded corners take a little off the box.
+    assert!(
+        fill.area() > 0.98 * box_area && fill.area() <= box_area,
+        "fill {} of box {box_area}",
+        fill.area()
+    );
+    let mask = tessellator.mask(board, on_layer(board, "F.Mask"));
+    assert!(
+        mask.area() < 0.97 * fill.area() && mask.area() > 0.7 * fill.area(),
+        "mask {} of fill {}",
+        mask.area(),
+        fill.area()
+    );
+    assert_eq!(board.unfilled_zones(), 0, "every zone has its fill");
+    assert!(
+        !tessellator.rims(board).is_empty(),
+        "plated holes have rims"
     );
 }
