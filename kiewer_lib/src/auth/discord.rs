@@ -1,12 +1,13 @@
 //! Discord's particulars: its endpoints and the shape of `GET /users/@me`
-//! (docs/v1-scope.md, Accounts and access: the `identify` and `email`
-//! scopes against `/users/@me`).
+//! (docs/v1-scope.md, Accounts and access: the `identify` scope against
+//! `/users/@me`; no email, the account is found by the snowflake alone).
 
 use super::{App, Credentials, Provider, ProviderUser};
 use crate::error::{Error, Result};
 
 /// The app registered at Discord (README, Development), on Discord's own
-/// endpoints. `identify` opens `/users/@me`; `email` adds the address.
+/// endpoints. `identify` opens `/users/@me`; the `email` scope is not
+/// asked, so the address never arrives and nothing is kept.
 #[must_use]
 pub fn app(credentials: Credentials) -> App {
     App {
@@ -15,13 +16,13 @@ pub fn app(credentials: Credentials) -> App {
         auth_url: "https://discord.com/oauth2/authorize".to_owned(),
         token_url: "https://discord.com/api/oauth2/token".to_owned(),
         user_url: "https://discord.com/api/users/@me".to_owned(),
-        scopes: vec!["identify".to_owned(), "email".to_owned()],
+        scopes: vec!["identify".to_owned()],
     }
 }
 
 /// The person behind `GET /users/@me`: the snowflake `id`, a string that
-/// survives a rename, the `username`, and the `email` when Discord has
-/// verified it (`verified`); an unverified one is nobody's yet.
+/// survives a rename, and the `username`. No email: the scope is not
+/// asked, and an address in the body is ignored.
 pub(super) fn parse_user(body: &serde_json::Value) -> Result<ProviderUser> {
     let missing = |field: &str| Error::OAuth {
         provider: Provider::Discord,
@@ -34,14 +35,10 @@ pub(super) fn parse_user(body: &serde_json::Value) -> Result<ProviderUser> {
     };
     let id = text("id").ok_or_else(|| missing("an id"))?;
     let login = text("username").ok_or_else(|| missing("a username"))?;
-    let verified = body
-        .get("verified")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
     Ok(ProviderUser {
         id: id.to_owned(),
         login: login.to_owned(),
-        email: text("email").filter(|_| verified).map(ToOwned::to_owned),
+        email: None,
     })
 }
 
@@ -50,7 +47,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_user_is_the_snowflake_the_username_and_the_verified_email() {
+    fn the_user_is_the_snowflake_and_the_username_without_an_email() {
         let body = serde_json::json!({
             "id": "80351110224678912",
             "username": "Nelly",
@@ -64,20 +61,9 @@ mod tests {
             ProviderUser {
                 id: "80351110224678912".to_owned(),
                 login: "Nelly".to_owned(),
-                email: Some("nelly@discord.example".to_owned()),
+                email: None,
             }
         );
-    }
-
-    #[test]
-    fn an_unverified_email_is_not_kept() {
-        let body = serde_json::json!({
-            "id": "80351110224678912",
-            "username": "Nelly",
-            "verified": false,
-            "email": "nelly@discord.example"
-        });
-        assert_eq!(parse_user(&body).unwrap().email, None);
     }
 
     #[test]

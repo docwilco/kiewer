@@ -55,7 +55,7 @@ variable without the other fails startup naming the missing one.
 - Discord: https://discord.com/developers/applications, New Application,
   OAuth2, add the redirect `http://localhost:8090/auth/discord/callback`;
   the client id and secret are on that page. The server asks the
-  `identify` and `email` scopes. Variables `OAUTH_DISCORD_*`.
+  `identify` scope only. Variables `OAUTH_DISCORD_*`.
 - Google: https://console.cloud.google.com/apis/credentials, Create
   credentials, OAuth client ID, Web application, authorised redirect URI
   `http://localhost:8090/auth/google/callback`; the consent screen needs

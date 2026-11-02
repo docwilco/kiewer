@@ -439,7 +439,7 @@ mod tests {
     }
 
     #[test_case(Provider::GitHub, "https://api.github.com/user", &[]; "github asks no scope")]
-    #[test_case(Provider::Discord, "https://discord.com/api/users/@me", &["identify", "email"]; "discord identify and email against users me")]
+    #[test_case(Provider::Discord, "https://discord.com/api/users/@me", &["identify"]; "discord identify alone against users me")]
     #[test_case(Provider::Google, "https://openidconnect.googleapis.com/v1/userinfo", &["openid", "email", "profile"]; "google openid connect userinfo")]
     fn each_provider_has_its_user_endpoint_and_scopes(
         provider: Provider,

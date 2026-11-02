@@ -53,7 +53,7 @@ The decisions behind v1, settled in the design grilling of 2026-10-30, grouped b
 
 ## Accounts and access
 
-- Sign-in with GitHub, Discord and Google via the `oauth2` crate plus a userinfo call per provider (Discord `identify` and `email` scopes against `/users/@me`). One account; providers linked explicitly from settings; a first sign-in with an unknown provider makes a new account. (S6, Q7)
+- Sign-in with GitHub, Discord and Google via the `oauth2` crate plus a userinfo call per provider (Discord the `identify` scope alone against `/users/@me`: the snowflake and the username, no email). One account; providers linked explicitly from settings; a first sign-in with an unknown provider makes a new account. (S6, Q7)
 - Sessions: Postgres rows, random id in an HttpOnly Secure SameSite=Lax cookie, 30-day sliding expiry, listed and revocable in settings. (Q36)
 - Handle chosen at first sign-in, prefilled from the provider, lowercase letters, digits and hyphens, no rename in v1. Slug derived from the name, editable by owner or admin, old slug redirects until reused. (Q28, Q29)
 - Roles: collaborator pushes revisions and manages own branches; admin does that on any branch and manages people, name and description; owner alone deletes, transfers and changes visibility. One owner per design. (Q8, Q34)

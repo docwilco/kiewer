@@ -443,15 +443,27 @@ async fn pick_a_handle(browser: &mut http::Browser, db: &PgPool) -> String {
     handle
 }
 
-#[test_case(Provider::Discord, "identify email"; "discord with identify and email")]
-#[test_case(Provider::Google, "openid email profile"; "google with openid email and profile")]
+#[test_case(Provider::Discord, "identify", false; "discord with identify, no email")]
+#[test_case(Provider::Google, "openid email profile", true; "google with openid email and profile")]
 #[tokio::test]
-async fn a_person_signs_in_with_another_provider(provider: Provider, scope: &str) {
+async fn a_person_signs_in_with_another_provider(
+    provider: Provider,
+    scope: &str,
+    keeps_email: bool,
+) {
     let Some(db) = pool_from_env().await else {
         return;
     };
     let email = format!("{}@example.com", fresh("mail"));
-    let (fake, addr) = fake_provider(provider, fresh_user(provider, "Nelly", &email)).await;
+    let user = fresh_user(provider, "Nelly", &email);
+    let provider_user_id = user
+        .get("id")
+        .or_else(|| user.get("sub"))
+        .map(ToString::to_string)
+        .expect("the fake user has an id")
+        .trim_matches('"')
+        .to_owned();
+    let (fake, addr) = fake_provider(provider, user).await;
     let (mut browser, _dir) = server_with(db.clone(), &[(provider, addr)], "https").await;
 
     let signed_in = sign_in_with(&mut browser, provider, addr).await;
@@ -472,18 +484,20 @@ async fn a_person_signs_in_with_another_provider(provider: Provider, scope: &str
         "prefilled from the provider's login: {}",
         welcome.body
     );
-    let row: (String, String, Option<String>) =
-        sqlx::query_as("SELECT provider, provider_login, email FROM identity WHERE email = $1")
-            .bind(&email)
-            .fetch_one(&db)
-            .await
-            .expect("the identity row");
+    let row: (String, String, Option<String>) = sqlx::query_as(
+        "SELECT provider, provider_login, email FROM identity WHERE provider = $1 AND provider_user_id = $2",
+    )
+    .bind(provider.to_string())
+    .bind(&provider_user_id)
+    .fetch_one(&db)
+    .await
+    .expect("the identity row");
     assert_eq!(
         row,
         (
             provider.to_string(),
             "Nelly".to_owned(),
-            Some(email.clone())
+            keeps_email.then(|| email.clone())
         )
     );
 }
