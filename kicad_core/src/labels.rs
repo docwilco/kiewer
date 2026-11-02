@@ -25,7 +25,8 @@ use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::font;
 use crate::geometry::{Bounds, Transform};
-use crate::model::{Board, LayerId, NetId, Pad, Point, Segment, Size, Via};
+use crate::model::{Board, LayerId, NetId, Pad, Point, Segment, Size};
+use crate::tessellate::spans;
 
 /// A track label's text height as a fraction of the track's width.
 pub const HEIGHT_PER_TRACK_WIDTH: f64 = 0.7;
@@ -75,9 +76,9 @@ pub const HALO_PER_HEIGHT: f64 = 1.0 / 4.0;
 /// KiCad's centred text, a height less half its 1.17 first-line height.
 pub const BASELINE_BELOW_CENTER: f64 = 1.0 - font::FIRST_LINE_HEIGHT / 2.0;
 
-/// What a label names, and which toggle shows it. The order is the
-/// priority at collision time: a pad's labels over a via's over a zone's
-/// over a track's.
+/// What a label names, and which toggle shows it, in the order the
+/// toggles are listed. The rank at collision time is
+/// [`LabelClass::priority`], which is not this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum LabelClass {
     /// A pad's number, inside the pad.
@@ -93,7 +94,7 @@ pub enum LabelClass {
 }
 
 impl LabelClass {
-    /// Every class, in priority order.
+    /// Every class, in toggle order.
     pub const ALL: [LabelClass; 5] = [
         LabelClass::PadNumber,
         LabelClass::PadNet,
@@ -538,15 +539,18 @@ pub fn labels(board: &Board) -> Vec<Label> {
         let length = run.length();
         let margin = RUN_GATE * candidate.label.length / 2.0;
         let step = SHIFT_STEP * candidate.label.length;
+        // Further out each round, both ways, while either way is still
+        // on the run; the first clear spot wins.
         let mut k = 1.0;
-        loop {
-            let tries = [along + k * step, along - k * step];
-            let mut any_on_run = false;
+        'shifting: loop {
+            let tries = [along + k * step, along - k * step]
+                .into_iter()
+                .filter(|&try_along| try_along >= margin && try_along <= length - margin)
+                .collect::<Vec<f64>>();
+            if tries.is_empty() {
+                break;
+            }
             for try_along in tries {
-                if try_along < margin || try_along > length - margin {
-                    continue;
-                }
-                any_on_run = true;
                 let (position, angle) = run.at(try_along);
                 let moved = Label {
                     position,
@@ -555,13 +559,8 @@ pub fn labels(board: &Board) -> Vec<Label> {
                 };
                 if !kept.collides(&moved) {
                     kept.push(moved);
-                    any_on_run = false;
-                    k = f64::NAN;
-                    break;
+                    break 'shifting;
                 }
-            }
-            if !any_on_run {
-                break;
             }
             k += 1.0;
         }
@@ -671,6 +670,15 @@ impl Placer<'_> {
         self.out.push(Candidate { label, run: None });
     }
 
+    /// The copper layers among `layers`.
+    fn copper_among(&self, layers: &[LayerId]) -> Vec<LayerId> {
+        layers
+            .iter()
+            .filter(|id| self.copper.contains(id))
+            .copied()
+            .collect()
+    }
+
     /// The lines of a pad's label: the number and the net at one shared
     /// height, stacked, when the net fits at no less than
     /// [`PAD_SHARED_MIN`] of the number's own height; else the number
@@ -731,13 +739,7 @@ impl Placer<'_> {
                 };
                 let lines = self.pad_lines(pad, along, across);
                 let turn = Transform::new(center, angle);
-                let layers: Vec<LayerId> = pad
-                    .layers
-                    .iter()
-                    .filter(|id| self.copper.contains(id))
-                    .copied()
-                    .collect();
-                for layer in layers {
+                for layer in self.copper_among(&pad.layers) {
                     for line in lines.iter().filter(|line| line.height >= MIN_HEIGHT) {
                         let position = turn.apply(Point {
                             x: 0.0,
@@ -810,13 +812,7 @@ impl Placer<'_> {
             let Some(net) = self.net_name(zone.net) else {
                 continue;
             };
-            let layers: Vec<LayerId> = zone
-                .layers
-                .iter()
-                .filter(|id| self.copper.contains(id))
-                .copied()
-                .collect();
-            for layer in layers {
+            for layer in self.copper_among(&zone.layers) {
                 let pole = zone
                     .fills
                     .iter()
@@ -894,20 +890,6 @@ impl Placer<'_> {
             }
         }
     }
-}
-
-/// Whether `via` reaches `layer`: its two layers bound a span of
-/// `copper` (the copper layers in stack order) that holds `layer`.
-fn spans(via: &Via, copper: &[LayerId], layer: LayerId) -> bool {
-    let position = |id: LayerId| copper.iter().position(|&other| other == id);
-    let (Some(a), Some(b), Some(l)) = (
-        position(via.layers[0]),
-        position(via.layers[1]),
-        position(layer),
-    ) else {
-        return false;
-    };
-    (a.min(b)..=a.max(b)).contains(&l)
 }
 
 /// The point of `polygon` farthest from its edges and that distance: the
@@ -1172,17 +1154,31 @@ mod tests {
         assert!(close(angle, 0.0));
     }
 
-    #[test]
-    fn a_bend_another_net_or_another_layer_starts_a_new_run() {
+    /// A second segment after `(0, 0)` to `(10, 0)` on F.Cu, net GND.
+    #[test_case((10.0, 0.0, 20.0, 0.0), "F.Cu", "GND", 1; "collinear, start at the end")]
+    #[test_case((20.0, 0.0, 10.0, 0.0), "F.Cu", "GND", 1; "collinear, end at the end")]
+    #[test_case((0.0, 0.0, -10.0, 0.0), "F.Cu", "GND", 1; "collinear, back from the start")]
+    #[test_case((10.0, 0.0, 20.0, 0.5), "F.Cu", "GND", 1; "a bend under the limit")]
+    #[test_case((10.0, 0.0, 20.0, 2.0), "F.Cu", "GND", 2; "a bend over the limit")]
+    #[test_case((10.0, 0.0, 20.0, 10.0), "F.Cu", "GND", 2; "a forty five degree bend")]
+    #[test_case((10.0, 0.0, 20.0, 0.0), "F.Cu", "VCC", 2; "another net")]
+    #[test_case((10.0, 0.0, 20.0, 0.0), "B.Cu", "GND", 2; "another layer")]
+    #[test_case((10.02, 0.0, 20.0, 0.0), "F.Cu", "GND", 2; "a gap past the join tolerance")]
+    #[test_case((10.004, 0.0, 20.0, 0.0), "F.Cu", "GND", 1; "a gap within the join tolerance")]
+    fn two_segments_are_one_run_only_when_collinear_connected_and_alike(
+        second: (f64, f64, f64, f64),
+        layer: &str,
+        net: &str,
+        expected: usize,
+    ) {
+        let (x1, y1, x2, y2) = second;
         let board = board(&format!(
-            "{}{}{}{}",
+            "{}{}",
             segment(0.0, 0.0, 10.0, 0.0, 0.5, "F.Cu", "GND"),
-            segment(10.0, 0.0, 20.0, 10.0, 0.5, "F.Cu", "GND"),
-            segment(20.0, 10.0, 30.0, 10.0, 0.5, "F.Cu", "VCC"),
-            segment(30.0, 10.0, 40.0, 10.0, 0.5, "B.Cu", "VCC"),
+            segment(x1, y1, x2, y2, 0.5, layer, net),
         ));
         let runs = runs(&board);
-        assert_eq!(runs.len(), 4, "{runs:?}");
+        assert_eq!(runs.len(), expected, "{runs:?}");
     }
 
     #[test]

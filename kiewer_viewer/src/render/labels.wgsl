@@ -9,9 +9,11 @@
 // uniform.
 //
 // A mirrored view (the camera's x scale is negative) would show the
-// text backwards: the glyph's x is flipped and the angle negated first,
-// so the text reads normally, and a label at exactly a quarter turn
-// keeps reading bottom to top.
+// text backwards: the glyph's x is flipped first, so the text reads
+// normally. That alone puts the text at the negated angle on screen,
+// since mirroring a rotation negates it (M R(a) M = R(-a)); the sine is
+// left as it is. A vertical label then reads top to bottom in the
+// mirror, as the hand-off's mirrored label files have it.
 
 struct View {
     center: vec2<f32>,
@@ -78,16 +80,10 @@ fn vs_main(input: VertexInput) -> VertexOutput {
         return out;
     }
     var local = vec2<f32>(input.cursor + input.position.x, BASELINE + input.position.y);
-    var c = input.direction.x;
-    var s = input.direction.y;
+    let c = input.direction.x;
+    let s = input.direction.y;
     if mirrored {
         local.x = -local.x;
-        s = -s;
-        // A quarter turn negated is minus a quarter turn, which the
-        // (-90, 90] rule folds back to plus: still bottom to top.
-        if abs(c) < 1e-5 && s < 0.0 {
-            s = -s;
-        }
     }
     // KiCad's rotation on a y-down frame: positive turns
     // counter-clockwise on the screen (kicad_core::geometry::Transform).

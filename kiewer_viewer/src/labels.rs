@@ -255,21 +255,18 @@ pub struct LabelDraw {
 pub fn draws(glyphs: &GlyphSet, groups: &[Group], layers: &[Layer]) -> Vec<LabelDraw> {
     let mut out = Vec::new();
     for layer in layers {
-        let on_layer = || groups.iter().filter(|group| &group.layer == layer);
-        for group in on_layer() {
-            if let Some(ranges) = glyphs.ranges.get(&group.glyph) {
-                out.push(LabelDraw {
-                    indices: ranges.halo.clone(),
-                    instances: group.instances.clone(),
-                });
-            }
-        }
-        for group in on_layer() {
-            if let Some(ranges) = glyphs.ranges.get(&group.glyph) {
-                out.push(LabelDraw {
-                    indices: ranges.fill.clone(),
-                    instances: group.instances.clone(),
-                });
+        let on_layer = groups.iter().filter(|group| &group.layer == layer);
+        for pick in [
+            |ranges: &GlyphRanges| ranges.halo.clone(),
+            |ranges: &GlyphRanges| ranges.fill.clone(),
+        ] {
+            for group in on_layer.clone() {
+                if let Some(ranges) = glyphs.ranges.get(&group.glyph) {
+                    out.push(LabelDraw {
+                        indices: pick(ranges),
+                        instances: group.instances.clone(),
+                    });
+                }
             }
         }
     }

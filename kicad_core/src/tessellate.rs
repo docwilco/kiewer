@@ -620,7 +620,7 @@ fn pad_frame(pad: &Pad, frame: &Transform) -> Transform {
 
 /// Whether `via` reaches `layer`: its two layers bound a span of the
 /// copper stack (`copper` in stack order) and `layer` is in it.
-fn spans(via: &Via, copper: &[LayerId], layer: LayerId) -> bool {
+pub(crate) fn spans(via: &Via, copper: &[LayerId], layer: LayerId) -> bool {
     let position = |id: LayerId| copper.iter().position(|&other| other == id);
     let (Some(a), Some(b), Some(l)) = (
         position(via.layers[0]),

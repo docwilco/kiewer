@@ -533,7 +533,7 @@ impl ViewState {
             out.push_str(&layer.to_string());
             out.push('=');
             match opacity {
-                Some(opacity) => out.push_str(&format_opacity(*opacity)),
+                Some(opacity) => out.push_str(&format_number(*opacity)),
                 None => out.push_str("off"),
             }
         }
@@ -541,7 +541,7 @@ impl ViewState {
             out.push('&');
             out.push_str(LABELS_KEY);
             out.push('=');
-            out.push_str(&format_opacity(self.labels.threshold));
+            out.push_str(&format_number(self.labels.threshold));
         }
         for class in &self.labels.hidden {
             out.push('&');
@@ -607,10 +607,10 @@ fn round_opacity(opacity: f32) -> f32 {
     (opacity.clamp(0.0, 1.0) * 100.0).round() / 100.0
 }
 
-/// An opacity (or a threshold) as the fragment writes it: `1`, `0.7`,
-/// `0.85`, `12.5`.
-fn format_opacity(opacity: f32) -> String {
-    let text = format!("{opacity:.2}");
+/// A number as the fragment writes it, to a hundredth with the zeros
+/// trimmed: `1`, `0.7`, `0.85`, `12.5`.
+fn format_number(value: f32) -> String {
+    let text = format!("{value:.2}");
     text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 

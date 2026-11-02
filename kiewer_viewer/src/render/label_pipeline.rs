@@ -259,7 +259,48 @@ impl LabelPass {
 
 #[cfg(test)]
 mod tests {
+    use test_case::test_case;
+
     use super::*;
+
+    /// Where a glyph-local vector lands on the screen, in screen units,
+    /// by the shader's placement: `local` flipped in x when mirrored,
+    /// turned by the label's angle in KiCad's sense, then through the
+    /// camera, whose x runs backwards when mirrored. A copy of the
+    /// arithmetic of `vs_main`, kept here so the rule has a test.
+    fn on_screen(angle: f64, mirrored: bool, local: [f64; 2]) -> [f64; 2] {
+        let (s, c) = angle.to_radians().sin_cos();
+        let x = if mirrored { -local[0] } else { local[0] };
+        let y = local[1];
+        let turned = [x * c + y * s, -x * s + y * c];
+        let x_sign = if mirrored { -1.0 } else { 1.0 };
+        [x_sign * turned[0], turned[1]]
+    }
+
+    #[test_case(0.0)]
+    #[test_case(45.0)]
+    #[test_case(-30.0)]
+    #[test_case(90.0)]
+    fn a_mirrored_label_reads_along_the_mirrored_direction_unmirrored(angle: f64) {
+        let close =
+            |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9;
+        let reading = on_screen(angle, false, [1.0, 0.0]);
+        let down = on_screen(angle, false, [0.0, 1.0]);
+        // Mirrored, the track lies along the plain direction reflected in
+        // x, and the text reads along it left to right: the reflection
+        // negated, which is the plain direction at the negated angle.
+        let mirrored_reading = on_screen(angle, true, [1.0, 0.0]);
+        assert!(
+            close(mirrored_reading, [reading[0], -reading[1]]),
+            "{mirrored_reading:?}"
+        );
+        // And the glyphs are not mirrored: "down" stays a quarter turn
+        // clockwise from "reading" on the screen, as it is unmirrored.
+        let mirrored_down = on_screen(angle, true, [0.0, 1.0]);
+        let handedness = |r: [f64; 2], d: [f64; 2]| r[0] * d[1] - r[1] * d[0];
+        assert!((handedness(reading, down) - 1.0).abs() < 1e-9);
+        assert!((handedness(mirrored_reading, mirrored_down) - 1.0).abs() < 1e-9);
+    }
 
     #[test]
     fn the_label_shader_parses_and_validates_with_its_uniform_at_group_one() {
