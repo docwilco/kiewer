@@ -21,10 +21,24 @@ kicad_core = { path = "../kicad_core" }
 bytemuck = { version = "1", features = ["derive"] }
 derive_more = { version = "2", default-features = false, features = ["display", "error", "from"] }
 wasm-bindgen = "0.2"
-# wgpu (ADR 0001) with no native backend yet: natively this crate is its
-# tests and, later, the thumbnail renderer (#7), which adds one. wgsl is
-# the shader language; std for the types the API hands out.
+# wgpu (ADR 0001) with no backend here: the browser's and the native one
+# are in the target tables below. wgsl is the shader language; std for the
+# types the API hands out.
 wgpu = { version = "30", default-features = false, features = ["std", "wgsl"] }
+
+# Native: the headless renderer (headless.rs) for the golden images and
+# the thumbnails (ADR 0004), on Vulkan alone, which is what Mesa's
+# lavapipe speaks on the machines without a GPU that run it (CI, the
+# server image); a dev box with another API gets a skipped test, not a
+# backend. png writes the frames and reads the hand-off's references, no
+# features (its defaults are none). wgpu's adapter and device requests
+# are futures natively as in the browser, ready on the first poll; the
+# executor is futures-executor, which kiewer_lib already carries in the
+# lock, on its std feature alone.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+futures-executor = { version = "0.3", default-features = false, features = ["std"] }
+png = { version = "0.18", default-features = false }
+wgpu = { version = "30", default-features = false, features = ["vulkan"] }
 
 # The browser: WebGPU when the browser has it, WebGL2 otherwise, one code
 # path at the WebGL2 limits (render.rs). The canvas comes in as a web-sys

@@ -15,6 +15,8 @@
 //! a device, a format and a texture view to draw into.
 
 pub mod atlas_pipeline;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod offscreen;
 
 use std::num::NonZeroU64;
 use std::ops::Range;

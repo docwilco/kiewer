@@ -54,6 +54,27 @@ pub enum Error {
     #[display("{backend}: the surface refused a frame")]
     #[from(ignore)]
     FrameRefused { backend: Backend },
+    /// The device refused to map the headless readback buffer.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[display("reading the frame back: {_0}")]
+    Readback(wgpu::BufferAsyncError),
+    /// The mapped readback buffer could not be read.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[display("reading the frame back: {_0}")]
+    MappedRange(wgpu::MapRangeError),
+    /// The PNG encoder refused the pixels.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[display("encoding the PNG: {_0}")]
+    PngEncode(png::EncodingError),
+    /// The bytes are not a PNG.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[display("decoding the PNG: {_0}")]
+    PngDecode(png::DecodingError),
+    /// A PNG in a colour type or depth the reader does not take.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[display("the PNG is {_0:?}, not 8-bit RGB or RGBA")]
+    #[from(ignore)]
+    PngColorType(#[error(not(source))] png::ColorType),
 }
 
 /// The crate's result type.

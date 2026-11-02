@@ -186,6 +186,18 @@ impl Camera {
         self.pan(m0, m1);
     }
 
+    /// Look at `center` at `scale` device pixels per millimetre: the
+    /// headless renderer's camera, placed by a layout rather than a
+    /// gesture. A scale that is not a positive finite number leaves the
+    /// camera as it is.
+    pub fn look_at(&mut self, center: Point, scale: f64) {
+        if !(scale.is_finite() && scale > 0.0) {
+            return;
+        }
+        self.center = center;
+        self.scale = scale.clamp(MIN_SCALE, MAX_SCALE);
+    }
+
     /// Fit `bounds` in the viewport with [`FIT_MARGIN`] free on each side,
     /// centred.
     pub fn fit(&mut self, bounds: Bounds) {
@@ -354,6 +366,22 @@ mod tests {
         assert!(pixels_apart(&camera, middle, at(800.0, 450.0)) < 1e-9);
         camera.step(-2);
         assert!((camera.scale() / fitted().scale() - 1.0 / STEP).abs() < 1e-9);
+    }
+
+    #[test]
+    fn look_at_places_the_centre_and_the_scale_and_ignores_a_bad_scale() {
+        let mut camera = fitted();
+        camera.look_at(at(61.9943, 41.9941), 30.0);
+        assert_eq!(camera.center(), at(61.9943, 41.9941));
+        assert!((camera.scale() - 30.0).abs() < 1e-12);
+        // The board's centre is at the viewport's middle, a millimetre is
+        // 30 pixels.
+        let landed = camera.world_to_screen(at(62.9943, 41.9941));
+        assert!((landed.x - 830.0).abs() < 1e-9 && (landed.y - 450.0).abs() < 1e-9);
+        camera.look_at(at(0.0, 0.0), f64::NAN);
+        camera.look_at(at(0.0, 0.0), -1.0);
+        assert_eq!(camera.center(), at(61.9943, 41.9941));
+        assert!((camera.scale() - 30.0).abs() < 1e-12);
     }
 
     #[test]
