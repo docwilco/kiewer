@@ -33,18 +33,18 @@ fn design_url(handle: &Handle, slug: &Slug) -> String {
 }
 
 /// The upload form opened from a design page: for `branch` (`None` for a
-/// new branch) at `revision`, the parent a new branch starts from. The
-/// handle, the slug and the branch name are their own characters; the
-/// hash is hex.
+/// new branch) from `revision`, the one the page showed, which a new
+/// branch starts from. The handle, the slug and the branch name are their
+/// own characters; the hash is hex.
 fn upload_url(
     handle: &Handle,
     slug: &Slug,
-    branch: Option<&str>,
+    branch: Option<&BranchName>,
     revision: RevisionHash,
 ) -> String {
     format!(
-        "/upload?design={handle}/{slug}&branch={}&at={revision}",
-        branch.unwrap_or_default()
+        "/upload?design={handle}/{slug}&branch={}&from={revision}",
+        branch.map(BranchName::as_str).unwrap_or_default()
     )
 }
 
@@ -67,11 +67,11 @@ pub(super) fn design_page(
     let schematic_url = shown
         .schematic()
         .map(|_| schematic::url(&shown.owner, &shown.design.slug));
-    let at_branch = |name: &str| history::branch_url(&shown.owner, &shown.design, name);
+    let at_branch = |name: &BranchName| history::branch_url(&shown.owner, &shown.design, name);
     let recent_view = |ordinal: u32, revision: &design::Revision| RecentView {
         ordinal,
         short: revision.hash.short(),
-        url: history::revision_url(&shown.owner, &shown.design.slug, revision.hash),
+        url: history::revision_url(&shown.owner, &shown.design, revision.hash, &shown.branch),
         created_at: revision.created_at.clone(),
         current: revision.hash == shown.revision.hash,
     };
@@ -93,18 +93,18 @@ pub(super) fn design_page(
             .iter()
             .map(|branch| BranchView {
                 name: branch.name.to_string(),
-                url: at_branch(branch.name.as_str()),
+                url: at_branch(&branch.name),
             })
             .collect(),
         recent,
         ordinal: shown.ordinal,
         behind: shown.behind,
-        head_url: at_branch(shown.branch.as_str()),
-        history_url: history::history_url(&shown.owner, &shown.design.slug, shown.branch.as_str()),
+        head_url: at_branch(&shown.branch),
+        history_url: history::history_url(&shown.owner, &shown.design.slug, &shown.branch),
         upload_url: upload_url(
             &shown.owner,
             &shown.design.slug,
-            Some(shown.branch.as_str()),
+            Some(&shown.branch),
             shown.revision.hash,
         ),
         new_branch_url: upload_url(&shown.owner, &shown.design.slug, None, shown.revision.hash),
@@ -191,10 +191,10 @@ pub(super) async fn show(
     Ok(Html(design_page(&shown, &description, settings)?).into_response())
 }
 
-/// Where the upload form was opened from (`/upload?design=&branch=&at=`,
+/// Where the upload form was opened from (`/upload?design=&branch=&from=`,
 /// the design page's links): the design to preselect, the branch of that
-/// page (empty for a new branch), and the revision it showed, which a new
-/// branch starts from.
+/// page (empty for a new branch; absent for the design's default), and
+/// the revision it showed, which a new branch starts from.
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct Opened {
     #[serde(default)]
@@ -202,7 +202,7 @@ pub(super) struct Opened {
     #[serde(default)]
     branch: Option<String>,
     #[serde(default)]
-    at: String,
+    from: String,
 }
 
 #[derive(Template)]
@@ -244,16 +244,21 @@ async fn upload_page(
             .collect(),
         None => vec![design::DEFAULT_BRANCH.to_owned()],
     };
+    // The branch of the page the form was opened from; the design's
+    // default branch when none was named or the name is not the design's.
     let branch = match &opened.branch {
         Some(branch) if branches.contains(branch) || branch.is_empty() => branch.clone(),
-        _ => branches[0].clone(),
+        _ => selected
+            .map(|member| member.design.default_branch.clone())
+            .filter(|default| branches.contains(default))
+            .unwrap_or_else(|| branches[0].clone()),
     };
     let page = UploadPage {
         design: selected.map(Membership::path).unwrap_or_default(),
         designs,
         branches,
         branch,
-        from: opened.at.clone(),
+        from: opened.from.clone(),
         handle: settled.handle,
         error,
         file_mb: Limits::DEFAULT.file_mb(),
@@ -372,16 +377,18 @@ impl Fields {
                         },
                     })
                 })?;
-                let from = match self.from.as_deref().map(str::trim) {
-                    Some(hash) if !hash.is_empty() => {
-                        Some(hash.parse::<RevisionHash>().map_err(|_| {
-                            Error::Refused(Refusal::NoSuchRevision {
-                                hash: hash.to_owned(),
-                            })
-                        })?)
-                    }
-                    _ => None,
-                };
+                let from = self.from.as_deref().map(str::trim).unwrap_or_default();
+                let from = from.parse::<RevisionHash>().map_err(|_| {
+                    Error::Refused(if from.is_empty() {
+                        Refusal::BadBranchName {
+                            reason: "a new branch starts at a revision: open this form from the design's page".to_owned(),
+                        }
+                    } else {
+                        Refusal::NoSuchRevision {
+                            hash: from.to_owned(),
+                        }
+                    })
+                })?;
                 BranchTarget::New { name, from }
             }
         };
@@ -397,7 +404,7 @@ impl Fields {
         Opened {
             design: self.design.clone().unwrap_or_default(),
             branch: self.branch.clone(),
-            at: self.from.clone().unwrap_or_default(),
+            from: self.from.clone().unwrap_or_default(),
         }
     }
 }
@@ -494,7 +501,7 @@ pub(super) async fn upload(
     };
     match committed {
         Ok(committed) => {
-            let next = history::branch_url(&owner, &committed.design, committed.branch.as_str());
+            let next = history::branch_url(&owner, &committed.design, &committed.branch);
             Ok(personal(settled.jar, Redirect::to(&next)))
         }
         Err(Error::Refused(refusal)) => {

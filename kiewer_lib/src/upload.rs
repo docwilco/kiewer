@@ -309,12 +309,13 @@ pub enum BranchTarget {
     /// Onto the head of this branch: the parent is the head at write
     /// time, moved by compare-and-set.
     Head(BranchName),
-    /// A new branch named `name`, whose first revision is this one, built
-    /// on `from` (a revision the design reaches: the one the page the
-    /// form was opened from showed) or on nothing.
+    /// A new branch named `name` at `from` (a revision the design
+    /// reaches: the one the page the form was opened from showed), with
+    /// this revision on top (docs/v1-scope.md, Push: a new branch starts
+    /// at a revision, never from nothing).
     New {
         name: BranchName,
-        from: Option<RevisionHash>,
+        from: RevisionHash,
     },
 }
 
@@ -573,7 +574,7 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Push
         BranchTarget::Default | BranchTarget::Head(_) => {
             let name = match branch {
                 BranchTarget::Head(name) => name,
-                _ => design.default_branch.parse()?,
+                _ => BranchName::from_row(design.default_branch.clone()),
             };
             let head = design::head(&mut tx, design.id, name.as_str()).await?;
             // The default branch of a design with no revision yet (a new
@@ -588,15 +589,13 @@ async fn write_rows(db: &PgPool, limits: &Limits, rows: Rows<'_>) -> Result<Push
             (name, head, head)
         }
         BranchTarget::New { name, from } => {
-            if let Some(from) = from
-                && !design::reaches(&mut *tx, design.id, from).await?
-            {
+            if !design::reaches(&mut *tx, design.id, from).await? {
                 return Err(Refusal::NoSuchRevision {
                     hash: from.to_string(),
                 }
                 .into());
             }
-            (name, from, None)
+            (name, Some(from), None)
         }
     };
     let time = design::now_text(&mut tx).await?;

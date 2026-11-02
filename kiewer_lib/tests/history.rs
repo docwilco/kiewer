@@ -180,10 +180,34 @@ async fn three_uploads_to_main_make_a_chain_the_history_page_lists_as_rev_1_to_3
     for hash in &hashes {
         assert!(body.contains(&hash[..8]), "the short hash is shown: {body}");
     }
-    assert!(
-        !body.contains("/history/") && !body.contains("rev/"),
-        "no ordinal in any URL: {body}"
-    );
+    assert_design_links(body, &handle, "chain");
+}
+
+/// Every link into the design on `body` has one of the settled shapes
+/// (docs/v1-scope.md, URLs): the page, its people page, `/b/{branch}`, `/b/{branch}/history`
+/// or `/r/{hash}` with at most a `?b={branch}` hint; so no ordinal is in
+/// any URL.
+fn assert_design_links(body: &str, handle: &Handle, slug: &str) {
+    let prefix = format!("href=\"/{handle}/{slug}");
+    let is_hash = |text: &str| text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit());
+    let is_name = |text: &str| !text.is_empty() && !text.bytes().all(|b| b.is_ascii_digit());
+    for (start, _) in body.match_indices(&prefix) {
+        let rest = &body[start + prefix.len()..];
+        let path = &rest[..rest.find('"').expect("the attribute closes")];
+        let (path, query) = path.split_once('?').unwrap_or((path, ""));
+        let segments: Vec<&str> = path.split('/').skip(1).collect();
+        let settled = match segments.as_slice() {
+            [] | ["schematic" | "people"] => true,
+            ["b", name] | ["b", name, "history"] => is_name(name),
+            ["r", hash] => is_hash(hash),
+            _ => false,
+        };
+        assert!(settled, "an unsettled URL shape: {path}");
+        assert!(
+            query.is_empty() || query.strip_prefix("b=").is_some_and(is_name),
+            "a query that is not the branch hint: {path}?{query}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -224,7 +248,7 @@ async fn the_branch_and_revision_urls_resolve_and_an_unreached_revision_is_404()
     );
     assert!(
         body.contains(&format!(
-            "/upload?design={handle}/urls&#38;branch=&#38;at={first}"
+            "/upload?design={handle}/urls&#38;branch=&#38;from={first}"
         )),
         "the banner links a new branch here: {body}"
     );
@@ -278,12 +302,12 @@ async fn the_form_pushes_to_the_selected_branch_or_a_new_one_and_refuses_a_taken
     // main preselected, the revision carried for a new branch.
     let form = browser
         .get(&format!(
-            "/upload?design={handle}/branchy&branch=main&at={first}"
+            "/upload?design={handle}/branchy&branch=main&from={first}"
         ))
         .await;
     assert_eq!(form.status, 200, "{}", form.body);
     for expected in [
-        r#"<option value="branchy" selected>"#.to_owned(),
+        format!(r#"<option value="{handle}/branchy" selected>"#),
         r#"<option value="main" selected>main</option>"#.to_owned(),
         r#"<option value="">A new branch</option>"#.to_owned(),
         format!(r#"name="from" value="{first}""#),
@@ -292,7 +316,7 @@ async fn the_form_pushes_to_the_selected_branch_or_a_new_one_and_refuses_a_taken
     }
     let new_branch_form = browser
         .get(&format!(
-            "/upload?design={handle}/branchy&branch=&at={first}"
+            "/upload?design={handle}/branchy&branch=&from={first}"
         ))
         .await;
     assert!(
@@ -354,7 +378,9 @@ async fn the_form_pushes_to_the_selected_branch_or_a_new_one_and_refuses_a_taken
         "main is as it was"
     );
     let form = browser
-        .get("/upload?design={handle}/branchy&branch=experiment")
+        .get(&format!(
+            "/upload?design={handle}/branchy&branch=experiment"
+        ))
         .await;
     assert!(
         form.body
@@ -373,23 +399,37 @@ async fn a_push_to_a_taken_or_missing_branch_is_refused_and_one_onto_the_head_la
     let (mut browser, _, handle) = signed_in(&db, addr).await;
     chain_of_three(&mut browser, &handle, "branchy").await;
     let branchy = format!("{handle}/branchy");
+    let history = history_page(addr, &handle, "branchy", "main").await;
+    let hashes = linked_revisions(&history.body, &handle, "branchy");
+    let head = &hashes[0];
     let new_branch = [
         ("design", branchy.as_str()),
         ("branch", ""),
         ("new_branch", "experiment"),
+        ("from", head),
     ];
     let posted = push(&mut browser, "branchy", &new_branch).await;
-    assert_eq!(posted.status, 303, "a branch from nothing: {}", posted.body);
+    assert_eq!(posted.status, 303, "a branch at the head: {}", posted.body);
 
-    // The name is taken; a nameless new branch; a branch that is not
-    // there; a revision the design does not reach.
+    // The name is taken; a nameless new branch; a new branch from
+    // nothing; a branch that is not there; a revision the design does
+    // not reach.
     let zeros = "0".repeat(64);
-    let refused: [(&Fields<'_>, u16, &str); 4] = [
+    let refused: [(&Fields<'_>, u16, &str); 5] = [
         (&new_branch, 409, "already has a branch experiment"),
         (
             &[("design", &branchy), ("branch", ""), ("new_branch", "")],
             400,
             "needs a name",
+        ),
+        (
+            &[
+                ("design", &branchy),
+                ("branch", ""),
+                ("new_branch", "rootless"),
+            ],
+            400,
+            "starts at a revision",
         ),
         (
             &[("design", &branchy), ("branch", "nothing")],
@@ -435,5 +475,104 @@ async fn a_push_to_a_taken_or_missing_branch_is_refused_and_one_onto_the_head_la
     assert_eq!(
         linked_revisions(&main_history.body, &handle, "branchy").len(),
         4
+    );
+}
+
+#[tokio::test]
+async fn a_link_from_a_branch_keeps_its_context_and_the_banner_names_that_branch() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut browser, _, handle) = signed_in(&db, addr).await;
+    chain_of_three(&mut browser, &handle, "ctx").await;
+    let ctx = format!("{handle}/ctx");
+    let main_history = history_page(addr, &handle, "ctx", "main").await;
+    let first = linked_revisions(&main_history.body, &handle, "ctx")[2].clone();
+    // Two revisions on a branch at the first: the branch is first, a, b.
+    for (i, (branch, new_branch, from)) in [("", "side", first.as_str()), ("side", "", "")]
+        .into_iter()
+        .enumerate()
+    {
+        let message = format!("side {i}");
+        let fields = [
+            ("design", ctx.as_str()),
+            ("branch", branch),
+            ("new_branch", new_branch),
+            ("from", from),
+            ("message", &message),
+        ];
+        let posted = push(&mut browser, "ctx", &fields).await;
+        assert_eq!(posted.status, 303, "{}", posted.body);
+    }
+    let side_history = history_page(addr, &handle, "ctx", "side").await;
+    let on_side = linked_revisions(&side_history.body, &handle, "ctx");
+    assert_eq!(on_side.len(), 3, "{}", side_history.body);
+    let (a, root) = (&on_side[1], &on_side[2]);
+    assert_eq!(root, &first);
+    assert!(
+        side_history
+            .body
+            .contains(&format!(r#"href="/{handle}/ctx/r/{a}?b=side""#)),
+        "a link from the branch's history carries the branch: {}",
+        side_history.body
+    );
+    assert_design_links(&side_history.body, &handle, "ctx");
+
+    // Followed, the link opens in the branch's context, with the banner
+    // naming the branch; without the hint the shared root is main's.
+    let hinted = http::request(addr, "GET", &format!("/{handle}/ctx/r/{a}?b=side"), &[], "").await;
+    assert_eq!(hinted.status, 200, "{}", hinted.body);
+    assert!(
+        hinted
+            .body
+            .contains("This is rev 2 of side, 1 behind the head."),
+        "{}",
+        hinted.body
+    );
+    assert!(
+        hinted.body.contains(r"selected>side</option>")
+            && hinted
+                .body
+                .contains(&format!(r#"href="/{handle}/ctx/b/side""#)),
+        "the dropdown and the banner's head link are the branch's: {}",
+        hinted.body
+    );
+    assert_design_links(&hinted.body, &handle, "ctx");
+    let bare = http::request(addr, "GET", &format!("/{handle}/ctx/r/{root}"), &[], "").await;
+    assert!(
+        bare.body
+            .contains("This is rev 1 of main, 2 behind the head."),
+        "{}",
+        bare.body
+    );
+    let hinted_root = http::request(
+        addr,
+        "GET",
+        &format!("/{handle}/ctx/r/{root}?b=side"),
+        &[],
+        "",
+    )
+    .await;
+    assert!(
+        hinted_root
+            .body
+            .contains("This is rev 1 of side, 2 behind the head."),
+        "{}",
+        hinted_root.body
+    );
+    let wrong_hint = http::request(
+        addr,
+        "GET",
+        &format!("/{handle}/ctx/r/{root}?b=nothing"),
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(wrong_hint.status, 200);
+    assert!(
+        wrong_hint.body.contains("rev 1 of main"),
+        "a hint naming no branch of the design is ignored: {}",
+        wrong_hint.body
     );
 }

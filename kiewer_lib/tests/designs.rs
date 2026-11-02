@@ -7,7 +7,7 @@
 use kiewer_lib::account::{self, AccountId, Handle};
 use kiewer_lib::auth::{Provider, ProviderUser};
 use kiewer_lib::blob::BlobHash;
-use kiewer_lib::design::{self, At, DEFAULT_BRANCH, Design, Slug};
+use kiewer_lib::design::{self, At, BranchName, DEFAULT_BRANCH, Design, Slug};
 use kiewer_lib::error::Refusal;
 use kiewer_lib::revision::{Metadata, RevisionDraft, RevisionHash, TreeEntry};
 use kiewer_lib::{Error, Result};
@@ -89,9 +89,9 @@ fn metadata() -> Metadata {
     }
 }
 
-/// One revision of `files` with `message` on `design`'s default branch,
-/// as `upload::commit` writes it: every row in one transaction, the
-/// branch moved from `parent` by compare-and-set.
+/// One revision of `files` with `message` and `metadata` on `design`'s
+/// default branch, as `upload::push` writes it: every row in one
+/// transaction, the branch moved from `parent` by compare-and-set.
 async fn push(
     db: &PgPool,
     author: (AccountId, &Handle),
@@ -101,24 +101,20 @@ async fn push(
     message: Option<&str>,
     metadata: Option<&Metadata>,
 ) -> Result<RevisionHash> {
-    let mut tx = db.begin().await?;
-    for file in files {
-        design::record_blob(&mut tx, &file.blob, file.size).await?;
-    }
-    let tree = design::record_tree(&mut tx, files).await?;
-    let time = design::now_text(&mut tx).await?;
-    let draft = RevisionDraft {
-        tree,
-        parent,
-        author: author.1,
-        time: &time,
-        message,
-    };
-    let hash = design::record_revision(&mut tx, &draft, author.0, metadata).await?;
-    design::set_head(&mut tx, design.id, &design.default_branch, parent, hash).await?;
-    design::record_design_revision(&mut tx, design.id, hash).await?;
-    tx.commit().await?;
-    Ok(hash)
+    write(
+        db,
+        author,
+        Push {
+            design,
+            branch: &design.default_branch,
+            parent,
+            expected: parent,
+            files,
+            message,
+            metadata,
+        },
+    )
+    .await
 }
 
 /// A new design of `owner` at `slug`, committed.
@@ -285,6 +281,7 @@ struct Push<'a> {
     expected: Option<RevisionHash>,
     files: &'a [TreeEntry],
     message: Option<&'a str>,
+    metadata: Option<&'a Metadata>,
 }
 
 /// `push` written in one transaction.
@@ -302,7 +299,7 @@ async fn write(db: &PgPool, author: (AccountId, &Handle), push: Push<'_>) -> Res
         time: &time,
         message: push.message,
     };
-    let hash = design::record_revision(&mut tx, &draft, author.0, None).await?;
+    let hash = design::record_revision(&mut tx, &draft, author.0, push.metadata).await?;
     design::set_head(&mut tx, push.design.id, push.branch, push.expected, hash).await?;
     design::record_design_revision(&mut tx, push.design.id, hash).await?;
     tx.commit().await?;
@@ -330,9 +327,128 @@ async fn push_to(
             expected: parent,
             files,
             message,
+            metadata: None,
         },
     )
     .await
+}
+
+/// `/r/{hash}` with the branch the link came from.
+fn revision_at(hash: RevisionHash, branch: Option<&BranchName>) -> At<'_> {
+    At::Revision { hash, branch }
+}
+
+/// `n` revisions on `main`, in order, each of one board of its own with
+/// the message `rev {ordinal}`.
+async fn chain(
+    db: &PgPool,
+    author: (AccountId, &Handle),
+    design: &Design,
+    n: u8,
+) -> Vec<RevisionHash> {
+    let mut hashes = Vec::new();
+    let mut parent = None;
+    for i in 0..n {
+        let board = entry("demo.kicad_pcb", &[b'(', b'a' + i, b')']);
+        let message = format!("rev {}", i + 1);
+        let hash = push_to(
+            db,
+            author,
+            design,
+            DEFAULT_BRANCH,
+            parent,
+            std::slice::from_ref(&board),
+            Some(&message),
+        )
+        .await
+        .expect("a revision");
+        hashes.push(hash);
+        parent = Some(hash);
+    }
+    hashes
+}
+
+#[tokio::test]
+async fn the_recent_list_holds_the_last_ten_and_a_hinted_branch_is_the_context() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (owner, handle) = person(&db).await;
+    let design = new_design(&db, owner, "twelve", "Twelve").await;
+    let author = (owner, &handle);
+    let hashes = chain(&db, author, &design, 12).await;
+    let head = design::show(&db, handle.as_str(), "twelve")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.ordinal, 12);
+    let ordinals: Vec<u32> = head.recent.iter().map(|entry| entry.ordinal).collect();
+    assert_eq!(
+        ordinals,
+        (3..=12).rev().collect::<Vec<u32>>(),
+        "the last ten"
+    );
+    assert_eq!(head.recent[0].revision.hash, hashes[11]);
+    let first = design::show_at(
+        &db,
+        handle.as_str(),
+        "twelve",
+        At::Revision {
+            hash: hashes[0],
+            branch: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!((first.ordinal, first.behind), (1, 11));
+    assert!(
+        !first.recent.iter().any(|entry| entry.ordinal == 1),
+        "the revision shown is older than the last ten"
+    );
+
+    // A branch at the third revision, with one on top; the third named
+    // by hash is main's unless the link said which branch it came from.
+    let side: BranchName = "side".parse().unwrap();
+    let on_side = write(
+        &db,
+        author,
+        Push {
+            design: &design,
+            branch: side.as_str(),
+            parent: Some(hashes[2]),
+            expected: None,
+            files: &[entry("demo.kicad_pcb", b"(side)")],
+            message: None,
+            metadata: None,
+        },
+    )
+    .await
+    .unwrap();
+    let at = |branch| revision_at(hashes[2], branch);
+    let unhinted = design::show_at(&db, handle.as_str(), "twelve", at(None))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unhinted.branch.as_str(), DEFAULT_BRANCH);
+    assert_eq!((unhinted.ordinal, unhinted.behind), (3, 9));
+    let hinted = design::show_at(&db, handle.as_str(), "twelve", at(Some(&side)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(hinted.branch, side);
+    assert_eq!((hinted.ordinal, hinted.behind), (3, 1));
+    assert_eq!(hinted.head, on_side);
+    let elsewhere: BranchName = "elsewhere".parse().unwrap();
+    let no_such = design::show_at(&db, handle.as_str(), "twelve", at(Some(&elsewhere)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        no_such.branch.as_str(),
+        DEFAULT_BRANCH,
+        "a hint naming a branch that does not reach the revision is ignored"
+    );
 }
 
 /// Three files, each a revision of its own: a chain of three.
@@ -352,28 +468,11 @@ async fn a_chain_of_three_has_ordinals_along_the_branch_and_a_history_newest_fir
     let (owner, handle) = person(&db).await;
     let design = new_design(&db, owner, "chain", "Chain").await;
     let author = (owner, &handle);
-    let boards = three_boards();
-    let mut hashes = Vec::new();
-    let mut parent = None;
-    for (i, board) in boards.iter().enumerate() {
-        let message = format!("rev {}", i + 1);
-        let hash = push_to(
-            &db,
-            author,
-            &design,
-            DEFAULT_BRANCH,
-            parent,
-            std::slice::from_ref(board),
-            Some(&message),
-        )
-        .await
-        .expect("a revision");
-        hashes.push(hash);
-        parent = Some(hash);
-    }
+    let main: BranchName = DEFAULT_BRANCH.parse().unwrap();
+    let hashes = chain(&db, author, &design, 3).await;
     let [first, second, third] = [hashes[0], hashes[1], hashes[2]];
 
-    let history = design::history(&db, design.id, DEFAULT_BRANCH, None)
+    let history = design::history(&db, design.id, &main, None)
         .await
         .expect("read");
     let listed: Vec<(u32, RevisionHash, Option<&str>)> = history
@@ -395,13 +494,13 @@ async fn a_chain_of_three_has_ordinals_along_the_branch_and_a_history_newest_fir
         ],
         "newest first, ordinals counted from the root"
     );
-    let last_two = design::history(&db, design.id, DEFAULT_BRANCH, Some(2))
+    let last_two = design::history(&db, design.id, &main, Some(2))
         .await
         .unwrap();
     assert_eq!(last_two.len(), 2);
     assert_eq!(last_two[0].ordinal, 3, "a limit keeps the ordinals");
     assert!(
-        design::history(&db, design.id, "nothing", None)
+        design::history(&db, design.id, &"nothing".parse().unwrap(), None)
             .await
             .unwrap()
             .is_empty(),
@@ -409,7 +508,7 @@ async fn a_chain_of_three_has_ordinals_along_the_branch_and_a_history_newest_fir
     );
 
     // The head by the branch's name, and by the design's default.
-    let at_branch = design::show_at(&db, handle.as_str(), "chain", At::Branch(DEFAULT_BRANCH))
+    let at_branch = design::show_at(&db, handle.as_str(), "chain", At::Branch(&main))
         .await
         .unwrap()
         .expect("the branch");
@@ -442,10 +541,18 @@ async fn a_chain_of_three_has_ordinals_along_the_branch_and_a_history_newest_fir
     assert_eq!(by_default.behind, 0);
 
     // An older revision by hash: its ordinal and its distance behind.
-    let old = design::show_at(&db, handle.as_str(), "chain", At::Revision(first))
-        .await
-        .unwrap()
-        .expect("the design reaches it");
+    let old = design::show_at(
+        &db,
+        handle.as_str(),
+        "chain",
+        At::Revision {
+            hash: first,
+            branch: None,
+        },
+    )
+    .await
+    .unwrap()
+    .expect("the design reaches it");
     assert_eq!(old.revision.hash, first);
     assert_eq!((old.ordinal, old.behind), (1, 2));
     assert_eq!(old.branch.as_str(), DEFAULT_BRANCH);
@@ -488,10 +595,18 @@ async fn a_revision_the_design_does_not_reach_and_a_branch_it_lacks_are_not_show
     .await
     .unwrap();
     assert!(
-        design::show_at(&db, handle.as_str(), "chain", At::Revision(elsewhere))
-            .await
-            .unwrap()
-            .is_none(),
+        design::show_at(
+            &db,
+            handle.as_str(),
+            "chain",
+            At::Revision {
+                hash: elsewhere,
+                branch: None
+            }
+        )
+        .await
+        .unwrap()
+        .is_none(),
         "another design's revision is not this design's"
     );
     assert!(
@@ -499,17 +614,25 @@ async fn a_revision_the_design_does_not_reach_and_a_branch_it_lacks_are_not_show
             &db,
             handle.as_str(),
             "chain",
-            At::Revision(RevisionHash::from_bytes(&[7u8; 32]).unwrap())
+            At::Revision {
+                hash: RevisionHash::from_bytes(&[7u8; 32]).unwrap(),
+                branch: None
+            }
         )
         .await
         .unwrap()
         .is_none()
     );
     assert!(
-        design::show_at(&db, handle.as_str(), "chain", At::Branch("nothing"))
-            .await
-            .unwrap()
-            .is_none()
+        design::show_at(
+            &db,
+            handle.as_str(),
+            "chain",
+            At::Branch(&"nothing".parse().unwrap())
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
 }
 
@@ -521,29 +644,10 @@ async fn a_new_branch_starts_at_a_revision_and_a_taken_name_is_refused() {
     let (owner, handle) = person(&db).await;
     let design = new_design(&db, owner, "fork", "Fork").await;
     let author = (owner, &handle);
+    let experiment: BranchName = "experiment".parse().unwrap();
     let boards = three_boards();
-    let first = push_to(
-        &db,
-        author,
-        &design,
-        DEFAULT_BRANCH,
-        None,
-        &boards[..1],
-        None,
-    )
-    .await
-    .unwrap();
-    let second = push_to(
-        &db,
-        author,
-        &design,
-        DEFAULT_BRANCH,
-        Some(first),
-        &boards[1..2],
-        None,
-    )
-    .await
-    .unwrap();
+    let hashes = chain(&db, author, &design, 2).await;
+    let (first, second) = (hashes[0], hashes[1]);
 
     // A branch at the first revision, with a third on top of it: a chain
     // of two along the new branch, which shares its root with main.
@@ -557,12 +661,13 @@ async fn a_new_branch_starts_at_a_revision_and_a_taken_name_is_refused() {
             expected: None,
             files: &boards[2..],
             message: Some("on a branch"),
+            metadata: None,
         },
     )
     .await
     .expect("a new branch");
 
-    let on_branch = design::show_at(&db, handle.as_str(), "fork", At::Branch("experiment"))
+    let on_branch = design::show_at(&db, handle.as_str(), "fork", At::Branch(&experiment))
         .await
         .unwrap()
         .expect("the branch");
@@ -577,17 +682,25 @@ async fn a_new_branch_starts_at_a_revision_and_a_taken_name_is_refused() {
         [("experiment", third), (DEFAULT_BRANCH, second)],
         "every branch with its head, by name"
     );
-    let shared_root = design::show_at(&db, handle.as_str(), "fork", At::Revision(first))
-        .await
-        .unwrap()
-        .unwrap();
+    let shared_root = design::show_at(
+        &db,
+        handle.as_str(),
+        "fork",
+        At::Revision {
+            hash: first,
+            branch: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(
         shared_root.branch.as_str(),
         DEFAULT_BRANCH,
         "a revision on several branches is shown in the default branch's context"
     );
     assert_eq!((shared_root.ordinal, shared_root.behind), (1, 1));
-    let history = design::history(&db, design.id, "experiment", None)
+    let history = design::history(&db, design.id, &experiment, None)
         .await
         .unwrap();
     assert_eq!(

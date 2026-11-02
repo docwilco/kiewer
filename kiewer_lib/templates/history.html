@@ -19,8 +19,8 @@
 <nav><a href="/">kiewer</a> · <a href="/{{ handle }}">{{ handle }}</a> / <a href="/{{ handle }}/{{ slug }}">{{ slug }}</a></nav>
 <h1>{{ name }}: history of {{ branch }}</h1>
 <p>Branch:
-  {% for (name, url) in branches %}
-  {% if name.as_str() == branch.as_str() %}<strong>{{ name }}</strong>{% else %}<a href="{{ url }}">{{ name }}</a>{% endif %}
+  {% for known in branches %}
+  {% if known.name == branch %}<strong>{{ known.name }}</strong>{% else %}<a href="{{ known.url }}">{{ known.name }}</a>{% endif %}
   {% endfor %}
   · <a href="{{ head_url }}">view the head</a>
 </p>

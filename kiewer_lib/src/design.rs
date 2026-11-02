@@ -613,7 +613,7 @@ pub struct Branch {
 /// One revision along a branch: its ordinal (GLOSSARY, Ordinal) and the
 /// revision. What a history page lists.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Entry {
+pub struct HistoryEntry {
     /// How many revisions deep it sits along the branch, from 1 at the
     /// root.
     pub ordinal: u32,
@@ -626,10 +626,16 @@ pub enum At<'a> {
     /// `/{handle}/{slug}`: the head of the default branch.
     Default,
     /// `/{handle}/{slug}/b/{branch}`: the head of this branch.
-    Branch(&'a str),
+    Branch(&'a BranchName),
     /// `/{handle}/{slug}/r/{hash}`: this revision, when the design
-    /// reaches it.
-    Revision(RevisionHash),
+    /// reaches it, in the context of `branch` when a link from that
+    /// branch's page says so and the branch reaches the revision, else
+    /// of the default branch when it does, else of the first branch by
+    /// name that does.
+    Revision {
+        hash: RevisionHash,
+        branch: Option<&'a BranchName>,
+    },
 }
 
 /// How many revisions a design page's revision dropdown lists.
@@ -659,7 +665,7 @@ pub struct DesignHead {
     pub branches: Vec<Branch>,
     /// The last [`RECENT`] revisions along the branch in context, newest
     /// first.
-    pub recent: Vec<Entry>,
+    pub recent: Vec<HistoryEntry>,
 }
 
 impl DesignHead {
@@ -749,7 +755,7 @@ pub async fn show_at(
     let hash = match at {
         At::Default | At::Branch(_) => {
             let name = match at {
-                At::Branch(name) => name,
+                At::Branch(name) => name.as_str(),
                 _ => design.default_branch.as_str(),
             };
             match branches.iter().find(|branch| branch.name.as_str() == name) {
@@ -757,7 +763,7 @@ pub async fn show_at(
                 None => return Ok(None),
             }
         }
-        At::Revision(hash) => {
+        At::Revision { hash, .. } => {
             if !reaches(db, design.id, hash).await? {
                 return Ok(None);
             }
@@ -765,11 +771,13 @@ pub async fn show_at(
         }
     };
     let positions = positions(db, design.id, hash).await?;
+    let on = |name: &str| positions.iter().find(|p| p.branch.as_str() == name);
     let position = match at {
-        At::Branch(name) => positions.iter().find(|p| p.branch.as_str() == name),
-        At::Default | At::Revision(_) => positions
-            .iter()
-            .find(|p| p.branch.as_str() == design.default_branch)
+        At::Branch(name) => on(name.as_str()),
+        At::Default => on(&design.default_branch).or_else(|| positions.first()),
+        At::Revision { branch, .. } => branch
+            .and_then(|name| on(name.as_str()))
+            .or_else(|| on(&design.default_branch))
             .or_else(|| positions.first()),
     };
     let Some(position) = position.cloned() else {
@@ -779,7 +787,7 @@ pub async fn show_at(
         return Ok(None);
     };
     let files = entries(db, revision.tree).await?;
-    let recent = history(db, design.id, position.branch.as_str(), Some(RECENT)).await?;
+    let recent = history(db, design.id, &position.branch, Some(RECENT)).await?;
     let head = branches
         .iter()
         .find(|branch| branch.name == position.branch)
@@ -912,9 +920,9 @@ async fn positions(db: &PgPool, design: DesignId, hash: RevisionHash) -> Result<
 pub async fn history(
     db: &PgPool,
     design: DesignId,
-    branch: &str,
+    branch: &BranchName,
     limit: Option<u32>,
-) -> Result<Vec<Entry>> {
+) -> Result<Vec<HistoryEntry>> {
     #[derive(sqlx::FromRow)]
     struct EntryRow {
         behind: i64,
@@ -929,13 +937,13 @@ pub async fn history(
          ORDER BY c.behind LIMIT $3"
     ))
     .bind(design)
-    .bind(Some(branch))
+    .bind(Some(branch.as_str()))
     .bind(limit.map(i64::from))
     .fetch_all(db)
     .await?;
     rows.into_iter()
         .map(|row| {
-            Ok(Entry {
+            Ok(HistoryEntry {
                 ordinal: ordinal(row.length, row.behind),
                 revision: Revision::try_from(row.revision)?,
             })
