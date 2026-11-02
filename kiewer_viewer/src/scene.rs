@@ -43,15 +43,19 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// The outline and the front copper of `board`, coloured for a target
-    /// of `format`; `None` for a board with neither.
+    /// The outline, the front copper and the holes through it of `board`,
+    /// coloured for a target of `format`; `None` for a board with neither
+    /// outline nor copper.
     #[must_use]
     pub fn build(board: &Board, format: wgpu::TextureFormat) -> Option<Self> {
         let tessellator = Tessellator::new(TOLERANCE);
         let outline = tessellator.outline(board);
-        let copper = board
-            .layer_named(COPPER_LAYER)
+        let front = board.layer_named(COPPER_LAYER);
+        let copper = front
             .map(|layer| tessellator.copper(board, layer))
+            .unwrap_or_default();
+        let holes = front
+            .map(|layer| tessellator.holes(board, layer))
             .unwrap_or_default();
         let bounds = tessellator
             .outline_bounds(board)
@@ -66,6 +70,9 @@ impl Scene {
         };
         scene.add(&outline, palette::OUTLINE.for_format(format));
         scene.add(&copper, palette::F_CU.for_format(format));
+        // Last, in the page colour: a track ending in a via covers the
+        // hole the via's ring left open, and the hole must win.
+        scene.add(&holes, palette::PAGE.for_format(format));
         Some(scene)
     }
 

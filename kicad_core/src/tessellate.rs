@@ -1,6 +1,8 @@
 //! Triangles from a board: what the viewer uploads to the GPU and the
 //! thumbnail renderer will draw. One copper layer at a time (tracks, track
-//! arcs, vias, pads and stored zone fills, holes left open), and the
+//! arcs, vias, pads and stored zone fills, holes left open), the holes
+//! drilled through that layer (drawn last, in the page colour, so a track
+//! ending in a via does not fill the hole back in), and the
 //! outline as the strokes of `Edge.Cuts`.
 //!
 //! Everything is computed in f64 and handed to lyon in f32 at the last
@@ -152,6 +154,35 @@ impl Tessellator {
         builder.finish()
     }
 
+    /// The holes drilled through `layer`: every via that reaches it and
+    /// every drilled pad on it, plated or not, as filled discs and slots.
+    /// Drawn after the copper in the page colour: a track or a zone that
+    /// runs into a hole is copper right up to the drill, and the drill is
+    /// still open.
+    #[must_use]
+    pub fn holes(&self, board: &Board, layer: LayerId) -> Mesh {
+        let mut builder = MeshBuilder::new(self.tolerance);
+        let copper: Vec<LayerId> = board.copper_layers().map(|(id, _)| id).collect();
+        for via in board.vias.iter().filter(|via| spans(via, &copper, layer)) {
+            let hole = circle(via.at, via.drill / 2.0, self.tolerance);
+            builder.fill(&[hole], &[]);
+        }
+        for footprint in &board.footprints {
+            let frame = Transform::new(footprint.at, footprint.rotation);
+            for pad in footprint
+                .pads
+                .iter()
+                .filter(|pad| pad.layers.contains(&layer))
+            {
+                if let Some(drill) = pad.drill {
+                    let hole = builder.hole(drill, &pad_frame(pad, &frame));
+                    builder.fill(&[hole], &[]);
+                }
+            }
+        }
+        builder.finish()
+    }
+
     /// The board outline: every `Edge.Cuts` graphic, the board's and the
     /// footprints' (a connector's slot, in the footprint's frame), stroked
     /// at its width (at least 0.05 mm, KiCad's default edge width) with
@@ -241,6 +272,14 @@ fn transformed(drawing: &Drawing, frame: &Transform) -> Drawing {
         width: drawing.width,
         filled: drawing.filled,
     }
+}
+
+/// Where `pad` sits on the board, given its footprint's `frame`. The pad's
+/// rotation is absolute in the file, the footprint's included, so the
+/// shape turns by it on the board, not in the footprint's frame.
+fn pad_frame(pad: &Pad, frame: &Transform) -> Transform {
+    let shape = frame.then(Transform::new(pad.at, 0.0));
+    Transform::new(shape.origin(), pad.rotation)
 }
 
 /// Whether `via` reaches `layer`: its two layers bound a span of the
@@ -527,11 +566,7 @@ impl MeshBuilder {
     /// A pad in its footprint's `frame`: the outline of its shape, the
     /// primitives of a custom pad, and its hole cut out.
     fn pad(&mut self, pad: &Pad, frame: &Transform) {
-        let shape = frame.then(Transform::new(pad.at, 0.0));
-        // The pad's rotation is absolute in the file, the footprint's
-        // included, so the shape turns by it on the board, not in the
-        // footprint's frame.
-        let shape = Transform::new(shape.origin(), pad.rotation);
+        let shape = pad_frame(pad, frame);
         if pad.kind == PadKind::NpThroughHole
             && pad.drill.is_some_and(|drill| {
                 drill.size.width >= pad.size.width && drill.size.height >= pad.size.height

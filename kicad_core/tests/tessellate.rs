@@ -45,6 +45,11 @@ fn f_cu(board: &Board) -> Mesh {
     Tessellator::new(TOLERANCE).copper(board, layer)
 }
 
+fn holes(board: &Board) -> Mesh {
+    let layer = board.layer_named("F.Cu").expect("F.Cu");
+    Tessellator::new(TOLERANCE).holes(board, layer)
+}
+
 fn assert_close(actual: f64, expected: f64, relative: f64, what: &str) {
     let error = (actual - expected).abs() / expected.abs();
     assert!(
@@ -123,6 +128,69 @@ fn a_via_is_an_annulus_around_its_hole() {
     assert!(
         mesh.covers(Point { x: 50.3, y: 50.0 }),
         "the ring is copper"
+    );
+}
+
+#[test]
+fn a_track_ending_in_a_via_covers_the_hole_and_the_hole_mesh_reopens_it() {
+    let board = board(
+        r#"(segment (start 40 50) (end 50 50) (width 0.25) (layer "F.Cu") (net "GND"))
+           (via (at 50 50) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net "GND"))"#,
+    );
+    let centre = Point { x: 50.0, y: 50.0 };
+    // The copper alone has the track's round cap over the hole: that is
+    // why the holes are a mesh of their own, drawn after it.
+    assert!(
+        f_cu(&board).covers(centre),
+        "the track cap reaches the centre"
+    );
+    let holes = holes(&board);
+    assert_close(holes.area(), PI * 0.2 * 0.2, 0.01, "one drill's area");
+    assert!(holes.covers(centre), "the hole is drawn over the track");
+    assert!(
+        !holes.covers(Point { x: 50.3, y: 50.0 }),
+        "the ring is not a hole"
+    );
+}
+
+#[test]
+fn a_blind_via_drills_no_hole_through_a_layer_it_does_not_reach() {
+    let board = board(
+        r#"(via blind (at 50 50) (size 0.8) (drill 0.4) (layers "In1.Cu" "B.Cu") (net "GND"))"#,
+    );
+    assert!(holes(&board).is_empty());
+}
+
+#[test]
+fn a_slot_hole_is_drilled_where_its_pad_turns_it() {
+    // A 1 wide, 2 tall slot in a pad turned 90 degrees, offset 0.5 mm along
+    // the pad's x: on the board the slot lies along x (as the oval pad
+    // above turns), and the offset turns the same way, to -y.
+    let board = board(
+        r#"(footprint "X" (layer "F.Cu") (at 10 10)
+             (pad "1" thru_hole oval (at 0 0 90) (size 2 3) (drill oval 1 2 (offset 0.5 0)) (layers "*.Cu" "*.Mask")))"#,
+    );
+    let holes = holes(&board);
+    assert_close(
+        holes.area(),
+        PI * 0.5 * 0.5 + 1.0 * 1.0,
+        0.01,
+        "a stadium: a 1 mm disc plus a 1 x 1 mm middle",
+    );
+    assert_bounds(&holes, (9.0, 9.0), (11.0, 10.0), TOLERANCE * 2.0);
+}
+
+#[test]
+fn an_unplated_hole_is_still_a_hole() {
+    let board = board(
+        r#"(footprint "X" (layer "F.Cu") (at 0 0)
+             (pad "" np_thru_hole circle (at 0 0) (size 0.75 0.75) (drill 0.75) (layers "*.Cu" "*.Mask")))"#,
+    );
+    assert_close(
+        holes(&board).area(),
+        PI * 0.375 * 0.375,
+        0.01,
+        "the drill's area",
     );
 }
 
