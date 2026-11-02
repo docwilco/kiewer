@@ -286,6 +286,56 @@ mod tests {
     }
 
     #[test]
+    fn frame_fits_a_box_with_the_margin_asked_and_fit_is_frame_at_its_own() {
+        let mut camera = Camera::new(VIEWPORT);
+        // A footprint 6 by 2 mm at (120, 55), framed with 30% free on
+        // each side: its width spans the middle 40% of the viewport's
+        // width (640 px) since 6/1600 outweighs 2/900, centred.
+        let footprint = Bounds {
+            min: at(117.0, 54.0),
+            max: at(123.0, 56.0),
+        };
+        camera.frame(footprint, 0.3);
+        assert_eq!(camera.center(), at(120.0, 55.0));
+        assert!(
+            (camera.scale() - 640.0 / 6.0).abs() < 1e-9,
+            "{}",
+            camera.scale()
+        );
+        let left = camera.world_to_screen(at(117.0, 55.0));
+        assert!((left.x - 480.0).abs() < 1e-9, "{left:?}");
+        // A tall box is limited by the height instead.
+        camera.frame(
+            Bounds {
+                min: at(0.0, 0.0),
+                max: at(1.0, 9.0),
+            },
+            0.3,
+        );
+        assert!(
+            (camera.scale() - 360.0 / 9.0).abs() < 1e-9,
+            "{}",
+            camera.scale()
+        );
+        // fit is frame at FIT_MARGIN.
+        let mut framed = Camera::new(VIEWPORT);
+        framed.frame(
+            Bounds {
+                min: at(50.0, 50.0),
+                max: at(161.9886, 107.9882),
+            },
+            FIT_MARGIN,
+        );
+        assert_eq!(framed, fitted());
+        // A box of no size, or a margin past half, leaves the scale at 1.
+        camera.frame(Bounds::of(at(3.0, 4.0)), 0.3);
+        assert!((camera.scale() - 1.0).abs() < 1e-12);
+        assert_eq!(camera.center(), at(3.0, 4.0));
+        camera.frame(footprint, 0.6);
+        assert!((camera.scale() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
     fn a_wheel_zoom_keeps_the_world_point_under_the_cursor() {
         let mut camera = fitted();
         let cursor = at(1234.0, 123.0);

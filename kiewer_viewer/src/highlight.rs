@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use kicad_core::geometry::Bounds;
-use kicad_core::hit::{Hit, Index, Item, Kind, net_only};
+use kicad_core::hit::{Hit, Index, Item, net_only};
 use kicad_core::model::{Board, NetId, Point};
 use kicad_core::tessellate::{Mesh, Tessellator};
 
@@ -48,8 +48,9 @@ pub const PAD_MIN_PX: f64 = 24.0;
 /// scene's own indices: the highlight's slice of that layer.
 type HighlightRange = (Layer, Range<u32>);
 
-/// The highlight state of one board.
-#[derive(Debug, Clone, PartialEq)]
+/// The highlight state of one board. The default is no board: nothing to
+/// hit, nothing highlighted.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Highlight {
     index: Index,
     hovered: Option<Hit>,
@@ -69,23 +70,15 @@ impl Highlight {
     pub fn new(board: &Board) -> Self {
         Self {
             index: Index::build(board),
-            hovered: None,
-            pinned: None,
-            meshes: BTreeMap::new(),
-            uploaded: None,
+            ..Self::default()
         }
     }
 
-    /// No board: nothing to hit.
+    /// What every label's opacity is multiplied by this frame: [`DIM`]
+    /// while a net is highlighted, 1 otherwise.
     #[must_use]
-    pub fn none() -> Self {
-        Self {
-            index: Index::default(),
-            hovered: None,
-            pinned: None,
-            meshes: BTreeMap::new(),
-            uploaded: None,
-        }
+    pub fn dim(&self) -> f32 {
+        if self.active().is_some() { DIM } else { 1.0 }
     }
 
     /// The hit test over the board.
@@ -171,13 +164,6 @@ impl Highlight {
             Item::Segment(_) | Item::Arc(_) => "track".to_owned(),
             Item::Zone { .. } => "zone".to_owned(),
         };
-        debug_assert!(matches!(
-            (hit.item, hit.kind),
-            (Item::Pad { .. }, Kind::Pad)
-                | (Item::Via(_), Kind::Via)
-                | (Item::Segment(_) | Item::Arc(_), Kind::Track)
-                | (Item::Zone { .. }, Kind::Zone)
-        ));
         format!("{what}: {net}")
     }
 
@@ -247,18 +233,11 @@ impl Highlight {
             return draws;
         }
         for draw in &mut draws {
-            let page = scene
-                .slices
-                .iter()
-                .any(|slice| slice.range == draw.range && slice.paint == Paint::Page);
-            if !page {
+            if !is_page(scene, draw) {
                 draw.color[3] *= DIM;
             }
         }
-        for layer in scene.stack.order(view.top) {
-            if !matches!(layer, Layer::Copper(_)) || state.opacity(view, &layer).is_none() {
-                continue;
-            }
+        for layer in shown_copper(scene, state) {
             let Some((_, range)) = ranges.iter().find(|(on, _)| *on == layer) else {
                 continue;
             };
@@ -269,6 +248,32 @@ impl Highlight {
         }
         draws
     }
+}
+
+/// Whether `draw` is one of `scene`'s page-coloured slices (a hole),
+/// which the dim leaves alone.
+#[must_use]
+pub fn is_page(scene: &Scene, draw: &Draw) -> bool {
+    scene
+        .slices
+        .iter()
+        .any(|slice| slice.range == draw.range && slice.paint == Paint::Page)
+}
+
+/// The copper layers `state` shows of `scene`'s view, in the view's draw
+/// order, bottom first: where a highlight draws and what a hit test
+/// sees (reversed, top first).
+#[must_use]
+pub fn shown_copper(scene: &Scene, state: &ViewState) -> Vec<Layer> {
+    let Some(view) = scene.view(state) else {
+        return Vec::new();
+    };
+    scene
+        .stack
+        .order(view.top)
+        .into_iter()
+        .filter(|layer| matches!(layer, Layer::Copper(_)) && state.opacity(view, layer).is_some())
+        .collect()
 }
 
 /// `position` (millimetres, f32) relative to `origin`, the difference
@@ -445,11 +450,7 @@ mod tests {
         }
         for (dimmed, original) in draws.iter().zip(&plain) {
             assert_eq!(dimmed.range, original.range);
-            let page = scene
-                .slices
-                .iter()
-                .any(|slice| slice.range == original.range && slice.paint == Paint::Page);
-            let expected = if page {
+            let expected = if is_page(scene, original) {
                 original.color[3]
             } else {
                 original.color[3] * DIM

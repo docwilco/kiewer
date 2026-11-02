@@ -39,6 +39,10 @@ pub struct LabelFrame {
     pub classes: [bool; 5],
     /// The copper layers whose labels draw, bottom first.
     pub layers: Vec<Layer>,
+    /// What every label's opacity is multiplied by: 1 as usual, the
+    /// highlight's dim while a net is lit (`crate::highlight`), so the
+    /// labels dim with the copper they sit on.
+    pub dim: f32,
 }
 
 /// The uniform as the shader reads it.
@@ -225,8 +229,8 @@ impl LabelPass {
             ],
             classes_a: [shown(0), shown(1), shown(2), shown(3)],
             classes_b: [shown(4), 0.0, 0.0, 0.0],
-            halo: palette::LABEL_HALO.for_format(self.format),
-            fill: palette::LABEL_FILL.for_format(self.format),
+            halo: dimmed(palette::LABEL_HALO.for_format(self.format), frame.dim),
+            fill: dimmed(palette::LABEL_FILL.for_format(self.format), frame.dim),
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
     }
@@ -234,6 +238,18 @@ impl LabelPass {
     /// Draw the frame's layers' labels into `pass`, whose group 0 holds
     /// the view.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_labels(pass);
+    }
+}
+
+/// `color` with its alpha multiplied by `dim`, clamped to 0..=1.
+fn dimmed(mut color: [f32; 4], dim: f32) -> [f32; 4] {
+    color[3] *= dim.clamp(0.0, 1.0);
+    color
+}
+
+impl LabelPass {
+    fn draw_labels(&self, pass: &mut wgpu::RenderPass<'_>) {
         let (Some(frame), Some(geometry)) = (&self.frame, &self.geometry) else {
             return;
         };

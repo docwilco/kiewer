@@ -856,9 +856,8 @@ netCanvas.addEventListener("click", function (e) {
   if (!netViewer) return;
   if (netDown && Math.hypot(e.clientX - netDown[0], e.clientY - netDown[1]) > CLICK_SLOP) return;
   const [x, y] = netPoint(e);
-  netViewer.click(x, y);
+  if (netViewer.click(x, y)) netSchedule();
   refreshPinned();
-  netSchedule();
 });
 function clearNet() {
   if (!netViewer) return;
@@ -867,9 +866,13 @@ function clearNet() {
   refreshPinned();
 }
 netClear.addEventListener("click", clearNet);
+// Escape in the search box leaves the box; in any other input (the font
+// picker's text box, a slider) it is that input's, as the main script
+// leaves every key to an input.
 window.addEventListener("keydown", function (e) {
   if (e.key !== "Escape" || !netViewer) return;
   if (e.target === netQuery) { netQuery.blur(); return; }
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
   clearNet();
 });
 netSearch.addEventListener("submit", function (e) {

@@ -64,13 +64,24 @@ pub enum Item {
     },
 }
 
+impl Item {
+    /// What the item is, for the order a query prefers.
+    #[must_use]
+    pub fn kind(self) -> Kind {
+        match self {
+            Item::Pad { .. } => Kind::Pad,
+            Item::Via(_) => Kind::Via,
+            Item::Segment(_) | Item::Arc(_) => Kind::Track,
+            Item::Zone { .. } => Kind::Zone,
+        }
+    }
+}
+
 /// What a query found under its point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hit {
     /// The item.
     pub item: Item,
-    /// What it is.
-    pub kind: Kind,
     /// Its net.
     pub net: NetId,
     /// The layer it was hit on: the topmost of the query's layers it
@@ -167,13 +178,23 @@ fn segment_distance(point: Point, from: Point, to: Point) -> f64 {
 #[derive(Debug, Clone, PartialEq)]
 struct Entry {
     item: Item,
-    kind: Kind,
     net: NetId,
     /// The copper layers it reaches.
     layers: Vec<LayerId>,
     bounds: Bounds,
     shape: Shape,
 }
+
+/// The most cells an item's box may span on either axis to be binned:
+/// four metres of board. A box past that (a coordinate a crafted file
+/// puts a million miles off) goes to the oversize list every query
+/// checks, so no input makes the build loop over a continent of cells.
+pub const MAX_SPAN: i64 = 2048;
+
+/// The most cells a query's reach may span on either axis before it
+/// scans every entry instead of its cells: a tolerance that wide at a
+/// far zoom covers most of a board anyway.
+const MAX_QUERY_SPAN: i64 = 64;
 
 /// The board's copper with a net, binned for point queries. The default
 /// is empty: nothing to hit, for a viewer without a board.
@@ -183,6 +204,8 @@ pub struct Index {
     /// The entries whose box reaches each cell, by the cell's column and
     /// row ([`cell_of`]).
     cells: BTreeMap<(i64, i64), Vec<usize>>,
+    /// The entries whose box spans more than [`MAX_SPAN`] cells.
+    oversize: Vec<usize>,
 }
 
 /// The grid cell a coordinate falls in.
@@ -202,10 +225,7 @@ impl Index {
     #[must_use]
     pub fn build(board: &Board) -> Self {
         let copper: Vec<LayerId> = board.copper_layers().map(|(id, _)| id).collect();
-        let mut index = Self {
-            entries: Vec::new(),
-            cells: BTreeMap::new(),
-        };
+        let mut index = Self::default();
         for (footprint_index, footprint) in board.footprints.iter().enumerate() {
             let frame = Transform::new(footprint.at, footprint.rotation);
             for (pad_index, pad) in footprint.pads.iter().enumerate() {
@@ -221,14 +241,13 @@ impl Index {
                         footprint: footprint_index,
                         pad: pad_index,
                     },
-                    Kind::Pad,
                     net,
                     layers,
                     Shape::Polygons(pad_polygons(pad, &frame)),
                 );
             }
             for (zone_index, zone) in footprint.zones.iter().enumerate() {
-                index.zone(
+                index.push_zone(
                     Item::Zone {
                         footprint: Some(footprint_index),
                         zone: zone_index,
@@ -248,7 +267,6 @@ impl Index {
                 .collect();
             index.push(
                 Item::Via(via_index),
-                Kind::Via,
                 net,
                 layers,
                 Shape::Disc {
@@ -261,7 +279,6 @@ impl Index {
             let Some(net) = segment.net else { continue };
             index.push(
                 Item::Segment(segment_index),
-                Kind::Track,
                 net,
                 vec![segment.layer],
                 Shape::Stroke {
@@ -278,7 +295,6 @@ impl Index {
             };
             index.push(
                 Item::Arc(arc_index),
-                Kind::Track,
                 net,
                 vec![arc.layer],
                 Shape::Stroke {
@@ -288,7 +304,7 @@ impl Index {
             );
         }
         for (zone_index, zone) in board.zones.iter().enumerate() {
-            index.zone(
+            index.push_zone(
                 Item::Zone {
                     footprint: None,
                     zone: zone_index,
@@ -301,9 +317,9 @@ impl Index {
         index
     }
 
-    /// `zone` in `frame`: one entry per stored fill on a copper layer,
-    /// and its outline on each copper layer it has no fill on.
-    fn zone(
+    /// Add `zone` in `frame`: one entry per stored fill on a copper
+    /// layer, and its outline on each copper layer it has no fill on.
+    fn push_zone(
         &mut self,
         item: Item,
         zone: &crate::model::Zone,
@@ -322,7 +338,6 @@ impl Index {
         {
             self.push(
                 item,
-                Kind::Zone,
                 net,
                 vec![fill.layer],
                 Shape::Polygons(vec![on_board(&fill.points)]),
@@ -332,7 +347,6 @@ impl Index {
             if zone.is_unfilled_on(layer) {
                 self.push(
                     item,
-                    Kind::Zone,
                     net,
                     vec![layer],
                     Shape::Polygons(vec![on_board(&zone.outline)]),
@@ -341,20 +355,24 @@ impl Index {
         }
     }
 
-    /// Add an entry, binned into every cell its box reaches. An item on
-    /// no copper layer or with no extent is not indexed.
-    fn push(&mut self, item: Item, kind: Kind, net: NetId, layers: Vec<LayerId>, shape: Shape) {
+    /// Add an entry, binned into every cell its box reaches, or into the
+    /// oversize list when the box spans more than [`MAX_SPAN`] cells. An
+    /// item on no copper layer or with no extent is not indexed.
+    fn push(&mut self, item: Item, net: NetId, layers: Vec<LayerId>, shape: Shape) {
         let Some(bounds) = shape.bounds() else { return };
-        if layers.is_empty() {
+        if layers.is_empty() || !bounds.min.x.is_finite() || !bounds.max.y.is_finite() {
             return;
         }
         let index = self.entries.len();
-        for cell in cells_of(bounds) {
-            self.cells.entry(cell).or_default().push(index);
+        if span_of(bounds) > MAX_SPAN {
+            self.oversize.push(index);
+        } else {
+            for cell in cells_of(bounds) {
+                self.cells.entry(cell).or_default().push(index);
+            }
         }
         self.entries.push(Entry {
             item,
-            kind,
             net,
             layers,
             bounds,
@@ -380,51 +398,76 @@ impl Index {
     /// topmost layer. `None` over empty space.
     #[must_use]
     pub fn hit(&self, point: Point, tolerance: f64, layers: &[LayerId]) -> Option<Hit> {
-        let tolerance = tolerance.max(0.0);
+        if !point.x.is_finite() || !point.y.is_finite() {
+            return None;
+        }
+        let tolerance = if tolerance.is_finite() {
+            tolerance.max(0.0)
+        } else {
+            0.0
+        };
         let reach = grow(Bounds::of(point), tolerance);
         let mut best: Option<(Kind, usize, Hit)> = None;
-        let mut seen = Vec::new();
-        for cell in cells_of(reach) {
-            for &index in self.cells.get(&cell).into_iter().flatten() {
-                if seen.contains(&index) {
-                    continue;
-                }
-                seen.push(index);
-                let Some(entry) = self.entries.get(index) else {
-                    continue;
-                };
-                if !overlaps(entry.bounds, reach) {
-                    continue;
-                }
-                let Some((depth, layer)) = layers
-                    .iter()
-                    .enumerate()
-                    .find(|(_, layer)| entry.layers.contains(layer))
-                else {
-                    continue;
-                };
-                if best
-                    .is_some_and(|(kind, best_depth, _)| (kind, best_depth) <= (entry.kind, depth))
-                {
-                    continue;
-                }
-                if entry.shape.distance(point) > tolerance {
-                    continue;
-                }
-                best = Some((
-                    entry.kind,
-                    depth,
-                    Hit {
-                        item: entry.item,
-                        kind: entry.kind,
-                        net: entry.net,
-                        layer: *layer,
-                    },
-                ));
+        for index in self.candidates(reach) {
+            let Some(entry) = self.entries.get(index) else {
+                continue;
+            };
+            if !overlaps(entry.bounds, reach) {
+                continue;
             }
+            let Some((depth, layer)) = layers
+                .iter()
+                .enumerate()
+                .find(|(_, layer)| entry.layers.contains(layer))
+            else {
+                continue;
+            };
+            let kind = entry.item.kind();
+            if best
+                .is_some_and(|(best_kind, best_depth, _)| (best_kind, best_depth) <= (kind, depth))
+            {
+                continue;
+            }
+            if entry.shape.distance(point) > tolerance {
+                continue;
+            }
+            best = Some((
+                kind,
+                depth,
+                Hit {
+                    item: entry.item,
+                    net: entry.net,
+                    layer: *layer,
+                },
+            ));
         }
         best.map(|(_, _, hit)| hit)
     }
+
+    /// The entries whose cells `reach` touches, each once, and the
+    /// oversize ones; every entry when the reach spans more than
+    /// [`MAX_QUERY_SPAN`] cells.
+    fn candidates(&self, reach: Bounds) -> Vec<usize> {
+        if span_of(reach) > MAX_QUERY_SPAN {
+            return (0..self.entries.len()).collect();
+        }
+        let mut seen: Vec<usize> = self.oversize.clone();
+        for cell in cells_of(reach) {
+            for &index in self.cells.get(&cell).into_iter().flatten() {
+                if !seen.contains(&index) {
+                    seen.push(index);
+                }
+            }
+        }
+        seen
+    }
+}
+
+/// How many cells `bounds` spans on its longer axis.
+fn span_of(bounds: Bounds) -> i64 {
+    let across = cell_of(bounds.max.x).saturating_sub(cell_of(bounds.min.x));
+    let down = cell_of(bounds.max.y).saturating_sub(cell_of(bounds.min.y));
+    across.max(down).saturating_add(1)
 }
 
 /// Every cell `bounds` reaches.
@@ -729,37 +772,59 @@ mod tests {
         )
     }
 
-    #[test_case((10.0, 10.0), 0.0, &["F.Cu", "B.Cu"], Some(Kind::Pad), Some("F.Cu"); "the pad wins over everything under it")]
-    #[test_case((10.0, 10.0), 0.0, &["B.Cu"], Some(Kind::Via), Some("B.Cu"); "on the back only the via reaches")]
-    #[test_case((15.0, 10.0), 0.0, &["F.Cu"], Some(Kind::Track), Some("F.Cu"); "the track wins over the zone")]
-    #[test_case((15.0, 10.3), 0.0, &["F.Cu"], Some(Kind::Zone), Some("F.Cu"); "just off the track is the zone")]
-    #[test_case((15.0, 10.3), 0.25, &["F.Cu"], Some(Kind::Track), Some("F.Cu"); "a tolerance reaches the track")]
-    #[test_case((15.0, 20.0), 0.0, &["F.Cu"], Some(Kind::Zone), Some("F.Cu"); "a hidden layer's track is not hit")]
-    #[test_case((15.0, 20.0), 0.0, &["F.Cu", "B.Cu"], Some(Kind::Track), Some("B.Cu"); "the back track shows through the zone")]
-    #[test_case((40.0, 40.0), 0.0, &["F.Cu", "B.Cu"], None, None; "empty space")]
-    #[test_case((31.0, 10.0), 0.5, &["F.Cu"], None, None; "just past the zone with a small tolerance")]
-    #[test_case((31.0, 10.0), 1.5, &["F.Cu"], Some(Kind::Zone), Some("F.Cu"); "a tolerance reaches the zone's edge")]
+    #[test_case((10.0, 10.0), 0.0, &["F.Cu", "B.Cu"], Some((Kind::Pad, "F.Cu", "GND")); "the pad wins over everything under it")]
+    #[test_case((10.0, 10.0), 0.0, &["B.Cu"], Some((Kind::Via, "B.Cu", "GND")); "on the back only the via reaches")]
+    #[test_case((15.0, 10.0), 0.0, &["F.Cu"], Some((Kind::Track, "F.Cu", "GND")); "the track wins over the zone")]
+    #[test_case((15.0, 10.3), 0.0, &["F.Cu"], Some((Kind::Zone, "F.Cu", "GND")); "just off the track is the zone")]
+    #[test_case((15.0, 10.3), 0.25, &["F.Cu"], Some((Kind::Track, "F.Cu", "GND")); "a tolerance reaches the track")]
+    #[test_case((15.0, 20.0), 0.0, &["F.Cu"], Some((Kind::Zone, "F.Cu", "GND")); "a hidden layer's track is not hit")]
+    #[test_case((15.0, 20.0), 0.0, &["F.Cu", "B.Cu"], Some((Kind::Track, "B.Cu", "VCC")); "the back track shows through the zone")]
+    #[test_case((40.0, 40.0), 0.0, &["F.Cu", "B.Cu"], None; "empty space")]
+    #[test_case((31.0, 10.0), 0.5, &["F.Cu"], None; "just past the zone with a small tolerance")]
+    #[test_case((31.0, 10.0), 1.5, &["F.Cu"], Some((Kind::Zone, "F.Cu", "GND")); "a tolerance reaches the zone's edge")]
+    #[test_case((15.0, 10.0), 500.0, &["F.Cu"], Some((Kind::Pad, "F.Cu", "GND")); "a reach wider than the query span scans everything, and the pad is within it")]
+    #[test_case((15.0, 10.0), f64::INFINITY, &["F.Cu"], Some((Kind::Track, "F.Cu", "GND")); "an infinite tolerance counts as none")]
+    #[test_case((f64::NAN, 10.0), 0.0, &["F.Cu"], None; "a point that is not a number hits nothing")]
     fn the_topmost_item_of_the_best_kind_is_hit(
         point: (f64, f64),
         tolerance: f64,
         layers: &[&str],
-        kind: Option<Kind>,
-        on: Option<&str>,
+        expected: Option<(Kind, &str, &str)>,
     ) {
         let board = stacked();
         let index = Index::build(&board);
         let layers: Vec<LayerId> = layers.iter().map(|name| layer(&board, name)).collect();
         let hit = index.hit(at(point.0, point.1), tolerance, &layers);
-        assert_eq!(hit.map(|hit| hit.kind), kind, "{hit:?}");
-        assert_eq!(hit.map(|hit| hit.layer), on.map(|name| layer(&board, name)));
-        if let Some(hit) = hit {
-            let expected = if hit.kind == Kind::Track && on == Some("B.Cu") {
-                "VCC"
-            } else {
-                "GND"
-            };
-            assert_eq!(hit.net, net(&board, expected));
-        }
+        let found = hit.map(|hit| (hit.item.kind(), hit.layer, hit.net));
+        assert_eq!(
+            found,
+            expected.map(|(kind, on, net_name)| (kind, layer(&board, on), net(&board, net_name))),
+            "{hit:?}"
+        );
+    }
+
+    #[test]
+    fn a_coordinate_a_million_miles_off_builds_at_once_and_is_still_hit() {
+        // A crafted file: one segment from the board to 1e12 mm. Binned
+        // cell by cell it would be a continent of cells; it goes to the
+        // oversize list instead and is hit like any other.
+        let board = board(&format!(
+            "{}{}",
+            r#"(segment (start 0 0) (end 1000000000000 0) (width 0.2) (layer "F.Cu") (net "GND"))"#,
+            r#"(segment (start 0 10) (end 10 10) (width 0.2) (layer "F.Cu") (net "VCC"))"#,
+        ));
+        let index = Index::build(&board);
+        assert_eq!(index.len(), 2);
+        let f_cu = [layer(&board, "F.Cu")];
+        let far = index
+            .hit(at(500.0, 0.0), 0.0, &f_cu)
+            .expect("the long segment");
+        assert_eq!(far.net, net(&board, "GND"));
+        let near = index
+            .hit(at(5.0, 10.0), 0.0, &f_cu)
+            .expect("the short segment");
+        assert_eq!(near.net, net(&board, "VCC"));
+        assert_eq!(index.hit(at(5.0, 5.0), 0.0, &f_cu), None);
     }
 
     #[test]
@@ -801,7 +866,8 @@ mod tests {
         let index = Index::build(&board);
         let f_cu = [layer(&board, "F.Cu")];
         let b_cu = [layer(&board, "B.Cu")];
-        let kind = |point: Point, layers: &[LayerId]| index.hit(point, 0.0, layers).map(|h| h.kind);
+        let kind =
+            |point: Point, layers: &[LayerId]| index.hit(point, 0.0, layers).map(|h| h.item.kind());
         assert_eq!(kind(at(10.0, 8.0), &f_cu), Some(Kind::Pad));
         assert_eq!(kind(at(12.0, 10.0), &f_cu), None);
         // The arc's top is at (25, 5).
@@ -832,7 +898,7 @@ mod tests {
         let hit = index
             .hit(at(122.45, 55.15), 0.0, &f_cu)
             .expect("LED6's pad 3");
-        assert_eq!(hit.kind, Kind::Pad);
+        assert_eq!(hit.item.kind(), Kind::Pad);
         assert_eq!(hit.net, net(board, "GND"));
         let Item::Pad { footprint, pad } = hit.item else {
             panic!("{hit:?}");
@@ -844,7 +910,7 @@ mod tests {
         );
         // The first via in the file, at (115.7, 51.8), on LED5's VDD.
         let via = index.hit(at(115.7, 51.8), 0.0, &f_cu).expect("a via");
-        assert_eq!(via.kind, Kind::Via);
+        assert_eq!(via.item.kind(), Kind::Via);
         assert_eq!(via.net, net(board, "Net-(LED5-VDD)"));
         // Outside the outline is empty space, with any tolerance a
         // screen allows.

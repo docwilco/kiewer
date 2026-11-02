@@ -128,6 +128,18 @@ _Avoid_: level of detail, LOD
 The point inside a zone's fill farthest from every edge of it; where the zone's net label sits.
 _Avoid_: centroid, centre (both can fall outside a fill with a hole)
 
+**Hit test**:
+The answer to what copper is under a point on the board: a pad over a via over a track over a zone, on the layers the view shows, within a few pixels of the pointer.
+_Avoid_: picking, selection
+
+**Net highlight**:
+The viewer showing one net lit and everything else dimmed: the net under the pointer, or the pinned one.
+_Avoid_: selection, focus
+
+**Pinned net**:
+The net a click fixed the highlight on; it stays through pan, zoom and hover until Escape or a click on empty space.
+_Avoid_: selected net, locked net
+
 **Stroke font**:
 Newstroke, KiCad's built-in line font, bundled in kiewer and used for every text item that names no face. Its glyph table is regenerated from the font's CC0 sources by `newstroke_dev`.
 

@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use kicad_core::font::outline::{self, FaceMetrics};
 use kicad_core::font::placed_texts;
+use kicad_core::geometry::Bounds;
 use kicad_core::hit::{Hit, find_footprint, footprint_bounds, net_pads};
 use kicad_core::labels::LabelClass;
 use kicad_core::model::{Board, LayerId, Point};
@@ -306,7 +307,7 @@ impl Viewer {
             fit_scale: 0.0,
             board: None,
             system_faces: BTreeMap::new(),
-            highlight: Highlight::none(),
+            highlight: Highlight::default(),
         })
     }
 
@@ -394,7 +395,7 @@ impl Viewer {
         self.system_faces.clear();
         self.scene = None;
         self.board = None;
-        self.highlight = Highlight::none();
+        self.highlight = Highlight::default();
         self.camera.set_mirrored(false);
         self.camera.fit(sheet.bounds);
         self.fit_scale = self.camera.scale();
@@ -613,21 +614,14 @@ impl Viewer {
     )]
     fn label_frame(&self) -> Option<LabelFrame> {
         let scene = self.scene.as_ref()?;
-        let view = scene.view(&self.state)?;
-        let layers = scene
-            .stack
-            .order(view.top)
-            .into_iter()
-            .filter(|layer| {
-                matches!(layer, Layer::Copper(_)) && self.state.opacity(view, layer).is_some()
-            })
-            .collect();
+        scene.view(&self.state)?;
         Some(LabelFrame {
             px_per_mm: self.camera.scale() as f32,
             threshold_px: self.state.labels.threshold,
             mirrored: self.camera.mirrored(),
             classes: self.state.labels.mask(),
-            layers,
+            layers: highlight::shown_copper(scene, &self.state),
+            dim: self.highlight.dim(),
         })
     }
 
@@ -1099,18 +1093,28 @@ impl Viewer {
     }
 
     /// Frame the footprint whose reference designator is `reference`,
-    /// letter case aside. False, with the camera untouched, when the
-    /// board has no such footprint.
+    /// letter case aside; one with neither pads nor graphics is framed
+    /// as a millimetre around its origin. False, with the camera
+    /// untouched, when the board has no such footprint.
     pub fn search_reference(&mut self, reference: &str) -> bool {
         let Some(board) = &self.board else {
             return false;
         };
-        let Some(bounds) = find_footprint(board, reference)
-            .and_then(|index| board.footprints.get(index))
-            .and_then(footprint_bounds)
+        let Some(footprint) =
+            find_footprint(board, reference).and_then(|index| board.footprints.get(index))
         else {
             return false;
         };
+        let bounds = footprint_bounds(footprint).unwrap_or(Bounds {
+            min: Point {
+                x: footprint.at.x - 1.0,
+                y: footprint.at.y - 1.0,
+            },
+            max: Point {
+                x: footprint.at.x + 1.0,
+                y: footprint.at.y + 1.0,
+            },
+        });
         highlight::go_to_footprint(&mut self.camera, bounds);
         true
     }
@@ -1120,19 +1124,10 @@ impl Viewer {
     /// The item under the screen point (`x`, `y`) on the copper layers
     /// the view in force shows, top first, within [`SLOP_PX`] pixels.
     fn hit_at(&self, x: f64, y: f64) -> Option<Hit> {
-        let (board, scene, view) = (
-            self.board.as_ref()?,
-            self.scene.as_ref()?,
-            self.current_view()?,
-        );
-        let layers: Vec<LayerId> = scene
-            .stack
-            .order(view.top)
+        let (board, scene) = (self.board.as_ref()?, self.scene.as_ref()?);
+        let layers: Vec<LayerId> = highlight::shown_copper(scene, &self.state)
             .into_iter()
             .rev()
-            .filter(|layer| {
-                matches!(layer, Layer::Copper(_)) && self.state.opacity(view, layer).is_some()
-            })
             .filter_map(|layer| board.layer_named(&layer.to_string()))
             .collect();
         let world = self.camera.screen_to_world(Point { x, y });
