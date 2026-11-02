@@ -18,7 +18,7 @@ use serde::Deserialize;
 use super::AppState;
 use super::auth::{Settled, personal};
 use crate::account::Handle;
-use crate::design::{self, Design, ForkSource, Slug};
+use crate::design::{Design, ForkSource, Slug};
 use crate::error::{Error, Refusal, Result};
 use crate::fork::{self, Take};
 
@@ -84,12 +84,12 @@ impl ForkedFromView {
         let design_url = format!("/{}/{}", source.handle, source.slug);
         let revision_url = source
             .revision
-            .filter(|_| source.exists && source.reachable)
+            .filter(|_| source.reachable)
             .map(|hash| format!("{design_url}/r/{hash}"));
         Self {
             handle: source.handle.clone(),
             slug: source.slug.clone(),
-            url: source.exists.then_some(design_url),
+            url: source.design_id.map(|_| design_url),
             revision: source.revision.map(|hash| hash.to_string()),
             short: source.revision.map(|hash| hash.short()).unwrap_or_default(),
             revision_url,
@@ -120,16 +120,14 @@ pub(super) async fn make(
     let (Ok(handle), Ok(slug)) = (handle.parse::<Handle>(), slug.parse::<Slug>()) else {
         return Ok(not_found(settled));
     };
-    let Some((source, owner)) = design::find(&state.db, handle.as_str(), slug.as_str()).await?
-    else {
-        return Ok(not_found(settled));
-    };
-    match fork::fork(&state.db, settled.account_id, &source, &owner, form.take).await {
+    match fork::fork(&state.db, settled.account_id, &handle, &slug, form.take).await {
         Ok(forked) => {
-            let next = format!("/{}/{}", settled.handle, forked.design.slug);
+            let next = format!("/{}/{}", settled.handle, forked.slug);
             Ok(personal(settled.jar, Redirect::to(&next)))
         }
-        Err(Error::Refused(refusal @ Refusal::NoSuchBranch { .. })) => {
+        Err(Error::Refused(
+            refusal @ (Refusal::NoSuchDesign { .. } | Refusal::NoSuchBranch { .. }),
+        )) => {
             tracing::info!(%refusal, design = %slug, "fork refused");
             Ok(not_found(settled))
         }

@@ -195,11 +195,10 @@ async fn fork(
         .await
 }
 
-/// The id, the slug and the creation time of the design at
-/// `/{handle}/{slug}`.
-async fn design_row(db: &PgPool, handle: &Handle, slug: &str) -> (i64, String, String) {
-    sqlx::query_as(
-        "SELECT d.id, d.slug, d.created_at::text FROM design d
+/// The id of the design at `/{handle}/{slug}`.
+async fn design_id(db: &PgPool, handle: &Handle, slug: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT d.id FROM design d
          JOIN account a ON a.id = d.owner_id WHERE a.handle = $1 AND d.slug = $2",
     )
     .bind(handle.as_str())
@@ -209,18 +208,44 @@ async fn design_row(db: &PgPool, handle: &Handle, slug: &str) -> (i64, String, S
     .expect("the design's row")
 }
 
-/// The fork at `/{handle}/{slug}` wrote design, branch and
-/// `design_revision` rows and nothing else: every revision it reaches
-/// was in the source's index already, and no revision, tree or blob row
-/// the fork reaches is as young as the fork (the creation times are
-/// Postgres's, read in the same database).
-async fn assert_fork_wrote_no_content_rows(
+/// The fork at `/{handle}/{slug}` wrote one design row, `branches` branch
+/// rows, `revisions` `design_revision` rows and nothing else. Rows are
+/// counted by the transaction that wrote them, the `xmin` of the fork's
+/// design row, which no test running beside this one can share: a count
+/// of the tables before and after could not tell the two apart, and a
+/// walk from the fork would miss a row nothing points at. Every revision
+/// the fork reaches is then the source's, and every branch is a source
+/// branch at its head, last moved when the source's did.
+async fn assert_fork_wrote(
     db: &PgPool,
     source: i64,
-    fork_handle: &Handle,
-    fork_slug: &str,
+    fork: (&Handle, &str),
+    branches: i64,
+    revisions: i64,
 ) {
-    let (fork, _, _) = design_row(db, fork_handle, fork_slug).await;
+    let fork = design_id(db, fork.0, fork.1).await;
+    let written: Vec<i64> = sqlx::query_scalar(
+        "WITH fork AS (SELECT xmin::text AS tx FROM design WHERE id = $1)
+         SELECT ARRAY[
+             (SELECT count(*) FROM design t, fork WHERE t.xmin::text = fork.tx),
+             (SELECT count(*) FROM branch t, fork WHERE t.xmin::text = fork.tx),
+             (SELECT count(*) FROM design_revision t, fork WHERE t.xmin::text = fork.tx),
+             (SELECT count(*) FROM revision t, fork WHERE t.xmin::text = fork.tx),
+             (SELECT count(*) FROM tree t, fork WHERE t.xmin::text = fork.tx),
+             (SELECT count(*) FROM tree_entry t, fork WHERE t.xmin::text = fork.tx),
+             (SELECT count(*) FROM blob t, fork WHERE t.xmin::text = fork.tx)
+         ]",
+    )
+    .bind(fork)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    assert_eq!(
+        written,
+        [1, branches, revisions, 0, 0, 0, 0],
+        "rows written: design, branch, design_revision, then none of \
+         revision, tree, tree_entry or blob"
+    );
     let foreign: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM design_revision f
          WHERE f.design_id = $1
@@ -236,32 +261,12 @@ async fn assert_fork_wrote_no_content_rows(
         foreign, 0,
         "every revision of the fork is one of the source's"
     );
-    let young: (i64, i64, i64) = sqlx::query_as(
-        "SELECT
-           (SELECT count(*) FROM design_revision dr JOIN revision r ON r.hash = dr.revision_hash
-            WHERE dr.design_id = $1 AND r.created_at >= d.created_at),
-           (SELECT count(*) FROM design_revision dr JOIN revision r ON r.hash = dr.revision_hash
-            JOIN tree t ON t.hash = r.tree_hash
-            WHERE dr.design_id = $1 AND t.created_at >= d.created_at),
-           (SELECT count(*) FROM design_revision dr JOIN revision r ON r.hash = dr.revision_hash
-            JOIN tree_entry te ON te.tree_hash = r.tree_hash JOIN blob b ON b.hash = te.blob_hash
-            WHERE dr.design_id = $1 AND b.created_at >= d.created_at)
-         FROM design d WHERE d.id = $1",
-    )
-    .bind(fork)
-    .fetch_one(db)
-    .await
-    .unwrap();
-    assert_eq!(
-        young,
-        (0, 0, 0),
-        "no revision, tree or blob row is as young as the fork"
-    );
-    let heads: i64 = sqlx::query_scalar(
+    let moved: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM branch f
          WHERE f.design_id = $1
            AND NOT EXISTS (SELECT 1 FROM branch s
-                           WHERE s.design_id = $2 AND s.name = f.name AND s.head_hash = f.head_hash)",
+                           WHERE s.design_id = $2 AND s.name = f.name
+                             AND s.head_hash = f.head_hash AND s.updated_at = f.updated_at)",
     )
     .bind(fork)
     .bind(source)
@@ -269,8 +274,8 @@ async fn assert_fork_wrote_no_content_rows(
     .await
     .unwrap();
     assert_eq!(
-        heads, 0,
-        "every branch of the fork is a source branch at its head"
+        moved, 0,
+        "every branch of the fork is a source branch at its head, last moved when it did"
     );
 }
 
@@ -282,7 +287,7 @@ async fn a_fork_of_the_default_branch_takes_main_alone_and_the_side_branch_is_40
     let (addr, _dir) = server(db.clone()).await;
     let (mut author, _, author_handle) = signed_in(&db, addr).await;
     let (on_main, only_on_side) = two_branches(&mut author, &author_handle, "chain").await;
-    let (source, _, _) = design_row(&db, &author_handle, "chain").await;
+    let source = design_id(&db, &author_handle, "chain").await;
 
     let (mut forker, _, forker_handle) = signed_in(&db, addr).await;
     let made = fork(&mut forker, &author_handle, "chain", "default").await;
@@ -294,7 +299,7 @@ async fn a_fork_of_the_default_branch_takes_main_alone_and_the_side_branch_is_40
         "the browser goes to the fork's page, under the forker's handle at the source's slug"
     );
     assert_eq!(made.header("cache-control"), Some("private, no-store"));
-    assert_fork_wrote_no_content_rows(&db, source, &forker_handle, "chain").await;
+    assert_fork_wrote(&db, source, (&forker_handle, "chain"), 1, 2).await;
 
     let page = http::request(addr, "GET", &fork_path, &[], "").await;
     assert_eq!(page.status, 200, "{}", page.body);
@@ -357,6 +362,21 @@ async fn a_fork_of_the_default_branch_takes_main_alone_and_the_side_branch_is_40
     assert_eq!(status, 200, "a revision main reaches");
     let (status, _) = http::get(addr, &format!("/{author_handle}/chain/r/{only_on_side}")).await;
     assert_eq!(status, 200, "the source still reaches it");
+    // A page also walks the chain, so its 404 cannot show the index is
+    // right; a new branch's start is checked against the index alone.
+    let fork_design = format!("{forker_handle}/chain");
+    let refused = push(
+        &mut forker,
+        &[
+            ("design", &fork_design),
+            ("branch", ""),
+            ("new_branch", "elsewhere"),
+            ("from", &only_on_side),
+        ],
+    )
+    .await;
+    assert_eq!(refused.status, 404, "{}", refused.body);
+    assert!(refused.body.contains("no revision"), "{}", refused.body);
 }
 
 #[tokio::test]
@@ -367,14 +387,14 @@ async fn a_fork_of_all_branches_takes_both_and_reaches_the_side_revision() {
     let (addr, _dir) = server(db.clone()).await;
     let (mut author, _, author_handle) = signed_in(&db, addr).await;
     let (on_main, only_on_side) = two_branches(&mut author, &author_handle, "both").await;
-    let (source, _, _) = design_row(&db, &author_handle, "both").await;
+    let source = design_id(&db, &author_handle, "both").await;
 
     let (mut forker, _, forker_handle) = signed_in(&db, addr).await;
     let made = fork(&mut forker, &author_handle, "both", "all").await;
     assert_eq!(made.status, 303, "{}", made.body);
     let fork_path = format!("/{forker_handle}/both");
     assert_eq!(made.header("location"), Some(fork_path.as_str()));
-    assert_fork_wrote_no_content_rows(&db, source, &forker_handle, "both").await;
+    assert_fork_wrote(&db, source, (&forker_handle, "both"), 2, 3).await;
 
     let page = http::request(addr, "GET", &fork_path, &[], "").await;
     assert_eq!(page.status, 200, "{}", page.body);
@@ -397,15 +417,18 @@ async fn a_fork_of_all_branches_takes_both_and_reaches_the_side_revision() {
         "the side chain, rooted at rev 1: {}",
         side_history.body
     );
+    assert!(
+        side_history
+            .body
+            .contains(&format!("<td>{author_handle}</td>"))
+            && !side_history
+                .body
+                .contains(&format!("<td>{forker_handle}</td>")),
+        "the original author on the side branch too: {}",
+        side_history.body
+    );
     let (status, _) = http::get(addr, &format!("{fork_path}/r/{only_on_side}")).await;
     assert_eq!(status, 200, "the fork reaches the side revision");
-    let fork_revisions: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM design_revision WHERE design_id = $1")
-            .bind(design_row(&db, &forker_handle, "both").await.0)
-            .fetch_one(&db)
-            .await
-            .unwrap();
-    assert_eq!(fork_revisions, 3, "rev 1, rev 2 and the side revision");
 }
 
 #[tokio::test]
@@ -416,7 +439,7 @@ async fn forking_ones_own_design_takes_the_next_free_slug() {
     let (addr, _dir) = server(db.clone()).await;
     let (mut author, _, handle) = signed_in(&db, addr).await;
     two_branches(&mut author, &handle, "mine").await;
-    let (source, _, _) = design_row(&db, &handle, "mine").await;
+    let source = design_id(&db, &handle, "mine").await;
 
     let first = fork(&mut author, &handle, "mine", "default").await;
     assert_eq!(first.status, 303, "{}", first.body);
@@ -425,7 +448,7 @@ async fn forking_ones_own_design_takes_the_next_free_slug() {
         Some(format!("/{handle}/mine-2").as_str()),
         "the slug is taken by the source, so the fork is at the next free one"
     );
-    assert_fork_wrote_no_content_rows(&db, source, &handle, "mine-2").await;
+    assert_fork_wrote(&db, source, (&handle, "mine-2"), 1, 2).await;
     let second = fork(&mut author, &handle, "mine", "default").await;
     assert_eq!(
         second.header("location"),
@@ -488,6 +511,38 @@ async fn a_stranger_forks_an_unlisted_design_by_its_link_and_the_fork_is_unliste
 }
 
 #[tokio::test]
+async fn the_forked_from_line_follows_the_source_to_a_new_slug() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut author, _, author_handle) = signed_in(&db, addr).await;
+    let (on_main, _) = two_branches(&mut author, &author_handle, "moves").await;
+    let (mut forker, _, forker_handle) = signed_in(&db, addr).await;
+    let made = fork(&mut forker, &author_handle, "moves", "default").await;
+    assert_eq!(made.status, 303, "{}", made.body);
+
+    let saved = author
+        .post_form(
+            &format!("/{author_handle}/moves/settings"),
+            "name=moves&slug=moved&description=",
+        )
+        .await;
+    assert_eq!(saved.status, 303, "{}", saved.body);
+    let page = http::request(addr, "GET", &format!("/{forker_handle}/moves"), &[], "").await;
+    assert!(
+        page.body.contains(&format!(
+            r#"Forked from <a href="/{author_handle}/moved">{author_handle}/moved</a>"#
+        )) && page.body.contains(&format!(
+            r#"href="/{author_handle}/moved/r/{}""#,
+            on_main[0]
+        )),
+        "the links go where the source is now: {}",
+        page.body
+    );
+}
+
+#[tokio::test]
 async fn the_forked_from_line_says_so_once_the_source_is_deleted() {
     let Some(db) = pool_from_env().await else {
         return;
@@ -495,7 +550,7 @@ async fn the_forked_from_line_says_so_once_the_source_is_deleted() {
     let (addr, _dir) = server(db.clone()).await;
     let (mut author, _, author_handle) = signed_in(&db, addr).await;
     two_branches(&mut author, &author_handle, "doomed").await;
-    let (source, _, _) = design_row(&db, &author_handle, "doomed").await;
+    let source = design_id(&db, &author_handle, "doomed").await;
     let (mut forker, _, forker_handle) = signed_in(&db, addr).await;
     let made = fork(&mut forker, &author_handle, "doomed", "default").await;
     assert_eq!(made.status, 303, "{}", made.body);

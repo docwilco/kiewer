@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::account::{AccountId, Handle};
-use crate::design::{self, BranchName, Design, Slug};
+use crate::design::{self, Design, Slug};
 use crate::error::{Error, Refusal, Result};
 
 /// Which branches a fork takes. The wire name (`default`, `all`) is the
@@ -43,14 +43,6 @@ impl fmt::Display for Take {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
-}
-
-/// What a fork made.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Forked {
-    pub design: Design,
-    /// The branches taken, by name.
-    pub branches: Vec<BranchName>,
 }
 
 /// The slug a fork of a design at `base` goes under: `base` itself when
@@ -88,9 +80,9 @@ fn numbered(base: &Slug, n: u32) -> Slug {
         .expect("a slug cut at a byte of its own and a hyphen plus digits is a slug")
 }
 
-/// `source` (the design at `/{source_owner}/{source.slug}`) forked into
-/// `forker`'s account, taking `take`'s branches, in one transaction: the
-/// source's branches are read and held, the design row is made at the
+/// The design at `/{source_owner}/{source_slug}` forked into `forker`'s
+/// account, taking `take`'s branches, in one transaction: the source's
+/// row and branches are read and held, the design row is made at the
 /// next free slug with the source's name, default branch and visibility
 /// and the fork source recorded, the branches copied at their heads,
 /// and the fork's index of its revisions built by walking their chains.
@@ -98,23 +90,30 @@ fn numbered(base: &Slug, n: u32) -> Slug {
 ///
 /// # Errors
 ///
-/// [`Error::Refused`] with [`Refusal::NoSuchBranch`] when the source's
-/// default branch has no head (a design with no revision yet has no
-/// page to fork from either), with [`Refusal::SlugTaken`] when another
-/// fork took the slug in the same instant; [`Error::Db`] when Postgres
-/// refuses.
+/// [`Error::Refused`] with [`Refusal::NoSuchDesign`] when nothing is at
+/// the path, with [`Refusal::NoSuchBranch`] when the source's default
+/// branch has no head (a design with no revision yet has no page to
+/// fork from either), with [`Refusal::SlugTaken`] when another fork took
+/// the slug in the same instant; [`Error::Db`] when Postgres refuses.
 pub async fn fork(
     db: &PgPool,
     forker: AccountId,
-    source: &Design,
     source_owner: &Handle,
+    source_slug: &Slug,
     take: Take,
-) -> Result<Forked> {
+) -> Result<Design> {
     let mut tx = db.begin().await?;
-    // A read first, against the usual write-first rule, because it is a
-    // locking one: FOR SHARE on the source's branch rows makes a push
-    // that would move a head wait for this commit, so what is copied is
-    // what was read.
+    // Reads first, against the usual write-first rule, because they are
+    // locking ones: FOR SHARE on the source's row and its branch rows
+    // makes a change to the design or a push that would move a head wait
+    // for this commit, so what is inherited and copied is what was read.
+    let source = design::lock_at(&mut tx, source_owner, source_slug)
+        .await?
+        .ok_or_else(|| {
+            Error::Refused(Refusal::NoSuchDesign {
+                slug: format!("{source_owner}/{source_slug}"),
+            })
+        })?;
     let branches = design::lock_branches(&mut tx, source.id).await?;
     let Some(head) = branches
         .iter()
@@ -127,27 +126,23 @@ pub async fn fork(
     };
     let taken = design::slugs_of(&mut tx, forker).await?;
     let slug = next_free_slug(&source.slug, &taken);
-    let fork = design::create_fork(&mut tx, forker, &slug, source, source_owner, head).await?;
+    let fork = design::create_fork(&mut tx, forker, &slug, &source, source_owner, head).await?;
     let names: Vec<&str> = match take {
         Take::Default => vec![source.default_branch.as_str()],
         Take::All => branches.iter().map(|branch| branch.name.as_str()).collect(),
     };
-    let mut copied = design::copy_branches(&mut tx, source.id, fork.id, &names).await?;
-    copied.sort();
-    let reachable = design::rebuild_design_revisions(&mut tx, fork.id).await?;
+    let copied = design::copy_branches(&mut tx, source.id, fork.id, &names).await?;
+    let revisions = design::rebuild_design_revisions(&mut tx, fork.id).await?;
     tx.commit().await?;
     tracing::info!(
         design = %fork.slug,
-        source = %format_args!("{source_owner}/{}", source.slug),
+        source = %format_args!("{source_owner}/{source_slug}"),
         %take,
-        branches = copied.len(),
-        revisions = reachable,
+        branches = copied,
+        revisions,
         "design forked"
     );
-    Ok(Forked {
-        design: fork,
-        branches: copied,
-    })
+    Ok(fork)
 }
 
 #[cfg(test)]
@@ -195,11 +190,12 @@ mod tests {
         let next = next_free_slug(&long, std::slice::from_ref(&long));
         assert_eq!(next.as_str().len(), Slug::MAX_LEN);
         assert!(next.as_str().ends_with("-2"), "{next}");
+    }
+
+    #[test]
+    fn a_hyphen_the_cut_leaves_is_trimmed() {
         let hyphen_at_cut = slug(&format!("{}-x", "b".repeat(Slug::MAX_LEN - 3)));
         let next = next_free_slug(&hyphen_at_cut, std::slice::from_ref(&hyphen_at_cut));
-        assert!(
-            !next.as_str().contains("--"),
-            "a hyphen the cut leaves is trimmed: {next}"
-        );
+        assert!(!next.as_str().contains("--"), "{next}");
     }
 }

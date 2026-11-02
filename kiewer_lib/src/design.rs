@@ -1027,6 +1027,29 @@ async fn entries(db: &PgPool, tree: TreeHash) -> Result<Vec<TreeEntry>> {
         .collect()
 }
 
+/// The design at `/{owner}/{slug}` within a fork's transaction, and
+/// held: a change to its name, slug, visibility or owner waits until the
+/// transaction ends, so what the fork inherits is what the row says as
+/// it commits. [`find_at`] is the same read without the lock.
+///
+/// # Errors
+///
+/// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when the
+/// row's visibility is not one, which the schema forbids.
+pub async fn lock_at(tx: &mut PgConnection, owner: &Handle, slug: &Slug) -> Result<Option<Design>> {
+    let row: Option<DesignRow> = sqlx::query_as(&format!(
+        "SELECT {DESIGN_COLUMNS} FROM design d
+         JOIN account a ON a.id = d.owner_id
+         WHERE a.handle = $1 AND d.slug = $2
+         FOR SHARE OF d"
+    ))
+    .bind(owner.as_str())
+    .bind(slug.as_str())
+    .fetch_optional(tx)
+    .await?;
+    row.map(Design::try_from).transpose()
+}
+
 /// Every branch of `design` with its head, by name, within a fork's
 /// transaction, and held: a push to any of them waits until the
 /// transaction ends, so the branches the fork copies are the ones it
@@ -1126,7 +1149,9 @@ pub async fn create_fork(
 
 /// The branches of `from` named in `names` become branches of `to` at
 /// the same heads, within the fork's transaction after [`lock_branches`]
-/// held them. The names copied come back, by name.
+/// held them; how many. `updated_at` comes along, since it says when the
+/// head last moved and a fork moves no head: a fork is listed where its
+/// source's last push puts it, not at the top of the recent designs.
 ///
 /// # Errors
 ///
@@ -1136,20 +1161,19 @@ pub async fn copy_branches(
     from: DesignId,
     to: DesignId,
     names: &[&str],
-) -> Result<Vec<BranchName>> {
-    let copied: Vec<String> = sqlx::query_scalar(
-        "INSERT INTO branch (design_id, name, head_hash)
-         SELECT $2, b.name, b.head_hash FROM branch b
-         WHERE b.design_id = $1 AND b.name = ANY($3)
-         ORDER BY b.name
-         RETURNING name",
+) -> Result<u64> {
+    let copied = sqlx::query(
+        "INSERT INTO branch (design_id, name, head_hash, updated_at)
+         SELECT $2, b.name, b.head_hash, b.updated_at FROM branch b
+         WHERE b.design_id = $1 AND b.name = ANY($3)",
     )
     .bind(from)
     .bind(to)
     .bind(names)
-    .fetch_all(tx)
-    .await?;
-    Ok(copied.into_iter().map(BranchName::from_row).collect())
+    .execute(tx)
+    .await?
+    .rows_affected();
+    Ok(copied)
 }
 
 /// `design`'s index of its revisions rebuilt from its branches: every
@@ -1184,13 +1208,14 @@ pub struct ForkSource {
     /// source is deleted, the ones the fork recorded.
     pub handle: String,
     pub slug: String,
-    /// Whether the source design still exists.
-    pub exists: bool,
+    /// The source design, or `None` once it is deleted: a fork's pages
+    /// show the source's handle and slug, so they depend on it.
+    pub design_id: Option<DesignId>,
     /// The revision the fork started at, or `None` once the collector
     /// removed it.
     pub revision: Option<RevisionHash>,
     /// Whether the source still reaches that revision, so a link to it
-    /// under the source's URLs resolves.
+    /// under the source's URLs resolves; `false` once the source is gone.
     pub reachable: bool,
 }
 
@@ -1206,6 +1231,7 @@ pub async fn fork_source(db: &PgPool, design: DesignId) -> Result<Option<ForkSou
     struct Row {
         kept_handle: String,
         kept_slug: String,
+        source_id: Option<DesignId>,
         handle: Option<String>,
         slug: Option<String>,
         revision: Option<Vec<u8>>,
@@ -1215,7 +1241,8 @@ pub async fn fork_source(db: &PgPool, design: DesignId) -> Result<Option<ForkSou
     // the reachability by design_revision's key.
     let row: Option<Row> = sqlx::query_as(
         "SELECT d.forked_from_handle AS kept_handle, d.forked_from_slug AS kept_slug,
-                a.handle, s.slug, d.forked_from_revision_hash AS revision,
+                s.id AS source_id, a.handle, s.slug,
+                d.forked_from_revision_hash AS revision,
                 EXISTS (SELECT 1 FROM design_revision dr
                         WHERE dr.design_id = s.id
                           AND dr.revision_hash = d.forked_from_revision_hash) AS reachable
@@ -1239,14 +1266,14 @@ pub async fn fork_source(db: &PgPool, design: DesignId) -> Result<Option<ForkSou
         (Some(handle), Some(slug)) => ForkSource {
             handle,
             slug,
-            exists: true,
+            design_id: row.source_id,
             revision,
             reachable: row.reachable,
         },
         _ => ForkSource {
             handle: row.kept_handle,
             slug: row.kept_slug,
-            exists: false,
+            design_id: None,
             revision,
             reachable: false,
         },
