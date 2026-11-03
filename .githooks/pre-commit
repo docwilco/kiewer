@@ -45,16 +45,17 @@ command -v rsync >/dev/null || {
 git_dir="$(git rev-parse --absolute-git-dir)"
 root="$(git rev-parse --show-toplevel)"
 
-# The snapshot lives outside the repository, one directory per worktree, keyed
-# by the worktree's git directory. Anywhere inside the repository would put it
-# under the checkout's own Cargo.toml, and cargo walks up from the manifest it
-# is building: it would either claim the snapshot as a stray member of the
-# outer workspace or read the outer .cargo/config.toml. Deleting the directory
-# is always safe; the next commit rebuilds it, cold.
-cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/git-pre-commit-snapshots"
-snapshot="$cache_root/$(basename "$root")-$(printf '%s' "$git_dir" |
-  sha256sum | cut -c1-12)"
-mkdir -p "$cache_root"
+# The snapshot lives in the worktree's git directory (.git for the main
+# checkout, .git/worktrees/<id> for a linked one), so `git worktree remove`
+# and `git worktree prune` delete it with the worktree. A directory of its own
+# outside the repository outlived every removed worktree: one per agent, 15
+# to 25 GiB each, never swept again. The snapshot's Cargo.toml declares
+# [workspace], so cargo treats it as a root of its own and never claims it
+# for the checkout's workspace; what cargo does read from above is a
+# .cargo/config.toml in the checkout, which the snapshot's own copy
+# overrides key by key. Deleting the directory is always safe; the next
+# commit rebuilds it, cold.
+snapshot="$git_dir/pre-commit-snapshot"
 
 # One commit at a time per worktree: concurrent runs would race on the
 # snapshot directory and on its build lock.
@@ -110,7 +111,7 @@ fi
 # Export the index git is about to commit. Git points GIT_INDEX_FILE at a
 # temporary index for partial commits, and checkout-index honours it, so the
 # snapshot tracks the real commit content in every commit mode.
-export_dir="$(mktemp -d "$cache_root/export.XXXXXX")"
+export_dir="$(mktemp -d "$git_dir/pre-commit-export.XXXXXX")"
 trap 'rm -rf "$export_dir"' EXIT
 git checkout-index --all --force --prefix="$export_dir/"
 
