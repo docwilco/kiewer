@@ -130,15 +130,23 @@ async fn an_accepted_beacon_is_one_structured_log_line() {
 /// The log-based metric the line feeds.
 const METRIC: &str = include_str!("../../infra/logging.tf");
 
-/// The keys the metric's label extractors read, sorted.
-fn extracted_keys() -> Vec<&'static str> {
-    let mut keys: Vec<&str> = METRIC
-        .split("EXTRACT(jsonPayload.")
-        .skip(1)
-        .map(|rest| rest.split_once(')').expect("the extractor closes").0)
+/// Each of the metric's labels with the `jsonPayload` key its extractor
+/// reads (the `label = "EXTRACT(jsonPayload.key)"` lines), sorted by
+/// label.
+fn extractors() -> Vec<(&'static str, &'static str)> {
+    let mut pairs: Vec<(&str, &str)> = METRIC
+        .lines()
+        .filter_map(|line| {
+            let (label, rest) = line.split_once("= \"EXTRACT(jsonPayload.")?;
+            let key = rest
+                .trim_end()
+                .strip_suffix(")\"")
+                .expect("the extractor closes");
+            Some((label.trim(), key))
+        })
         .collect();
-    keys.sort_unstable();
-    keys
+    pairs.sort_unstable();
+    pairs
 }
 
 /// The key and value of each `jsonPayload` term in the metric's filter.
@@ -162,13 +170,24 @@ async fn the_metric_reads_the_keys_the_line_is_written_with() {
     let lines = log_lines_with(&vendor);
     assert_eq!(lines.len(), 1, "{lines:?}");
     let line = &lines[0];
-    let keys = extracted_keys();
-    assert_eq!(
-        keys,
-        ["backend", "outcome", "userAgentFamily", "webgpuPresent"]
-    );
-    for key in keys {
-        assert!(line.get(key).is_some(), "no {key} in {line}");
+    // What each label must read from the beacon sent above, named by the
+    // label: a misnamed extractor reads nothing, and two swapped ones read
+    // each other's value, since the four values differ.
+    let expected = [
+        ("backend", serde_json::json!("webgpu")),
+        ("outcome", serde_json::json!("ok")),
+        ("user_agent_family", serde_json::json!("chrome")),
+        ("webgpu_present", serde_json::json!(true)),
+    ];
+    let extractors = extractors();
+    let labels: Vec<&str> = extractors.iter().map(|(label, _)| *label).collect();
+    let expected_labels: Vec<&str> = expected.iter().map(|(label, _)| *label).collect();
+    assert_eq!(labels, expected_labels);
+    for ((label, key), (_, value)) in extractors.iter().zip(&expected) {
+        assert_eq!(
+            &line[*key], value,
+            "the {label} label reads jsonPayload.{key}: {line}"
+        );
     }
     let filter = filtered_fields();
     assert_eq!(filter.len(), 2, "{filter:?}");

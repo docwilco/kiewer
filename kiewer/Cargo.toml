@@ -15,8 +15,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
 # The JSON log the server writes when stdout is not a terminal
 # (LOG_FORMAT): one object per event in the shape Cloud Logging reads,
-# severity and time included. No features: the Cloud Trace and httpRequest
-# fields it can write are fed by nothing here. Its own dependency on
+# severity and time included. No features: Cloud Trace correlation (the
+# opentelemetry feature) is fed by nothing here. Its own dependency on
 # tracing-subscriber takes the default features, tracing-log among them
 # (kiewer/src/log.rs says why that matters).
 tracing-stackdriver = "0.10"

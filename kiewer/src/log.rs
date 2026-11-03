@@ -126,27 +126,33 @@ mod tests {
         serde_json::from_str(&buffer.contents()).expect("one JSON object")
     }
 
+    /// An event at `level`, one of the levels the filter passes: the
+    /// macros take a level only as a constant.
+    fn event_at(level: tracing::Level) {
+        match level {
+            tracing::Level::ERROR => tracing::error!("request failed"),
+            tracing::Level::WARN => tracing::warn!("the purge failed"),
+            tracing::Level::INFO => tracing::info!("listening"),
+            _ => panic!("{level} is under the tests' info filter"),
+        }
+    }
+
+    #[test_case(tracing::Level::ERROR, "ERROR" ; "error")]
+    #[test_case(tracing::Level::WARN, "WARNING" ; "warning, as Cloud Logging spells it")]
+    #[test_case(tracing::Level::INFO, "INFO" ; "info")]
+    fn an_event_carries_the_severity_of_its_level(level: tracing::Level, severity: &str) {
+        let line = json_line(|| event_at(level));
+        assert_eq!(line["severity"], severity, "{line}");
+        assert!(line.get("level").is_none(), "{line}");
+    }
+
     #[test]
-    fn an_error_event_is_severity_error_at_its_time() {
+    fn an_event_carries_its_time_in_rfc_3339() {
         let line = json_line(|| tracing::error!(error = "no database", "request failed"));
-        assert_eq!(line["severity"], "ERROR", "{line}");
         let time = line["time"].as_str().expect("a time string");
         assert_eq!(&time[10..11], "T", "RFC 3339: {time}");
         assert!(time.ends_with('Z'), "RFC 3339 in UTC: {time}");
-        assert!(line.get("level").is_none(), "{line}");
         assert!(line.get("timestamp").is_none(), "{line}");
-    }
-
-    #[test]
-    fn a_warning_is_the_severity_cloud_logging_spells_warning() {
-        let line = json_line(|| tracing::warn!("the purge failed"));
-        assert_eq!(line["severity"], "WARNING", "{line}");
-    }
-
-    #[test]
-    fn an_info_event_is_severity_info() {
-        let line = json_line(|| tracing::info!("listening"));
-        assert_eq!(line["severity"], "INFO", "{line}");
     }
 
     #[test]
