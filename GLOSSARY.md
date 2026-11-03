@@ -57,7 +57,7 @@ A blob hash the operator has refused site-wide: not accepted, not served, not re
 _Avoid_: banned file, takedown entry
 
 **Collector**:
-The nightly job that removes revisions no branch reaches, then trees and blobs no revision names, as a file or as a thumbnail.
+The nightly job that removes revisions no branch reaches, then trees and blobs no revision names, as a file or as a thumbnail, then sessions past their expiry and accounts that never chose a handle.
 _Avoid_: garbage collector, GC, cleanup
 
 **Thumbnail**:

@@ -17,6 +17,15 @@
 //! 4. the objects of those blobs, queued in `blob_removal` by the same
 //!    transaction that removed the row.
 //!
+//! Then what has run out, which no branch is involved in (#31):
+//!
+//! 5. sessions past their expiry, site-wide, whether or not their account
+//!    signs in again;
+//! 6. sign-ups: accounts with no handle older than [`GRACE_HOURS`], with
+//!    their identities and sessions by cascade. A handleless account can
+//!    own and author nothing, so nothing else goes with it, and the
+//!    person who comes back signs in again and gets a fresh account.
+//!
 //! Every step is a statement that finds its own work, so a second run
 //! finds nothing, and a run cut short leaves work the next one finds: a
 //! crash after a blob's row went leaves its `blob_removal` row, and the
@@ -25,6 +34,13 @@
 //! Steps 1 to 3 each read a whole table that grows for the life of the
 //! site, which no other statement here does: what nothing names has no
 //! index to find it by. They run once a night, with no person waiting.
+//! Steps 5 and 6 are index ranges: `session_expires_at`, and the unique
+//! index on `account.handle`, which holds the nulls.
+//!
+//! A handle chosen in the instant a sign-up goes is safe: the delete
+//! waits on the row the choice updates and then reads its new handle,
+//! so the account stays. If the delete commits first, the choice finds no
+//! row and fails, and the person signs in again.
 //!
 //! # A concurrent upload
 //!
@@ -92,6 +108,10 @@ pub struct Collected {
     /// Objects deleted from the store, which may be from an earlier run
     /// that did not finish.
     pub objects: u64,
+    /// Sessions past their expiry.
+    pub sessions: u64,
+    /// Accounts that never chose a handle, past the grace.
+    pub sign_ups: u64,
 }
 
 impl fmt::Display for Collected {
@@ -102,10 +122,12 @@ impl fmt::Display for Collected {
             trees,
             blobs,
             objects,
+            sessions,
+            sign_ups,
         } = self;
         write!(
             f,
-            "{pending} pending revisions, {revisions} revisions, {trees} trees, {blobs} blobs, {objects} objects"
+            "{pending} pending revisions, {revisions} revisions, {trees} trees, {blobs} blobs, {objects} objects, {sessions} sessions, {sign_ups} sign-ups"
         )
     }
 }
@@ -146,7 +168,8 @@ async fn claim(db: &PgPool, hash: &BlobHash, size: u64) -> Result<()> {
 }
 
 /// One night's work: everything nothing names and the grace no longer
-/// covers, and what a run before it did not finish. Each step commits
+/// covers, the sessions and sign-ups that have run out, and what a run
+/// before it did not finish. Each step commits
 /// on its own, since each is a whole outcome and the next run redoes
 /// nothing of it.
 ///
@@ -162,13 +185,44 @@ pub async fn run(db: &PgPool, blobs: &dyn BlobStore) -> Result<Collected> {
     let trees = remove_trees(db).await?;
     let removed_blobs = remove_blobs(db).await?;
     let objects = remove_objects(db, blobs).await?;
+    let sessions = remove_sessions(db).await?;
+    let sign_ups = remove_sign_ups(db).await?;
     Ok(Collected {
         pending: expired,
         revisions,
         trees,
         blobs: removed_blobs,
         objects,
+        sessions,
+        sign_ups,
     })
+}
+
+/// Step 5's statement, public so that the plan test in
+/// `tests/collector.rs` plans the text the run executes.
+pub const EXPIRED_SESSIONS: &str = "DELETE FROM session WHERE expires_at <= now()";
+
+/// Step 5. The per-account sweep in [`crate::session::start`] stays: it
+/// keeps an account that signs in often tidy between runs.
+async fn remove_sessions(db: &PgPool) -> Result<u64> {
+    Ok(sqlx::query(EXPIRED_SESSIONS)
+        .execute(db)
+        .await?
+        .rows_affected())
+}
+
+/// Step 6. The grace counts from the account's first sign-in, which a
+/// later sign-in does not move: a day is long enough to pick a handle.
+async fn remove_sign_ups(db: &PgPool) -> Result<u64> {
+    let removed = sqlx::query(
+        "DELETE FROM account
+         WHERE handle IS NULL AND created_at <= now() - make_interval(hours => $1)",
+    )
+    .bind(GRACE_HOURS)
+    .execute(db)
+    .await?
+    .rows_affected();
+    Ok(removed)
 }
 
 /// Step 1. The mark and the sweep are one statement, so one snapshot:

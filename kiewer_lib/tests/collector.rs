@@ -2,6 +2,8 @@
 //! trees and blobs no revision names, anything younger than 24 hours
 //! stays, a second run finds nothing, a run cut short leaves work the
 //! next one finds, and a concurrent upload of the same bytes survives.
+//! After those, expired sessions and day-old accounts with no handle go
+//! (#31), the sessions by an index range.
 //! A run acts on the whole database, so the tests here take turns, and
 //! each ages only its own rows to bring them inside what a run removes.
 //! The Postgres tests skip without `DATABASE_URL`, like `tests/db.rs`.
@@ -24,7 +26,7 @@ use kiewer_lib::blob::{BlobHash, BlobStore, PutReceipt};
 use kiewer_lib::cache::NoPurge;
 use kiewer_lib::collector::{self, Collected};
 use kiewer_lib::revision::{RevisionHash, TreeEntry};
-use kiewer_lib::session;
+use kiewer_lib::session::{self, SessionId};
 use kiewer_lib::thumbnail::{NoTasks, TaskAuth, Thumbnails};
 use kiewer_lib::web::AppState;
 use kiewer_lib::{Error, Result, design};
@@ -174,6 +176,57 @@ async fn has_tree(db: &PgPool, tree: &[u8]) -> bool {
         .expect("a read")
 }
 
+/// A first sign-in that goes no further: an account with no handle, and
+/// the provider id that signs in to it.
+async fn sign_up(db: &PgPool) -> (AccountId, ProviderUser) {
+    let user = ProviderUser {
+        id: fresh("gh"),
+        login: "swept".to_owned(),
+        email: None,
+    };
+    let signed_in = account::sign_in(db, Provider::GitHub, &user)
+        .await
+        .expect("sign in");
+    (signed_in.account_id, user)
+}
+
+/// `account` made older than the grace.
+async fn age_account(db: &PgPool, account: AccountId) {
+    sqlx::query("UPDATE account SET created_at = created_at - interval '25 hours' WHERE id = $1")
+        .bind(account)
+        .execute(db)
+        .await
+        .expect("aged");
+}
+
+/// `id`'s row past its expiry. The row is keyed by the SHA-256 of the
+/// id's text form, as `tests/accounts.rs` finds it.
+async fn expire_session(db: &PgPool, id: SessionId) {
+    sqlx::query(
+        "UPDATE session SET expires_at = now() - interval '1 second' WHERE id_hash = sha256($1)",
+    )
+    .bind(id.to_string().into_bytes())
+    .execute(db)
+    .await
+    .expect("expired");
+}
+
+async fn has_session(db: &PgPool, id: SessionId) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM session WHERE id_hash = sha256($1))")
+        .bind(id.to_string().into_bytes())
+        .fetch_one(db)
+        .await
+        .expect("a read")
+}
+
+async fn has_account(db: &PgPool, account: AccountId) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM account WHERE id = $1)")
+        .bind(account)
+        .fetch_one(db)
+        .await
+        .expect("a read")
+}
+
 /// One run that must succeed.
 async fn run(db: &PgPool, blobs: &dyn BlobStore) -> Collected {
     collector::run(db, blobs).await.expect("a run")
@@ -318,10 +371,100 @@ async fn a_second_run_finds_nothing() {
     let revision = head(&db, &handle, "once").await;
     delete_design(&mut author, &handle, "once", "once").await;
     age(&db, &[revision]).await;
+    let (abandoned, _) = sign_up(&db).await;
+    let lapsed = session::start(&db, abandoned).await.expect("a session");
+    expire_session(&db, lapsed).await;
+    age_account(&db, abandoned).await;
 
     let first = run(&db, blobs.as_ref()).await;
-    assert!(first.revisions >= 1 && first.blobs >= 1, "{first}");
+    assert!(
+        first.revisions >= 1 && first.blobs >= 1 && first.sessions >= 1 && first.sign_ups >= 1,
+        "{first}"
+    );
     assert_eq!(run(&db, blobs.as_ref()).await, Collected::default());
+}
+
+#[tokio::test]
+async fn an_expired_session_goes_though_its_account_never_signs_in_again() {
+    let _turn = TURN.lock().await;
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let dir = scratch_dir!();
+    let blobs = FsBlobStore::new(dir.path());
+    let (account, _) = sign_up(&db).await;
+    let handle: Handle = fresh("c").parse().expect("a handle");
+    account::choose_handle(&db, account, &handle)
+        .await
+        .expect("choose");
+    let expired = session::start(&db, account).await.expect("a session");
+    let live = session::start(&db, account).await.expect("a session");
+    expire_session(&db, expired).await;
+
+    let collected = run(&db, &blobs).await;
+
+    assert!(collected.sessions >= 1, "{collected}");
+    assert!(!has_session(&db, expired).await);
+    assert!(has_session(&db, live).await);
+    assert!(has_account(&db, account).await);
+}
+
+#[tokio::test]
+async fn a_sign_up_with_no_handle_goes_after_a_day_with_its_identities() {
+    let _turn = TURN.lock().await;
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let dir = scratch_dir!();
+    let blobs = FsBlobStore::new(dir.path());
+    let (abandoned, user) = sign_up(&db).await;
+    let abandoned_session = session::start(&db, abandoned).await.expect("a session");
+    age_account(&db, abandoned).await;
+    let (young, _) = sign_up(&db).await;
+    let (named, _) = sign_up(&db).await;
+    let handle: Handle = fresh("c").parse().expect("a handle");
+    account::choose_handle(&db, named, &handle)
+        .await
+        .expect("choose");
+    age_account(&db, named).await;
+
+    let collected = run(&db, &blobs).await;
+
+    assert!(collected.sign_ups >= 1, "{collected}");
+    assert!(!has_account(&db, abandoned).await);
+    assert!(!has_session(&db, abandoned_session).await);
+    assert!(has_account(&db, young).await, "younger than the grace");
+    assert!(has_account(&db, named).await, "it chose a handle");
+    // The identity went with the account, so the same person's next
+    // sign-in makes a fresh one.
+    let again = account::sign_in(&db, Provider::GitHub, &user)
+        .await
+        .expect("sign in");
+    assert!(again.is_new);
+    assert_ne!(again.account_id, abandoned);
+}
+
+/// The run's sweep of expired sessions, planned with sequential scans
+/// priced out: on a table this small the planner scans whenever it may,
+/// so a plan that still scans is one with no index to read.
+#[tokio::test]
+async fn the_sweep_of_expired_sessions_reads_its_index() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let mut tx = db.begin().await.expect("a transaction");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("set");
+    let explain = format!("EXPLAIN {}", collector::EXPIRED_SESSIONS);
+    let lines: Vec<String> = sqlx::query_scalar(&explain)
+        .fetch_all(&mut *tx)
+        .await
+        .expect("a plan");
+    let plan = lines.join("\n");
+    assert!(!plan.contains("Seq Scan"), "{plan}");
+    assert!(plan.contains("session_expires_at"), "{plan}");
 }
 
 /// The blob of an aged revision no branch reaches, as a tree entry.
