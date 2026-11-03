@@ -133,7 +133,7 @@ pub enum Refusal {
     /// The files together are over the per-revision cap.
     #[display("the files together are larger than {limit_mb} MB, the limit for one revision")]
     RevisionTooLarge { limit_mb: u64 },
-    /// The whole body, files the upload leaves out included, is over the
+    /// The whole body, the dropped files included, is over the
     /// upload route's body limit (`upload::BODY_LIMIT`). `limit_mb` is the
     /// per-revision cap the limit is built on, not the limit itself: the
     /// framing allowance on top is the server's, not the uploader's.

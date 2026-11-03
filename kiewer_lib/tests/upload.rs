@@ -1298,8 +1298,8 @@ const REVISION_CAP_MESSAGE: &str =
 #[tokio::test]
 async fn an_upload_over_a_size_limit_is_refused_naming_that_limit(
     files: &[(&str, usize)],
-    said: &str,
-    not_said: &str,
+    names: &str,
+    does_not_name: &str,
 ) {
     let Some(db) = pool_from_env().await else {
         return;
@@ -1309,8 +1309,8 @@ async fn an_upload_over_a_size_limit_is_refused_naming_that_limit(
     let response = post_zeros(&browser, files).await;
     let status = response.split_whitespace().nth(1);
     assert_eq!(status, Some("413"), "{response}");
-    assert!(response.contains(said), "{response}");
-    assert!(!response.contains(not_said), "{response}");
+    assert!(response.contains(names), "{response}");
+    assert!(!response.contains(does_not_name), "{response}");
     assert!(
         response.contains(r#"enctype="multipart/form-data""#),
         "the form again, as for any refusal: {response}"

@@ -113,8 +113,11 @@ impl Limits {
 /// with room for the multipart framing and the text fields. The parts are
 /// read as they arrive, so the body is refused where the read passes it,
 /// with what came before already received, and the refusal is
-/// `Refusal::UploadTooLarge`. The kept files meet the revision cap first,
-/// so the limit refuses an upload only for the bytes it leaves out.
+/// `Refusal::UploadTooLarge`. Which of this limit and the revision cap
+/// refuses first depends on the order of the body: once the dropped files
+/// and the framing before a byte pass 1 MiB, this limit is met before the
+/// kept files reach the cap, even when it is the kept files that are too
+/// large.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "201 MiB fits a usize on every target the server builds for (64-bit)"

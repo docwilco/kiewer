@@ -400,8 +400,8 @@ pub(super) fn status(refusal: &Refusal) -> StatusCode {
 }
 
 /// A multipart failure as a refusal: the body limit's 413 is a refusal
-/// of its own, since the files left out count against it as well as
-/// the kept ones; anything else is a body the server could not read.
+/// of its own, since the dropped files count against it as well as the
+/// kept ones; anything else is a body the server could not read.
 fn multipart_refusal(error: &MultipartError) -> Refusal {
     if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
         Refusal::UploadTooLarge {
