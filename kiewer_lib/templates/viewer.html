@@ -609,11 +609,12 @@ window.addEventListener("kiewer-board", function (e) {
 // clears them all, and Ctrl or Cmd with Z steps back. The search box takes a
 // reference designator, whatever its case, and frames the footprint, or
 // says it is not on the board. This block's listeners sit beside the
-// shared page script's (kiewer_viewer_page.js): hover is a mouse move with no button held (a drag is a
-// pan, and a touch has no hover), and a click is the browser's own
-// click event, which a middle or right drag never sends; a left drag or
-// a touch pan that still ends in one is told apart by how far the
-// pointer moved since it went down (CLICK_SLOP), and ignored.
+// shared page script's (kiewer_lib/assets/kiewer_viewer_page.js): hover
+// is a mouse move with no button held (a drag is a pan, and a touch has
+// no hover), and a click is the browser's own click event, which a
+// middle or right drag never sends; a left drag or a touch pan that
+// still ends in one is told apart by how far the pointer moved since it
+// went down (CLICK_SLOP), and ignored.
 const CLICK_SLOP = 4;
 const netCanvas = document.getElementById("board");
 const netStage = document.getElementById("stage");

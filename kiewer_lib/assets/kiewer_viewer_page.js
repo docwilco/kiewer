@@ -2,7 +2,8 @@
 // (templates/schematic.html) share: the gestures on the canvas, the
 // resize observer, the zoom read-out, the panic hook and the renderer
 // beacon. Each page imports it and calls `start` with its canvas and its
-// load; the rest of each page listens for the events its load sends.
+// load; the rest of each page wakes on the event its load sends
+// (kiewer-board, kiewer-sheet) and on kiewer-frame, which this sends.
 // Served beside the viewer's script as one more hashed asset
 // (kiewer_lib/build.rs, kiewer_lib/src/web/viewer.rs); build.rs rewrites
 // the import below to the viewer script's hashed name before hashing

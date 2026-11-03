@@ -202,7 +202,7 @@ async fn the_plain_names_are_gone_with_the_hash() {
 #[test_case("/viewer", "board", "load_board"; "the board page")]
 #[test_case("/schematic", "sheet", "load_schematic"; "the schematic page")]
 #[tokio::test]
-async fn a_page_hands_its_canvas_and_its_load_to_the_page_script_and_holds_no_gesture_of_its_own(
+async fn a_page_hands_its_canvas_and_its_load_to_the_page_script(
     page: &str,
     canvas: &str,
     load: &str,
@@ -217,41 +217,47 @@ async fn a_page_hands_its_canvas_and_its_load_to_the_page_script_and_holds_no_ge
         "{body}"
     );
     assert!(body.contains(load), "{body}");
-    for handler in [
-        "\"wheel\"",
-        "\"gesturechange\"",
-        "\"dblclick\"",
-        "ResizeObserver",
-        "kiewerPanic",
-        "sendBeacon",
-        "showZoom",
-    ] {
-        assert!(!body.contains(handler), "{page} still has {handler}");
-    }
 }
 
+/// The shared code, by a mark of each part, is the page script's alone.
+#[test_case("/viewer", "\"wheel\""; "the board page's wheel")]
+#[test_case("/viewer", "\"gesturechange\""; "the board page's Safari pinch")]
+#[test_case("/viewer", "\"dblclick\""; "the board page's double click")]
+#[test_case("/viewer", "ResizeObserver"; "the board page's resize")]
+#[test_case("/viewer", "kiewerPanic"; "the board page's panic hook")]
+#[test_case("/viewer", "sendBeacon"; "the board page's beacon")]
+#[test_case("/viewer", "showZoom"; "the board page's read-out")]
+#[test_case("/schematic", "\"wheel\""; "the schematic page's wheel")]
+#[test_case("/schematic", "\"gesturechange\""; "the schematic page's Safari pinch")]
+#[test_case("/schematic", "\"dblclick\""; "the schematic page's double click")]
+#[test_case("/schematic", "ResizeObserver"; "the schematic page's resize")]
+#[test_case("/schematic", "kiewerPanic"; "the schematic page's panic hook")]
+#[test_case("/schematic", "sendBeacon"; "the schematic page's beacon")]
+#[test_case("/schematic", "showZoom"; "the schematic page's read-out")]
 #[tokio::test]
-async fn the_page_script_wires_the_gestures_the_read_out_and_the_resize() {
+async fn a_page_holds_none_of_the_page_scripts_code(page: &str, mark: &str) {
+    let (addr, _dir) = start().await;
+    let (status, body) = http::get(addr, page).await;
+    assert_eq!(status, 200);
+    assert!(!body.contains(mark), "{page} still has {mark}");
+}
+
+#[test_case("passive: false"; "the wheel listener prevents the page scroll")]
+#[test_case("\"wheel\""; "the wheel")]
+#[test_case("\"pointerdown\""; "a drag's start")]
+#[test_case("\"pointermove\""; "a drag or a touch pinch")]
+#[test_case("viewer.pinch("; "the touch pinch")]
+#[test_case("\"gesturechange\""; "the Safari pinch")]
+#[test_case("\"dblclick\""; "the double click")]
+#[test_case("\"keydown\""; "the keys")]
+#[test_case("new ResizeObserver(resize).observe(canvas)"; "the resize")]
+#[test_case("zoomBox.textContent"; "the read-out")]
+#[tokio::test]
+async fn the_page_script_wires_the_gestures_the_read_out_and_the_resize(wired: &str) {
     let (addr, _dir) = start().await;
     let (status, body) = http::get(addr, &page_script_url()).await;
     assert_eq!(status, 200);
-    assert!(
-        body.contains("passive: false"),
-        "the wheel listener prevents the page scroll: {body}"
-    );
-    for wired in [
-        "\"wheel\"",
-        "\"pointerdown\"",
-        "\"pointermove\"",
-        "\"gesturechange\"",
-        "\"dblclick\"",
-        "\"keydown\"",
-        "new ResizeObserver(resize).observe(canvas)",
-        "viewer.pinch(",
-        "zoomBox.textContent",
-    ] {
-        assert!(body.contains(wired), "{wired}: {body}");
-    }
+    assert!(body.contains(wired), "{wired}: {body}");
 }
 
 #[tokio::test]

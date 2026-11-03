@@ -41,6 +41,10 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+/// How the page script names the viewer's script in its one import, the
+/// text the rewrite to the hashed name replaces.
+const PAGE_SCRIPT_IMPORT: &str = "\"./kiewer_viewer.js\"";
+
 /// How many hex characters of the hash name a file: 16 is 64 bits, far
 /// past any chance of two builds colliding, and short enough to read.
 const HASH_LEN: usize = 16;
@@ -74,10 +78,10 @@ fn main() {
     let page_script = manifest.join("assets").join("kiewer_viewer_page.js");
     println!("cargo::rerun-if-changed={}", page_script.display());
     let page_text = fs::read_to_string(&page_script).expect("the page script is UTF-8");
-    let page_mentions = page_text.matches("\"./kiewer_viewer.js\"").count();
+    let page_mentions = page_text.matches(PAGE_SCRIPT_IMPORT).count();
     assert_eq!(
         page_mentions, 1,
-        "the page script imports the viewer's script once, by \"./kiewer_viewer.js\"; this one \
+        "the page script imports the viewer's script once, by {PAGE_SCRIPT_IMPORT}; this one \
          names it {page_mentions} times, so the rewrite to the hashed name needs a look"
     );
     let page_text = if script.is_file() && wasm.is_file() {
@@ -102,7 +106,7 @@ fn main() {
             &script_name,
             script_text.as_bytes(),
         );
-        page_text.replace("\"./kiewer_viewer.js\"", &format!("\"./{script_name}\""))
+        page_text.replace(PAGE_SCRIPT_IMPORT, &format!("\"./{script_name}\""))
     } else {
         assert!(
             env::var_os("KIEWER_VIEWER_REQUIRED").is_none_or(|value| value != "1"),
