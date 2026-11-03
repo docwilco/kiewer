@@ -121,12 +121,27 @@ impl Ramp {
 
 /// Which part of a net's copper a run of its geometry is: each takes its
 /// own strength.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Part {
     /// The net's zones.
     Zones,
     /// Its pads, vias and tracks.
     Rest,
+}
+
+/// A length as the GPU's buffers count it. A scene and its nets are far
+/// short of `u32::MAX` vertices.
+fn count(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
+}
+
+/// `from` moved `by` of the way to `to`, channel by channel.
+fn mix(from: [f32; 4], to: [f32; 4], by: f32) -> [f32; 4] {
+    let mut mixed = to;
+    for (channel, start) in mixed.iter_mut().zip(from) {
+        *channel = start + (*channel - start) * by;
+    }
+    mixed
 }
 
 /// One net the GPU holds after the scene's own geometry.
@@ -193,13 +208,12 @@ impl<N: Copy + Ord, K: Clone> Tail<N, K> {
             .count();
         self.held.truncate(kept);
         let fresh = nets.get(kept..).filter(|fresh| !fresh.is_empty())?;
-        let (keep_vertices, keep_indices) = self.held.last().map_or(
-            (
-                u32::try_from(scene.0).unwrap_or(u32::MAX),
-                u32::try_from(scene.1).unwrap_or(u32::MAX),
-            ),
-            |held| (held.vertices_end, held.indices_end),
-        );
+        let (keep_vertices, keep_indices) = self
+            .held
+            .last()
+            .map_or((count(scene.0), count(scene.1)), |held| {
+                (held.vertices_end, held.indices_end)
+            });
         let mut splice = Splice {
             keep_vertices,
             keep_indices,
@@ -209,8 +223,8 @@ impl<N: Copy + Ord, K: Clone> Tail<N, K> {
         for net in fresh {
             let mut runs = Vec::new();
             for (key, mesh) in self.meshes.get(net).into_iter().flatten() {
-                let base = keep_vertices + u32::try_from(splice.vertices.len()).unwrap_or(u32::MAX);
-                let start = keep_indices + u32::try_from(splice.indices.len()).unwrap_or(u32::MAX);
+                let base = keep_vertices + count(splice.vertices.len());
+                let start = keep_indices + count(splice.indices.len());
                 splice
                     .vertices
                     .extend(mesh.positions.iter().map(|position| Vertex {
@@ -219,15 +233,14 @@ impl<N: Copy + Ord, K: Clone> Tail<N, K> {
                 splice
                     .indices
                     .extend(mesh.indices.iter().map(|index| index + base));
-                let end = keep_indices + u32::try_from(splice.indices.len()).unwrap_or(u32::MAX);
+                let end = keep_indices + count(splice.indices.len());
                 runs.push((key.clone(), start..end));
             }
             self.held.push(HeldNet {
                 net: *net,
                 runs,
-                vertices_end: keep_vertices
-                    + u32::try_from(splice.vertices.len()).unwrap_or(u32::MAX),
-                indices_end: keep_indices + u32::try_from(splice.indices.len()).unwrap_or(u32::MAX),
+                vertices_end: keep_vertices + count(splice.vertices.len()),
+                indices_end: keep_indices + count(splice.indices.len()),
             });
         }
         Some(splice)
@@ -333,8 +346,9 @@ impl Highlight {
     /// The draws of one frame: the scene's under `state` at the pick's
     /// dim of their opacity (a page-coloured slice stays as it is), then
     /// each lit net in pick order on each shown copper layer, bottom
-    /// first, in its slot's colour: its zones, then the rest. A lit net
-    /// [`Highlight::geometry`] has not given yet draws nothing.
+    /// first, in its slot's colour, or between two while it moves slot:
+    /// its zones, then the rest. A lit net [`Highlight::geometry`] has not
+    /// given yet draws nothing.
     #[must_use]
     pub fn draws(
         &self,
@@ -356,14 +370,19 @@ impl Highlight {
             let Some(runs) = self.tail.runs(lit.net) else {
                 continue;
             };
-            let generated = Ramp::BOARD.color(lit.slot);
+            let (previous_slot, blend) = lit.blend();
             for layer in &shown {
-                let far = if generated.is_some() && Some(layer) != shown.last() {
-                    FAR_SIDE
-                } else {
-                    1.0
+                // A slot's colour on this layer, with what the far side
+                // rule leaves of it as alpha.
+                let paint = |slot: usize| {
+                    let generated = Ramp::BOARD.color(slot);
+                    let far = generated.is_some() && Some(layer) != shown.last();
+                    let rgb = generated.unwrap_or_else(|| view.color(&scene.stack, layer));
+                    let mut color = rgb.for_format(format);
+                    color[3] = if far { FAR_SIDE } else { 1.0 };
+                    color
                 };
-                let rgb = generated.unwrap_or_else(|| view.color(&scene.stack, layer));
+                let color = mix(paint(previous_slot), paint(lit.slot), blend);
                 for (part, strength) in [
                     (Part::Zones, lit.zone_strength()),
                     (Part::Rest, lit.strength()),
@@ -373,8 +392,8 @@ impl Highlight {
                     else {
                         continue;
                     };
-                    let mut color = rgb.for_format(format);
-                    color[3] = strength * far;
+                    let mut color = color;
+                    color[3] *= strength;
                     draws.push(Draw {
                         range: range.clone(),
                         color,
@@ -703,6 +722,43 @@ mod tests {
         let last = vdd.last().expect("a near side draw");
         assert!(close(first.color[3], 0.55), "{first:?}");
         assert!(close(last.color[3], 1.0), "{last:?}");
+    }
+
+    #[test]
+    fn a_pin_moving_to_slot_0_blends_its_colour_on_the_way() {
+        let (board, scene) = hand_off();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let state = ViewState::new(5);
+        let mut highlight = Highlight::new(board);
+        let (gnd, vdd) = gnd_pad_and_vdd_via(board, &highlight);
+        highlight
+            .pick_mut()
+            .press(Gesture::ModifiedClick, Some(gnd));
+        highlight
+            .pick_mut()
+            .press(Gesture::ModifiedClick, Some(vdd));
+        let mut now = 0.0;
+        while highlight.pick().fading() {
+            highlight.pick_mut().advance(now);
+            now += 16.0;
+        }
+        highlight.pick_mut().press(Gesture::Click, Some(vdd));
+        highlight.geometry(board, scene);
+        let from = Ramp::BOARD.color(1).expect("slot 1").for_format(format);
+        let to = crate::view::palette::COPPER.for_format(format);
+        let first = net_draws(scene, &highlight.draws(scene, &state, format));
+        // The pin is drawn first; the old slot 0 pin fades out after it.
+        let start = first.first().expect("the net's draw");
+        assert!(close(start.color[0], from[0]), "{start:?}");
+        highlight.pick_mut().advance(1000.0);
+        highlight.pick_mut().advance(1050.0);
+        highlight.pick_mut().advance(1075.0);
+        let halfway = net_draws(scene, &highlight.draws(scene, &state, format));
+        let middle = halfway.first().expect("the net's draw");
+        assert!(close(
+            middle.color[0],
+            from[0] + (to[0] - from[0]) * 91.0 / 150.0
+        ));
     }
 
     #[test]

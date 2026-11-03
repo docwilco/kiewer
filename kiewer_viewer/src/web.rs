@@ -1154,10 +1154,11 @@ impl Viewer {
         self.highlight.pick_mut().set_instant(reduced);
     }
 
-    /// One row per pinned net in pin order, for the net block: its
-    /// swatch's colours as CSS writes them, separated by spaces, a tab,
-    /// and its name. A row's position is what [`Viewer::net_pads`] and
-    /// [`Viewer::go_to_pad`] take.
+    /// One row per pinned net in pin order, for the net block: its colour
+    /// slot, a tab, its swatch's colours as CSS writes them, separated by
+    /// spaces, a tab, and its name, which may be empty or repeat on a
+    /// sheet; the slot tells two rows apart. A row's position is what
+    /// [`Viewer::net_pads`] and [`Viewer::go_to_pad`] take.
     #[must_use]
     pub fn pinned_nets(&self) -> Vec<String> {
         if let Some(sheet) = &self.sheet_highlight {
@@ -1165,9 +1166,10 @@ impl Viewer {
                 .pick()
                 .pins()
                 .iter()
-                .map(|pin| {
-                    let swatch = SheetHighlight::swatch(pin.slot).to_css();
-                    format!("{swatch}\t{}", sheet.net_name(pin.net))
+                .map(|pinned| {
+                    let swatch = SheetHighlight::swatch(pinned.slot).to_css();
+                    let name = sheet.net_name(pinned.net);
+                    format!("{}\t{swatch}\t{name}", pinned.slot)
                 })
                 .collect();
         }
@@ -1178,15 +1180,15 @@ impl Viewer {
             .pick()
             .pins()
             .iter()
-            .map(|pin| {
+            .map(|pinned| {
                 let swatch: Vec<String> = self
                     .highlight
-                    .swatch(scene, &self.state, pin.slot)
+                    .swatch(scene, &self.state, pinned.slot)
                     .into_iter()
                     .map(Rgb::to_css)
                     .collect();
-                let name = board.net(pin.net).map_or("", |net| net.name.as_str());
-                format!("{}\t{name}", swatch.join(" "))
+                let name = board.net(pinned.net).map_or("", |net| net.name.as_str());
+                format!("{}\t{}\t{name}", pinned.slot, swatch.join(" "))
             })
             .collect()
     }
@@ -1204,10 +1206,11 @@ impl Viewer {
                 .map(|pin| format!("{}\t{}", pin.reference, pin.number))
                 .collect();
         }
-        let (Some(board), Some(pin)) = (&self.board, self.highlight.pick().pins().get(row)) else {
+        let (Some(board), Some(pinned)) = (&self.board, self.highlight.pick().pins().get(row))
+        else {
             return Vec::new();
         };
-        net_pads(board, pin.net)
+        net_pads(board, pinned.net)
             .into_iter()
             .map(|pad| format!("{}\t{}", pad.reference, pad.number))
             .collect()
@@ -1219,10 +1222,11 @@ impl Viewer {
         if let Some(sheet) = &self.sheet_highlight {
             return sheet.go_to_pin(&mut self.camera, row, index);
         }
-        let (Some(board), Some(pin)) = (&self.board, self.highlight.pick().pins().get(row)) else {
+        let (Some(board), Some(pinned)) = (&self.board, self.highlight.pick().pins().get(row))
+        else {
             return false;
         };
-        let Some(pad) = net_pads(board, pin.net).into_iter().nth(index) else {
+        let Some(pad) = net_pads(board, pinned.net).into_iter().nth(index) else {
             return false;
         };
         highlight::go_to_pad(&mut self.camera, pad.bounds);

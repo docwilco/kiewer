@@ -443,28 +443,31 @@ function padList(row) {
   return list;
 }
 function refreshPinned() {
-  const rows = netViewer.pinned_nets();
-  const names = rows.map(function (entry) { return entry.split("\t")[1]; });
-  netOpen.forEach(function (name) { if (!names.includes(name)) netOpen.delete(name); });
+  const rows = netViewer.pinned_nets().map(function (entry) {
+    const [slot, colours, name] = entry.split("\t");
+    // A name can repeat or be empty on a sheet; a slot is one pin's alone.
+    return { key: slot + "\t" + name, colours: colours, name: name || "unnamed net" };
+  });
+  const keys = rows.map(function (row) { return row.key; });
+  netOpen.forEach(function (key) { if (!keys.includes(key)) netOpen.delete(key); });
   const shown = JSON.stringify([rows, Array.from(netOpen)]);
   if (shown === netShown) return;
   netShown = shown;
   netPinned.hidden = rows.length === 0;
   netPinned.replaceChildren();
   rows.forEach(function (entry, row) {
-    const [colours, name] = entry.split("\t");
     const button = document.createElement("button");
     button.type = "button";
     button.className = "pin";
     button.title = "list this net's pins";
-    button.setAttribute("aria-expanded", netOpen.has(name));
-    button.append(swatch(colours), name);
+    button.setAttribute("aria-expanded", netOpen.has(entry.key));
+    button.append(swatch(entry.colours), entry.name);
     button.addEventListener("click", function () {
-      if (!netOpen.delete(name)) netOpen.add(name);
+      if (!netOpen.delete(entry.key)) netOpen.add(entry.key);
       refreshPinned();
     });
     netPinned.append(button);
-    if (netOpen.has(name)) netPinned.append(padList(row));
+    if (netOpen.has(entry.key)) netPinned.append(padList(row));
   });
 }
 netCanvas.addEventListener("pointermove", function (e) {

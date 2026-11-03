@@ -164,7 +164,7 @@ impl SheetHighlight {
         self.pick
             .pins()
             .get(row)
-            .map(|pin| net_pins(&self.sheet, &self.connectivity, pin.net))
+            .map(|pinned| net_pins(&self.sheet, &self.connectivity, pinned.net))
             .unwrap_or_default()
     }
 

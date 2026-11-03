@@ -5,10 +5,11 @@
 //! history of the pins, and what those ask of a frame: the strength of
 //! each lit net and the dim of everything else.
 //!
-//! Nothing here knows about geometry, a colour or a clock. A change
-//! retargets the lit nets; [`Pick::advance`] walks them towards their
-//! targets by the time the page hands in. A sheet and a board under
-//! `prefers-reduced-motion` reach the targets at once.
+//! Nothing here knows about geometry or a colour, and the only time is
+//! what the page hands in. A change retargets the lit nets;
+//! [`Pick::advance`] walks them towards their targets by that time. A
+//! sheet and a board under `prefers-reduced-motion` reach the targets at
+//! once.
 
 use std::collections::VecDeque;
 
@@ -55,7 +56,7 @@ pub enum Gesture {
 
 /// A pinned net and the colour it holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pin<N> {
+pub struct PinnedNet<N> {
     /// The net.
     pub net: N,
     /// Its colour slot: 0 is the layer's own colour, or each item's on a
@@ -81,23 +82,45 @@ pub struct Lit<N> {
     pub net: N,
     /// Its colour slot.
     pub slot: usize,
+    /// The slot it is easing away from; `slot` once it has arrived.
+    previous_slot: usize,
+    /// How far from `previous_slot` to `slot` its colour stands, 0 to 1.
+    blend: f32,
     aim: Aim,
     /// How far in it has faded, 0 to 1.
     strength: f32,
     /// How far from hovered to pinned it stands, 0 to 1: what its zones
     /// follow.
-    pinned: f32,
+    pin_level: f32,
 }
 
 impl<N> Lit<N> {
-    fn new(net: N, slot: usize, aim: Aim, pinned: f32) -> Self {
+    fn new(net: N, slot: usize, aim: Aim, pin_level: f32) -> Self {
         Self {
             net,
             slot,
+            previous_slot: slot,
+            blend: 1.0,
             aim,
             strength: 0.0,
-            pinned,
+            pin_level,
         }
+    }
+
+    /// Ease its colour to `slot`'s, from wherever it stands.
+    fn move_to_slot(&mut self, slot: usize) {
+        if slot != self.slot {
+            self.previous_slot = self.slot;
+            self.slot = slot;
+            self.blend = 0.0;
+        }
+    }
+
+    /// The slot its colour is easing away from, and how far it has got
+    /// towards [`Lit::slot`], 0 to 1.
+    #[must_use]
+    pub fn blend(&self) -> (usize, f32) {
+        (self.previous_slot, self.blend)
     }
 
     /// The opacity its pads, vias and tracks draw at.
@@ -109,7 +132,7 @@ impl<N> Lit<N> {
     /// The opacity its zones draw at.
     #[must_use]
     pub fn zone_strength(&self) -> f32 {
-        self.strength * (HOVER_ZONE + (1.0 - HOVER_ZONE) * self.pinned)
+        self.strength * (HOVER_ZONE + (1.0 - HOVER_ZONE) * self.pin_level)
     }
 
     /// The strength it is heading for.
@@ -120,13 +143,13 @@ impl<N> Lit<N> {
         }
     }
 
-    /// The pinned level it is heading for; one that is leaving keeps
-    /// the level it left with, so a pin fades out solid.
-    fn pinned_aim(&self) -> f32 {
+    /// The pin level it is heading for; one that is leaving keeps the
+    /// level it left with, so a pin fades out solid.
+    fn pin_level_aim(&self) -> f32 {
         match self.aim {
             Aim::Pinned => 1.0,
             Aim::Hovered => 0.0,
-            Aim::Leaving => self.pinned,
+            Aim::Leaving => self.pin_level,
         }
     }
 
@@ -137,13 +160,15 @@ impl<N> Lit<N> {
         reason = "toward lands on its target exactly, never near it"
     )]
     fn settled(&self) -> bool {
-        self.strength == self.strength_aim() && self.pinned == self.pinned_aim()
+        self.strength == self.strength_aim()
+            && self.pin_level == self.pin_level_aim()
+            && self.blend == 1.0
     }
 
     /// Whether it is a hovered net on its way out, which only one of may
     /// be at a time; a pin on its way out is not.
     fn outgoing_hover(&self) -> bool {
-        self.aim == Aim::Leaving && self.pinned <= 0.0
+        self.aim == Aim::Leaving && self.pin_level <= 0.0
     }
 }
 
@@ -161,9 +186,9 @@ fn toward(value: f32, target: f32, stride: f32) -> f32 {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pick<H: OnNet> {
     hovered: Option<H>,
-    pins: Vec<Pin<H::Net>>,
+    pins: Vec<PinnedNet<H::Net>>,
     /// The pins before each change, oldest first.
-    history: VecDeque<Vec<Pin<H::Net>>>,
+    history: VecDeque<Vec<PinnedNet<H::Net>>>,
     /// The pins in pin order, then the hovered net, then what is fading
     /// out: the order a frame draws them in.
     lit: Vec<Lit<H::Net>>,
@@ -223,7 +248,7 @@ impl<H: OnNet> Pick<H> {
 
     /// The pinned nets, in pin order.
     #[must_use]
-    pub fn pins(&self) -> &[Pin<H::Net>] {
+    pub fn pins(&self) -> &[PinnedNet<H::Net>] {
         &self.pins
     }
 
@@ -256,7 +281,7 @@ impl<H: OnNet> Pick<H> {
     pub fn press(&mut self, gesture: Gesture, hit: Option<H>) -> bool {
         let net = hit.map(OnNet::net);
         let pins = match (gesture, net) {
-            (Gesture::Click, Some(net)) => vec![Pin { net, slot: 0 }],
+            (Gesture::Click, Some(net)) => vec![PinnedNet { net, slot: 0 }],
             (Gesture::Click | Gesture::Tap, None) => Vec::new(),
             (Gesture::ModifiedClick, None) => return false,
             (Gesture::ModifiedClick | Gesture::Tap, Some(net)) => self.toggled(net),
@@ -298,13 +323,13 @@ impl<H: OnNet> Pick<H> {
     }
 
     /// The pins with `net` added in the lowest free slot, or removed.
-    fn toggled(&self, net: H::Net) -> Vec<Pin<H::Net>> {
+    fn toggled(&self, net: H::Net) -> Vec<PinnedNet<H::Net>> {
         let mut pins = self.pins.clone();
         match pins.iter().position(|pin| pin.net == net) {
             Some(at) => {
                 pins.remove(at);
             }
-            None => pins.push(Pin {
+            None => pins.push(PinnedNet {
                 net,
                 slot: self.free_slot(),
             }),
@@ -321,7 +346,7 @@ impl<H: OnNet> Pick<H> {
     }
 
     /// Make `pins` the pins, as one undo step when they differ.
-    fn change_pins(&mut self, pins: Vec<Pin<H::Net>>) -> bool {
+    fn change_pins(&mut self, pins: Vec<PinnedNet<H::Net>>) -> bool {
         if pins == self.pins {
             return false;
         }
@@ -377,14 +402,14 @@ impl<H: OnNet> Pick<H> {
         for pin in &self.pins {
             let mut entry =
                 take(pin.net).unwrap_or_else(|| Lit::new(pin.net, pin.slot, Aim::Pinned, 1.0));
-            entry.slot = pin.slot;
+            entry.move_to_slot(pin.slot);
             entry.aim = Aim::Pinned;
             lit.push(entry);
         }
         if let Some(net) = self.preview() {
             let slot = self.free_slot();
             let mut entry = take(net).unwrap_or_else(|| Lit::new(net, slot, Aim::Hovered, 0.0));
-            entry.slot = slot;
+            entry.move_to_slot(slot);
             entry.aim = Aim::Hovered;
             lit.push(entry);
         }
@@ -431,7 +456,8 @@ impl<H: OnNet> Pick<H> {
         let stride = (ms / FADE_MS) as f32;
         for lit in &mut self.lit {
             lit.strength = toward(lit.strength, lit.strength_aim(), stride);
-            lit.pinned = toward(lit.pinned, lit.pinned_aim(), stride);
+            lit.pin_level = toward(lit.pin_level, lit.pin_level_aim(), stride);
+            lit.blend = toward(lit.blend, 1.0, stride);
         }
         self.lit
             .retain(|lit| lit.aim != Aim::Leaving || lit.strength > 0.0);
@@ -726,6 +752,28 @@ mod tests {
         );
         settle(&mut pick, 1100.0);
         assert!(close(pick.lit()[0].zone_strength(), 1.0));
+    }
+
+    #[test]
+    fn a_plain_click_eases_a_pin_to_slot_0_instead_of_jumping() {
+        let mut pick: Pick<Net> = Pick::soft();
+        pick.press(Gesture::ModifiedClick, Some(FIRST));
+        pick.press(Gesture::ModifiedClick, Some(SECOND));
+        settle(&mut pick, 0.0);
+        let (from, blend) = pick.lit()[1].blend();
+        assert!(from == 1 && close(blend, 1.0));
+        assert!(pick.press(Gesture::Click, Some(SECOND)));
+        assert!(pick.fading());
+        let second = pick.lit()[0];
+        assert_eq!((second.net, second.slot), (2, 0));
+        let (from, blend) = second.blend();
+        assert!(from == 1 && close(blend, 0.0), "the old colour, to start");
+        pick.advance(1000.0);
+        let (from, blend) = pick.lit()[0].blend();
+        assert_eq!(from, 1);
+        assert!(close(blend, 16.0 / 150.0), "{blend}");
+        settle(&mut pick, 1016.0);
+        assert!(close(pick.lit()[0].blend().1, 1.0));
     }
 
     #[test]
