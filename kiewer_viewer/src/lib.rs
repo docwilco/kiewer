@@ -17,6 +17,7 @@ pub mod error;
 pub mod headless;
 pub mod highlight;
 pub mod labels;
+pub mod pick;
 pub mod render;
 pub mod scene;
 pub mod schematic;

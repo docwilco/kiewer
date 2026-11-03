@@ -89,13 +89,7 @@ async fn the_schematic_page_has_the_canvas_and_loads_the_viewer_and_the_sheet() 
         body.contains(r#"<nav id="sheets" aria-label="sheets" hidden>"#),
         "{body}"
     );
-    for id in [
-        "net-tip",
-        "net-pinned",
-        "net-pads",
-        "net-search",
-        "net-query",
-    ] {
+    for id in ["net-tip", "net-pinned", "net-search", "net-query"] {
         assert!(body.contains(&format!(r#"id="{id}""#)), "{id}: {body}");
     }
     assert!(body.contains("sheet_symbol_at"), "{body}");

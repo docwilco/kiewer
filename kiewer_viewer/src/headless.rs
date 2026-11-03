@@ -213,6 +213,18 @@ impl Headless {
         }
         self.renderer
             .upload(&self.device, mesh.vertices, mesh.indices);
+        self.draw(mesh.origin, clear, draws, frame)
+    }
+
+    /// Draw `draws` of the geometry the renderer holds, around `origin`,
+    /// over `clear` into `frame` and read it back.
+    fn draw(
+        &mut self,
+        origin: Point,
+        clear: wgpu::Color,
+        draws: &[Draw],
+        frame: &Frame,
+    ) -> Result<Image> {
         let mut camera = Camera::new(Size {
             width: f64::from(frame.width.max(1)),
             height: f64::from(frame.height.max(1)),
@@ -224,7 +236,7 @@ impl Headless {
             &self.device,
             &self.queue,
             &offscreen.target(clear),
-            camera.view(mesh.origin),
+            camera.view(origin),
             draws,
             false,
         );
@@ -238,7 +250,7 @@ mod tests {
 
     use super::*;
     use crate::labels::LabelBatch;
-    use crate::render::{Rgb, Vertex};
+    use crate::render::{Rgb, Splice, Vertex};
     use crate::scene::{Paint, Slice};
     use crate::view::{Layer, Stack, palette};
 
@@ -368,6 +380,78 @@ mod tests {
             headless.render_draws(&scene, &[], &huge),
             Err(Error::FrameTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn a_splice_past_the_buffers_grows_them_and_keeps_what_it_keeps() {
+        let Some(mut headless) = headless_or_skip() else {
+            return;
+        };
+        let scene = board_scene();
+        let frame = Frame {
+            width: 300,
+            height: 170,
+            center: scene.bounds.center(),
+            scale: 2.0,
+            mirrored: false,
+        };
+        let square = |left: f32, right: f32, base: u32, keep: (u32, u32)| Splice {
+            keep_vertices: keep.0,
+            keep_indices: keep.1,
+            vertices: [(left, -10.0), (right, -10.0), (right, 10.0), (left, 10.0)]
+                .map(|(x, y)| Vertex { position: [x, y] })
+                .to_vec(),
+            indices: [0, 1, 2, 0, 2, 3].map(|index| index + base).to_vec(),
+        };
+        let red = Rgb(255, 0, 0).for_format(Offscreen::FORMAT);
+        let green = Rgb(0, 255, 0).for_format(Offscreen::FORMAT);
+        let draws = [
+            Draw {
+                range: 0..6,
+                color: palette::BOARD.for_format(Offscreen::FORMAT),
+            },
+            Draw {
+                range: 6..12,
+                color: red,
+            },
+            Draw {
+                range: 12..18,
+                color: green,
+            },
+        ];
+        let clear = clear_color(Offscreen::FORMAT);
+        let Headless {
+            device,
+            queue,
+            renderer,
+            ..
+        } = &mut headless;
+        renderer.upload(device, &scene.vertices, &scene.indices);
+        // The buffers hold the scene exactly: the first splice has to grow
+        // them, the second fits and leaves the first where it is.
+        renderer.splice(device, queue, &square(-40.0, -20.0, 4, (4, 6)));
+        renderer.splice(device, queue, &square(20.0, 40.0, 8, (8, 12)));
+        let image = headless
+            .draw(scene.origin, clear, &draws, &frame)
+            .expect("renders");
+        let at = |x: u32| image.pixel(x, 85).expect("inside the frame");
+        assert_eq!(at(150)[..3], [0x7a, 0x5a, 0x32], "the scene survives");
+        assert_eq!(at(90)[..3], [255, 0, 0], "the first net survives");
+        assert_eq!(at(210)[..3], [0, 255, 0], "the second is written");
+        // Rewriting the second slot replaces it in place.
+        let Headless {
+            device,
+            queue,
+            renderer,
+            ..
+        } = &mut headless;
+        renderer.splice(device, queue, &square(0.0, 10.0, 8, (8, 12)));
+        let image = headless
+            .draw(scene.origin, clear, &draws, &frame)
+            .expect("renders");
+        let at = |x: u32| image.pixel(x, 85).expect("inside the frame");
+        assert_eq!(at(160)[..3], [0, 255, 0]);
+        assert_eq!(at(210)[..3], [0x7a, 0x5a, 0x32]);
     }
 
     #[test]

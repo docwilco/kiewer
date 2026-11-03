@@ -141,6 +141,23 @@ impl Rgb {
         [channel(self.0), channel(self.1), channel(self.2), 1.0]
     }
 
+    /// The colour at `lightness` 0 to 1, `chroma` and `hue` in degrees
+    /// in OKLCH, as CSS `oklch()` means them, each sRGB channel clipped
+    /// to its range as a browser clips one.
+    #[must_use]
+    pub fn oklch(lightness: f64, chroma: f64, hue: f64) -> Self {
+        let (sin, cos) = hue.to_radians().sin_cos();
+        let (a, b) = (chroma * cos, chroma * sin);
+        let long = (lightness + 0.396_337_777_4 * a + 0.215_803_757_3 * b).powi(3);
+        let medium = (lightness - 0.105_561_345_8 * a - 0.063_854_172_8 * b).powi(3);
+        let short = (lightness - 0.089_484_177_5 * a - 1.291_485_548_0 * b).powi(3);
+        Self(
+            srgb_byte(4.076_741_662_1 * long - 3.307_711_591_3 * medium + 0.230_969_929_2 * short),
+            srgb_byte(-1.268_438_004_6 * long + 2.609_757_401_1 * medium - 0.341_319_396_5 * short),
+            srgb_byte(-0.004_196_086_3 * long - 0.703_418_614_7 * medium + 1.707_614_701_0 * short),
+        )
+    }
+
     /// The colour as CSS writes it: `#f0c030`.
     #[must_use]
     pub fn to_css(self) -> String {
@@ -169,6 +186,34 @@ fn srgb_to_linear(encoded: f32) -> f32 {
     }
 }
 
+/// A linear-light channel as an sRGB byte, clipped to its range.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "clamped to 0..=1 and scaled, the value is 0.5 to 255.5 before the cast"
+)]
+fn srgb_byte(linear: f64) -> u8 {
+    let linear = linear.clamp(0.0, 1.0);
+    let encoded = if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0 + 0.5) as u8
+}
+
+/// A change to the geometry past the first `keep_vertices` and
+/// `keep_indices`: what follows them now. The scene's own geometry and
+/// the nets in front of the change stay where they are on the GPU.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Splice {
+    pub keep_vertices: u32,
+    pub keep_indices: u32,
+    pub vertices: Vec<Vertex>,
+    /// Three per triangle, indexing the whole vertex buffer.
+    pub indices: Vec<u32>,
+}
+
 /// The pipeline and the buffers over one device, drawing into targets of
 /// one format.
 pub struct Renderer {
@@ -186,6 +231,41 @@ pub struct Renderer {
     text: TextPass,
     /// Net labels (`label_pipeline`), drawn last.
     labels: LabelPass,
+}
+
+/// What a geometry buffer needs beyond being read as vertices or
+/// indices: [`Renderer::splice`] writes into it and copies out of it to
+/// grow. Allowed beside an index buffer even at the WebGL2 floor.
+const GEOMETRY_COPIES: wgpu::BufferUsages =
+    wgpu::BufferUsages::COPY_DST.union(wgpu::BufferUsages::COPY_SRC);
+
+/// One [`Vertex`], in bytes.
+const VERTEX_SIZE: u64 = std::mem::size_of::<Vertex>() as u64;
+/// One index, in bytes.
+const INDEX_SIZE: u64 = std::mem::size_of::<u32>() as u64;
+
+/// `buffer` when it holds `needed` bytes, otherwise a buffer of twice
+/// that with its first `kept` bytes copied over.
+fn with_room(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    kept: u64,
+    needed: u64,
+) -> wgpu::Buffer {
+    if buffer.size() >= needed {
+        return buffer.clone();
+    }
+    let grown = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("geometry"),
+        size: needed * 2,
+        usage: buffer.usage(),
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    encoder.copy_buffer_to_buffer(buffer, 0, &grown, 0, kept);
+    queue.submit([encoder.finish()]);
+    grown
 }
 
 struct Geometry {
@@ -376,18 +456,51 @@ impl Renderer {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vertices"),
             contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: GEOMETRY_COPIES | wgpu::BufferUsages::VERTEX,
         });
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("indices"),
             contents: bytemuck::cast_slice(indices),
-            usage: wgpu::BufferUsages::INDEX,
+            usage: GEOMETRY_COPIES | wgpu::BufferUsages::INDEX,
         });
         self.geometry = Some(Geometry {
             vertices: vertex_buffer,
             indices: index_buffer,
             index_count: u32::try_from(indices.len()).unwrap_or(u32::MAX),
         });
+    }
+
+    /// Apply `splice`: its geometry written past what it keeps, without
+    /// touching what it keeps. A buffer too small grows to twice what
+    /// the splice needs, so a run of hovers grows it once. Nothing
+    /// without geometry to splice into.
+    pub fn splice(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, splice: &Splice) {
+        let Some(geometry) = &mut self.geometry else {
+            return;
+        };
+        let vertices: &[u8] = bytemuck::cast_slice(&splice.vertices);
+        let indices: &[u8] = bytemuck::cast_slice(&splice.indices);
+        let vertices_at = u64::from(splice.keep_vertices) * VERTEX_SIZE;
+        let indices_at = u64::from(splice.keep_indices) * INDEX_SIZE;
+        geometry.vertices = with_room(
+            device,
+            queue,
+            &geometry.vertices,
+            vertices_at,
+            vertices_at + vertices.len() as u64,
+        );
+        geometry.indices = with_room(
+            device,
+            queue,
+            &geometry.indices,
+            indices_at,
+            indices_at + indices.len() as u64,
+        );
+        queue.write_buffer(&geometry.vertices, vertices_at, vertices);
+        queue.write_buffer(&geometry.indices, indices_at, indices);
+        geometry.index_count = splice
+            .keep_indices
+            .saturating_add(u32::try_from(splice.indices.len()).unwrap_or(u32::MAX));
     }
 
     /// Draw `draws`, in order, as `view` sees them into `target`, over
@@ -558,6 +671,8 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
+    use test_case::test_case;
+
     use super::*;
 
     #[test]
@@ -624,6 +739,15 @@ mod tests {
         assert_eq!(Vertex::LAYOUT.attributes.len(), 1);
         assert_eq!(std::mem::size_of::<View>(), 16, "one 16-byte uniform row");
         assert_eq!(std::mem::size_of::<Paint>(), 16, "one 16-byte uniform row");
+    }
+
+    #[test_case(1.0, 0.0, 0.0, "#ffffff" ; "white")]
+    #[test_case(0.0, 0.0, 0.0, "#000000" ; "black")]
+    #[test_case(0.627_955, 0.257_683, 29.234, "#ff0000" ; "css red")]
+    #[test_case(0.866_44, 0.294_827, 142.495, "#00ff00" ; "css lime")]
+    #[test_case(0.452_014, 0.313_214, 264.052, "#0000ff" ; "css blue")]
+    fn oklch_agrees_with_css(lightness: f64, chroma: f64, hue: f64, css: &str) {
+        assert_eq!(Rgb::oklch(lightness, chroma, hue).to_css(), css);
     }
 
     #[test]

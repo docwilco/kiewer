@@ -26,9 +26,10 @@ use crate::atlas::{self, Plan, Quads};
 use crate::camera::{Camera, DOUBLE_CLICK, Size};
 use crate::error::{Error, Result};
 use crate::highlight::{self, Highlight, SLOP_PX};
+use crate::pick::Gesture;
 use crate::render::atlas_pipeline::Coverage;
 use crate::render::label_pipeline::LabelFrame;
-use crate::render::{Backend, MSAA_SAMPLES, Renderer, Target, device_descriptor};
+use crate::render::{Backend, MSAA_SAMPLES, Renderer, Rgb, Target, device_descriptor};
 use crate::scene::{Scene, clear_color};
 use crate::schematic::{self, SheetScene};
 use crate::sheet_highlight::SheetHighlight;
@@ -62,8 +63,8 @@ pub struct Viewer {
     /// The faces the page draws from the browser's fonts, by the name
     /// the design uses, with what the page measured and planned.
     system_faces: BTreeMap<String, SystemFace>,
-    /// The net under the pointer and the one a click pinned, with the
-    /// hit test over the board (`crate::highlight`).
+    /// The net under the pointer and the pinned ones, with the hit test
+    /// over the board (`crate::highlight`).
     highlight: Highlight,
     /// The same over the sheet, with the sheet as parsed, when a
     /// schematic was loaded last (`crate::sheet_highlight`).
@@ -647,7 +648,7 @@ impl Viewer {
             mirrored: self.camera.mirrored(),
             classes: self.state.labels.mask(),
             layers: highlight::shown_copper(scene, &self.state),
-            dim: self.highlight.dim(),
+            dim: self.highlight.pick().dim(),
         })
     }
 
@@ -740,9 +741,15 @@ impl Viewer {
         self.fit_scale = self.camera.scale();
     }
 
-    /// Draw a frame. A lost or outdated surface is reconfigured and the
-    /// frame skipped; the next call draws.
-    pub fn render(&mut self) -> core::result::Result<(), JsError> {
+    /// Draw a frame for the time `now`, in the page's milliseconds, which
+    /// moves a fade in progress on; [`Viewer::fading`] says whether
+    /// another frame is due after it. A lost or outdated surface is
+    /// reconfigured and the frame skipped; the next call draws.
+    pub fn render(&mut self, now: f64) -> core::result::Result<(), JsError> {
+        match &mut self.sheet_highlight {
+            Some(sheet) => sheet.pick_mut().advance(now),
+            None => self.highlight.pick_mut().advance(now),
+        }
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -763,22 +770,22 @@ impl Viewer {
         let target = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        // The highlighted net's copper rides after the scene's own
-        // geometry; when the net changed since the last upload, the
-        // buffers are replaced before the draws name the new ranges.
+        // The lit nets' copper rides after the scene's own geometry; when
+        // they changed since the last write, the buffers take the change
+        // before the draws name the new ranges.
         if let (Some(board), Some(scene)) = (&self.board, &self.scene)
-            && let Some((vertices, indices)) = self.highlight.geometry(board, scene)
+            && let Some(splice) = self.highlight.geometry(board, scene)
         {
-            self.renderer.upload(&self.device, &vertices, &indices);
+            self.renderer.splice(&self.device, &self.queue, &splice);
         }
         if let (Some(sheet), Some(highlight)) = (&self.sheet, &mut self.sheet_highlight)
-            && let Some((vertices, indices)) = highlight.geometry(sheet)
+            && let Some(splice) = highlight.geometry(sheet)
         {
-            self.renderer.upload(&self.device, &vertices, &indices);
+            self.renderer.splice(&self.device, &self.queue, &splice);
         }
         // A sheet, when one is loaded, has its own origin, draws and
         // paper; otherwise the board's view in force says what is drawn.
-        // Either is dimmed around the highlighted net when there is one.
+        // Either is dimmed around the lit nets when there are any.
         let (origin, draws, clear) = match (&self.sheet, &self.scene) {
             (Some(sheet), _) => (
                 sheet.origin,
@@ -1042,38 +1049,40 @@ impl Viewer {
 }
 
 /// The net interaction and the reference search (docs/v1-scope.md, Net
-/// interaction, Search box), on the board (the state is
-/// `crate::highlight`, the hit test `kicad_core::hit`) or on the sheet
-/// when a schematic was loaded last (`crate::sheet_highlight`,
+/// interaction, Search box), on the board (the state is `crate::pick`
+/// behind `crate::highlight`, the hit test `kicad_core::hit`) or on the
+/// sheet when a schematic was loaded last (`crate::sheet_highlight`,
 /// `kicad_core::schematic::hit`), so the schematic page's net script is
 /// the board page's. The page hands each pointer position here in device
-/// pixels: `hover` on a move, `click` on a click, `hover_leave` when the
-/// pointer leaves the canvas, `clear_net` on Escape. Each says whether a
-/// frame is due. `pinned_net` and `net_pads` are what the page lists for
-/// a pinned net, `go_to_pad` and `search_reference` move the camera.
+/// pixels: `hover` on a move, `click`, `modified_click` or `tap` on a
+/// press, `hover_leave` when the pointer leaves the canvas, `clear_net`
+/// on Escape and `undo_pin` on Ctrl or Cmd with Z. Each says whether a
+/// frame is due. `pinned_nets` is what the page lists, one row per pin,
+/// `net_pads` a row's pads, `go_to_pad` and `search_reference` move the
+/// camera.
 #[wasm_bindgen]
 impl Viewer {
     /// The pointer is at (`x`, `y`): the item there, within [`SLOP_PX`]
-    /// pixels, is hovered. Whether the highlight changed, so a frame is
-    /// due; the tooltip is [`Viewer::hover_text`].
+    /// pixels, is hovered. Whether a frame is due; the tooltip is
+    /// [`Viewer::hover_text`].
     pub fn hover(&mut self, x: f64, y: f64) -> bool {
         if self.sheet_highlight.is_some() {
             let hit = self.sheet_hit_at(x, y);
             return self
                 .sheet_highlight
                 .as_mut()
-                .is_some_and(|sheet| sheet.hover(hit));
+                .is_some_and(|sheet| sheet.pick_mut().hover(hit));
         }
         let hit = self.hit_at(x, y);
-        self.highlight.hover(hit)
+        self.highlight.pick_mut().hover(hit)
     }
 
     /// The pointer left the canvas: nothing hovered. Whether a frame is
     /// due.
     pub fn hover_leave(&mut self) -> bool {
         match &mut self.sheet_highlight {
-            Some(sheet) => sheet.hover(None),
-            None => self.highlight.hover(None),
+            Some(sheet) => sheet.pick_mut().hover(None),
+            None => self.highlight.pick_mut().hover(None),
         }
     }
 
@@ -1092,78 +1101,128 @@ impl Viewer {
             .unwrap_or_default()
     }
 
-    /// A click at (`x`, `y`): the net of the item there is pinned, and a
-    /// click on empty space clears the pin. Whether a frame is due.
+    /// A plain mouse click at (`x`, `y`): the net of the item there
+    /// becomes the one pin, and empty space clears them all. Whether a
+    /// frame is due.
     pub fn click(&mut self, x: f64, y: f64) -> bool {
-        if self.sheet_highlight.is_some() {
-            let hit = self.sheet_hit_at(x, y);
-            return self
-                .sheet_highlight
-                .as_mut()
-                .is_some_and(|sheet| sheet.pin(hit));
-        }
-        let hit = self.hit_at(x, y);
-        self.highlight.pin(hit)
+        self.press(Gesture::Click, x, y)
+    }
+
+    /// A mouse click with Ctrl or Cmd at (`x`, `y`): the net of the item
+    /// there is added or unpinned, and empty space does nothing. Whether
+    /// a frame is due.
+    pub fn modified_click(&mut self, x: f64, y: f64) -> bool {
+        self.press(Gesture::ModifiedClick, x, y)
+    }
+
+    /// A touch or a pen at (`x`, `y`): the net of the item there is added
+    /// or unpinned, and empty space clears them all. Whether a frame is
+    /// due.
+    pub fn tap(&mut self, x: f64, y: f64) -> bool {
+        self.press(Gesture::Tap, x, y)
     }
 
     /// Escape: nothing pinned, nothing hovered. Whether a frame is due.
     pub fn clear_net(&mut self) -> bool {
         match &mut self.sheet_highlight {
-            Some(sheet) => sheet.clear(),
-            None => self.highlight.clear(),
+            Some(sheet) => sheet.pick_mut().clear(),
+            None => self.highlight.pick_mut().clear(),
         }
     }
 
-    /// The name of the pinned net; empty when none is.
+    /// Step back one pin change. Whether there was one, so a frame is
+    /// due.
+    pub fn undo_pin(&mut self) -> bool {
+        match &mut self.sheet_highlight {
+            Some(sheet) => sheet.pick_mut().undo(),
+            None => self.highlight.pick_mut().undo(),
+        }
+    }
+
+    /// Whether a fade is in progress, so the page draws another frame.
     #[must_use]
-    pub fn pinned_net(&self) -> String {
+    pub fn fading(&self) -> bool {
+        match &self.sheet_highlight {
+            Some(sheet) => sheet.pick().fading(),
+            None => self.highlight.pick().fading(),
+        }
+    }
+
+    /// `prefers-reduced-motion`: the same levels on a board, drawn
+    /// instantly. A sheet is instant anyway.
+    pub fn set_reduced_motion(&mut self, reduced: bool) {
+        self.highlight.pick_mut().set_instant(reduced);
+    }
+
+    /// One row per pinned net in pin order, for the net block: its
+    /// swatch's colours as CSS writes them, separated by spaces, a tab,
+    /// and its name. A row's position is what [`Viewer::net_pads`] and
+    /// [`Viewer::go_to_pad`] take.
+    #[must_use]
+    pub fn pinned_nets(&self) -> Vec<String> {
         if let Some(sheet) = &self.sheet_highlight {
             return sheet
-                .pinned()
-                .map(|net| sheet.net_name(net).to_owned())
-                .unwrap_or_default();
+                .pick()
+                .pins()
+                .iter()
+                .map(|pin| {
+                    let swatch = SheetHighlight::swatch(pin.slot).to_css();
+                    format!("{swatch}\t{}", sheet.net_name(pin.net))
+                })
+                .collect();
         }
-        let (Some(board), Some(net)) = (&self.board, self.highlight.pinned()) else {
-            return String::new();
+        let (Some(board), Some(scene)) = (&self.board, &self.scene) else {
+            return Vec::new();
         };
-        board
-            .net(net)
-            .map(|net| net.name.clone())
-            .unwrap_or_default()
+        self.highlight
+            .pick()
+            .pins()
+            .iter()
+            .map(|pin| {
+                let swatch: Vec<String> = self
+                    .highlight
+                    .swatch(scene, &self.state, pin.slot)
+                    .into_iter()
+                    .map(Rgb::to_css)
+                    .collect();
+                let name = board.net(pin.net).map_or("", |net| net.name.as_str());
+                format!("{}\t{name}", swatch.join(" "))
+            })
+            .collect()
     }
 
-    /// The pads of the pinned net (its pins, on a sheet), one
-    /// `reference<tab>number` per pad in natural order (`R2` before
-    /// `R10`); the position in this list is what [`Viewer::go_to_pad`]
-    /// takes. Empty without a pin.
+    /// The pads of the net in row `row` of [`Viewer::pinned_nets`] (its
+    /// pins, on a sheet), one `reference<tab>number` per pad in natural
+    /// order (`R2` before `R10`); the position in this list is what
+    /// [`Viewer::go_to_pad`] takes. Empty past the last row.
     #[must_use]
-    pub fn net_pads(&self) -> Vec<String> {
+    pub fn net_pads(&self, row: usize) -> Vec<String> {
         if let Some(sheet) = &self.sheet_highlight {
             return sheet
-                .pinned_pins()
+                .pinned_pins(row)
                 .into_iter()
                 .map(|pin| format!("{}\t{}", pin.reference, pin.number))
                 .collect();
         }
-        let (Some(board), Some(net)) = (&self.board, self.highlight.pinned()) else {
+        let (Some(board), Some(pin)) = (&self.board, self.highlight.pick().pins().get(row)) else {
             return Vec::new();
         };
-        net_pads(board, net)
+        net_pads(board, pin.net)
             .into_iter()
             .map(|pad| format!("{}\t{}", pad.reference, pad.number))
             .collect()
     }
 
-    /// Pan to pad `index` of [`Viewer::net_pads`], zooming in only when
-    /// it would be too small to see. Whether a frame is due.
-    pub fn go_to_pad(&mut self, index: usize) -> bool {
+    /// Pan to pad `index` of [`Viewer::net_pads`] of `row`, zooming in
+    /// only when it would be too small to see. Whether a frame is due.
+    pub fn go_to_pad(&mut self, row: usize, index: usize) -> bool {
         if let Some(sheet) = &self.sheet_highlight {
-            return sheet.go_to_pin(&mut self.camera, index);
+            return sheet.go_to_pin(&mut self.camera, row, index);
         }
-        let (Some(board), Some(net)) = (&self.board, self.highlight.pinned()) else {
+        let (Some(board), Some(pin)) = (&self.board, self.highlight.pick().pins().get(row)) else {
             return false;
         };
-        let Some(pad) = net_pads(board, net).into_iter().nth(index) else {
+        let Some(pad) = net_pads(board, pin.net).into_iter().nth(index) else {
             return false;
         };
         highlight::go_to_pad(&mut self.camera, pad.bounds);
@@ -1202,6 +1261,20 @@ impl Viewer {
 }
 
 impl Viewer {
+    /// `gesture` on the item at the screen point (`x`, `y`). Whether a
+    /// frame is due.
+    fn press(&mut self, gesture: Gesture, x: f64, y: f64) -> bool {
+        if self.sheet_highlight.is_some() {
+            let hit = self.sheet_hit_at(x, y);
+            return self
+                .sheet_highlight
+                .as_mut()
+                .is_some_and(|sheet| sheet.pick_mut().press(gesture, hit));
+        }
+        let hit = self.hit_at(x, y);
+        self.highlight.pick_mut().press(gesture, hit)
+    }
+
     /// The item under the screen point (`x`, `y`) on the copper layers
     /// the view in force shows, top first, within [`SLOP_PX`] pixels.
     fn hit_at(&self, x: f64, y: f64) -> Option<Hit> {

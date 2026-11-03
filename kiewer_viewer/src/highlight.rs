@@ -1,23 +1,23 @@
-//! The net highlight (docs/v1-scope.md, Net interaction): which net the
-//! pointer is over, which one a click pinned, and how a frame shows it.
-//! The hit test is `kicad_core::hit`; this module keeps the state, the
-//! copper of each highlighted net tessellated once and cached, and turns
-//! a scene's draw list into the dimmed one: every slice at [`DIM`] of its
-//! opacity (the page-coloured holes excepted, so a hole stays a hole),
-//! then the net's copper on each shown copper layer in the layer's own
-//! colour at full opacity. No slice is re-tessellated: the dim is a paint
-//! change through the per-draw colour, and the highlight is extra
-//! geometry appended after the scene's own, uploaded once per net
-//! change.
+//! The net highlight of a board (docs/v1-scope.md, Net interaction): how
+//! a frame shows the nets [`Pick`] lights. The hit test is
+//! `kicad_core::hit`; this module keeps the hit test and the state, the
+//! copper of each lit net tessellated once and cached, and turns a
+//! scene's draw list into the dimmed one: every slice at the pick's dim
+//! of its opacity (the page-coloured holes excepted, so a hole stays a
+//! hole), then each lit net's copper on each shown copper layer, its
+//! zones and the rest as two runs so each takes its own strength. No
+//! slice is re-tessellated: the dim is a paint change through the
+//! per-draw colour, and the lit nets are extra geometry after the
+//! scene's own ([`Tail`], shared with the sheet), of which a change
+//! writes only what moved.
+//!
+//! A pin's colour is its slot's: slot 0 keeps the layer's colour and a
+//! later slot generates one ([`Ramp`]).
 //!
 //! Where the camera goes is here too: a footprint found by its reference
 //! is framed with [`FOOTPRINT_MARGIN`] free around it; a pad picked from
-//! the net's list is panned to, and zoomed to only when it is under
+//! a net's list is panned to, and zoomed to only when it is under
 //! [`PAD_MIN_PX`] across on screen, so a pick never throws the zoom away.
-//!
-//! The hovered-and-pinned state is a [`Pick`] over any kind of hit, so
-//! the sheet's highlight (`crate::sheet_highlight`) keeps the same
-//! model; the copper and the camera rules here are the board's.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -28,13 +28,11 @@ use kicad_core::model::{Board, NetId, Point};
 use kicad_core::tessellate::{Mesh, Tessellator};
 
 use crate::camera::Camera;
-use crate::render::{Draw, Vertex};
+use crate::pick::{OnNet, Pick};
+use crate::render::{Draw, Rgb, Splice, Vertex};
 use crate::scene::{Paint, Scene, TOLERANCE};
 use crate::view::{Layer, ViewState};
 
-/// What everything off the highlighted net draws at: this fraction of
-/// its opacity.
-pub const DIM: f32 = 0.3;
 /// How far from the pointer, in device pixels, an item is still hit: a
 /// hairline track at low zoom.
 pub const SLOP_PX: f64 = 3.0;
@@ -48,17 +46,192 @@ pub const PAD_MARGIN: f64 = 0.45;
 /// as well as panned to.
 pub const PAD_MIN_PX: f64 = 24.0;
 
-/// Where a net's copper on one layer sits in the index buffer after the
-/// scene's own indices: the highlight's slice of that layer.
-type HighlightRange = (Layer, Range<u32>);
+/// A shown copper layer below the top one draws a later slot's colour
+/// at this fraction of its strength, so the side still shows. Slot 0
+/// has a colour per layer and needs no such help.
+pub const FAR_SIDE: f32 = 0.55;
 
-/// What a hit is on: its net. The board's hits and the sheet's
-/// (`crate::sheet_highlight`) both keep their state in a [`Pick`].
-pub trait OnNet: Copy {
-    /// The net's id.
-    type Net: Copy + PartialEq + std::fmt::Debug;
-    /// The net the hit is on.
-    fn net(self) -> Self::Net;
+/// A lightness and a chroma in OKLCH.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shade {
+    pub lightness: f64,
+    pub chroma: f64,
+}
+
+/// The colours of the pin slots from 1: hues a golden angle apart from
+/// [`Ramp::FIRST_HUE`], the shade alternating so neighbours differ in
+/// lightness too. Slot 0 is not here: it is the drawing's own colour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ramp {
+    /// The shade of slots 1, 3, 5 and on.
+    pub first: Shade,
+    /// The shade of slots 2, 4, 6 and on.
+    pub second: Shade,
+}
+
+impl Ramp {
+    /// The hue of slot 1, in degrees.
+    pub const FIRST_HUE: f64 = 205.0;
+    /// The degrees from one slot's hue to the next's.
+    pub const GOLDEN_ANGLE: f64 = 137.508;
+
+    /// The ramp for a board's dark page.
+    pub const BOARD: Self = Self {
+        first: Shade {
+            lightness: 0.86,
+            chroma: 0.15,
+        },
+        second: Shade {
+            lightness: 0.72,
+            chroma: 0.17,
+        },
+    };
+
+    /// The ramp for a sheet's light paper: the same hues, darker. Tuned
+    /// on the paper: the palest of the first 16 has 3.9:1 against it,
+    /// more than the 3.6:1 of KiCad's own wire green.
+    pub const SHEET: Self = Self {
+        first: Shade {
+            lightness: 0.48,
+            chroma: 0.15,
+        },
+        second: Shade {
+            lightness: 0.54,
+            chroma: 0.15,
+        },
+    };
+
+    /// The colour of `slot`; `None` for slot 0, which has none of its
+    /// own.
+    #[must_use]
+    pub fn color(&self, slot: usize) -> Option<Rgb> {
+        let step = slot.checked_sub(1)?;
+        let shade = if step % 2 == 0 {
+            self.first
+        } else {
+            self.second
+        };
+        // The hue repeats nothing a person could tell apart within any
+        // count of pins that fits a u32.
+        let turns = f64::from(u32::try_from(step).unwrap_or(u32::MAX));
+        let hue = (Self::FIRST_HUE + Self::GOLDEN_ANGLE * turns).rem_euclid(360.0);
+        Some(Rgb::oklch(shade.lightness, shade.chroma, hue))
+    }
+}
+
+/// Which part of a net's copper a run of its geometry is: each takes its
+/// own strength.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    /// The net's zones.
+    Zones,
+    /// Its pads, vias and tracks.
+    Rest,
+}
+
+/// One net the GPU holds after the scene's own geometry.
+#[derive(Debug, Clone, PartialEq)]
+struct HeldNet<N, K> {
+    net: N,
+    /// Where each of its meshes sits in the index buffer.
+    runs: Vec<(K, Range<u32>)>,
+    /// Where the next net's vertices start.
+    vertices_end: u32,
+    /// Where the next net's indices start.
+    indices_end: u32,
+}
+
+/// The lit nets' geometry after a scene's own: each net's meshes by `K`,
+/// built once, and which nets the GPU holds in which order. The pins
+/// sit in front of the hovered nets, so a sweep of the hover leaves them
+/// where they are: [`Tail::sync`] writes from the first net that differs
+/// and no further back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tail<N, K> {
+    meshes: BTreeMap<N, Vec<(K, Mesh)>>,
+    held: Vec<HeldNet<N, K>>,
+}
+
+impl<N, K> Default for Tail<N, K> {
+    fn default() -> Self {
+        Self {
+            meshes: BTreeMap::new(),
+            held: Vec::new(),
+        }
+    }
+}
+
+impl<N: Copy + Ord, K: Clone> Tail<N, K> {
+    /// Build `net`'s meshes unless they are in hand.
+    pub fn cache(&mut self, net: N, build: impl FnOnce() -> Vec<(K, Mesh)>) {
+        self.meshes.entry(net).or_insert_with(build);
+    }
+
+    /// The GPU no longer holds any of it: the scene was uploaded afresh.
+    pub fn invalidate(&mut self) {
+        self.held.clear();
+    }
+
+    /// Where `net`'s meshes sit, once a sync gave them to the GPU.
+    #[must_use]
+    pub fn runs(&self, net: N) -> Option<&[(K, Range<u32>)]> {
+        self.held
+            .iter()
+            .find(|held| held.net == net)
+            .map(|held| held.runs.as_slice())
+    }
+
+    /// Make the GPU hold `nets` in order, each [`Tail::cache`]d before,
+    /// after `scene` vertices and indices: what to write, when anything,
+    /// positions relative to `origin` like the scene's own.
+    pub fn sync(&mut self, nets: &[N], scene: (usize, usize), origin: Point) -> Option<Splice> {
+        let kept = self
+            .held
+            .iter()
+            .zip(nets)
+            .take_while(|(held, net)| held.net == **net)
+            .count();
+        self.held.truncate(kept);
+        let fresh = nets.get(kept..).filter(|fresh| !fresh.is_empty())?;
+        let (keep_vertices, keep_indices) = self.held.last().map_or(
+            (
+                u32::try_from(scene.0).unwrap_or(u32::MAX),
+                u32::try_from(scene.1).unwrap_or(u32::MAX),
+            ),
+            |held| (held.vertices_end, held.indices_end),
+        );
+        let mut splice = Splice {
+            keep_vertices,
+            keep_indices,
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        };
+        for net in fresh {
+            let mut runs = Vec::new();
+            for (key, mesh) in self.meshes.get(net).into_iter().flatten() {
+                let base = keep_vertices + u32::try_from(splice.vertices.len()).unwrap_or(u32::MAX);
+                let start = keep_indices + u32::try_from(splice.indices.len()).unwrap_or(u32::MAX);
+                splice
+                    .vertices
+                    .extend(mesh.positions.iter().map(|position| Vertex {
+                        position: relative(*position, origin),
+                    }));
+                splice
+                    .indices
+                    .extend(mesh.indices.iter().map(|index| index + base));
+                let end = keep_indices + u32::try_from(splice.indices.len()).unwrap_or(u32::MAX);
+                runs.push((key.clone(), start..end));
+            }
+            self.held.push(HeldNet {
+                net: *net,
+                runs,
+                vertices_end: keep_vertices
+                    + u32::try_from(splice.vertices.len()).unwrap_or(u32::MAX),
+                indices_end: keep_indices + u32::try_from(splice.indices.len()).unwrap_or(u32::MAX),
+            });
+        }
+        Some(splice)
+    }
 }
 
 impl OnNet for Hit {
@@ -69,85 +242,14 @@ impl OnNet for Hit {
     }
 }
 
-/// The net under the pointer and the one a click pinned: the
-/// interaction model of docs/v1-scope.md, Net interaction, for hits of
-/// any kind. Hover names the net, a click pins it, a click on nothing
-/// clears the pin, Escape clears both, and the pin outlives the pointer
-/// leaving.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Pick<H: OnNet> {
-    hovered: Option<H>,
-    pinned: Option<H::Net>,
-}
-
-impl<H: OnNet> Default for Pick<H> {
-    fn default() -> Self {
-        Self {
-            hovered: None,
-            pinned: None,
-        }
-    }
-}
-
-impl<H: OnNet> Pick<H> {
-    /// The net a frame highlights: the pinned one, else the hovered
-    /// item's.
-    #[must_use]
-    pub fn active(&self) -> Option<H::Net> {
-        self.pinned.or(self.hovered.map(OnNet::net))
-    }
-
-    /// What the pointer is over.
-    #[must_use]
-    pub fn hovered(&self) -> Option<H> {
-        self.hovered
-    }
-
-    /// The net a click pinned.
-    #[must_use]
-    pub fn pinned(&self) -> Option<H::Net> {
-        self.pinned
-    }
-
-    /// The pointer is over `hit` (or over nothing). Whether the net a
-    /// frame highlights changed, so a frame is due.
-    pub fn hover(&mut self, hit: Option<H>) -> bool {
-        let before = self.active();
-        self.hovered = hit;
-        self.active() != before
-    }
-
-    /// A click on `hit` pins its net; a click on nothing clears the pin.
-    /// Whether the net a frame highlights changed.
-    pub fn pin(&mut self, hit: Option<H>) -> bool {
-        let before = self.active();
-        self.pinned = hit.map(OnNet::net);
-        self.active() != before
-    }
-
-    /// Escape: nothing pinned, nothing hovered. Whether the net a frame
-    /// highlights changed.
-    pub fn clear(&mut self) -> bool {
-        let before = self.active();
-        self.pinned = None;
-        self.hovered = None;
-        before.is_some()
-    }
-}
-
 /// The highlight state of one board. The default is no board: nothing to
 /// hit, nothing highlighted.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Highlight {
     index: Index,
     pick: Pick<Hit>,
-    /// Each net's copper by layer, tessellated the first time it is
-    /// highlighted.
-    meshes: BTreeMap<NetId, Vec<(Layer, Mesh)>>,
-    /// The net whose copper the GPU holds after the scene's own, and
-    /// where each layer's run of it sits; `None` when the GPU holds the
-    /// scene alone.
-    uploaded: Option<(NetId, Vec<HighlightRange>)>,
+    /// Each lit net's copper by layer and part.
+    tail: Tail<NetId, (Layer, Part)>,
 }
 
 impl Highlight {
@@ -160,67 +262,34 @@ impl Highlight {
         }
     }
 
-    /// What every label's opacity is multiplied by this frame: [`DIM`]
-    /// while a net is highlighted, 1 otherwise.
-    #[must_use]
-    pub fn dim(&self) -> f32 {
-        if self.active().is_some() { DIM } else { 1.0 }
-    }
-
     /// The hit test over the board.
     #[must_use]
     pub fn index(&self) -> &Index {
         &self.index
     }
 
-    /// The net a frame highlights: the pinned one, else the hovered
-    /// item's.
+    /// What is hovered and pinned, and what a frame lights.
     #[must_use]
-    pub fn active(&self) -> Option<NetId> {
-        self.pick.active()
+    pub fn pick(&self) -> &Pick<Hit> {
+        &self.pick
     }
 
-    /// What the pointer is over.
-    #[must_use]
-    pub fn hovered(&self) -> Option<Hit> {
-        self.pick.hovered()
-    }
-
-    /// The net a click pinned.
-    #[must_use]
-    pub fn pinned(&self) -> Option<NetId> {
-        self.pick.pinned()
-    }
-
-    /// The pointer is over `hit` (or over nothing). Whether the net a
-    /// frame highlights changed, so a frame is due.
-    pub fn hover(&mut self, hit: Option<Hit>) -> bool {
-        self.pick.hover(hit)
-    }
-
-    /// A click on `hit` pins its net; a click on nothing clears the pin.
-    /// Whether the net a frame highlights changed.
-    pub fn pin(&mut self, hit: Option<Hit>) -> bool {
-        self.pick.pin(hit)
-    }
-
-    /// Escape: nothing pinned, nothing hovered. Whether the net a frame
-    /// highlights changed.
-    pub fn clear(&mut self) -> bool {
-        self.pick.clear()
+    /// The same, to change.
+    pub fn pick_mut(&mut self) -> &mut Pick<Hit> {
+        &mut self.pick
     }
 
     /// The GPU no longer holds the highlight's geometry (the scene was
     /// uploaded afresh): the next [`Highlight::geometry`] gives it again.
     pub fn invalidate(&mut self) {
-        self.uploaded = None;
+        self.tail.invalidate();
     }
 
     /// What the hovered item is, for the tooltip: `LED6 pad 3: GND`,
     /// `via: GND`, `track: GND`, `zone: GND`; empty over nothing.
     #[must_use]
     pub fn tooltip(&self, board: &Board) -> String {
-        let Some(hit) = self.hovered() else {
+        let Some(hit) = self.pick.hovered() else {
             return String::new();
         };
         let net = board.net(hit.net).map_or("", |net| net.name.as_str());
@@ -246,55 +315,26 @@ impl Highlight {
         format!("{what}: {net}")
     }
 
-    /// The geometry the GPU should hold for the next frame when it does
-    /// not already: `scene`'s vertices and indices with the active net's
-    /// copper appended, positions relative to the scene's origin like
-    /// the scene's own. `None` when what it holds is right.
-    pub fn geometry(&mut self, board: &Board, scene: &Scene) -> Option<(Vec<Vertex>, Vec<u32>)> {
-        let active = self.active();
-        if self.uploaded.as_ref().map(|(net, _)| *net) == active {
-            return None;
+    /// What the GPU should take for the next frame to hold the lit
+    /// nets' copper after `scene`'s geometry; `None` when what it holds
+    /// is right.
+    pub fn geometry(&mut self, board: &Board, scene: &Scene) -> Option<Splice> {
+        let nets: Vec<NetId> = self.pick.lit().iter().map(|lit| lit.net).collect();
+        for &net in &nets {
+            self.tail.cache(net, || net_copper(board, scene, net));
         }
-        let Some(net) = active else {
-            self.uploaded = None;
-            return Some((scene.vertices.clone(), scene.indices.clone()));
-        };
-        let layers = self.meshes.entry(net).or_insert_with(|| {
-            let copper = net_only(board, net);
-            let tessellator = Tessellator::new(TOLERANCE);
-            scene
-                .stack
-                .copper
-                .iter()
-                .filter_map(|name| {
-                    let mesh = tessellator.copper(&copper, board.layer_named(name)?);
-                    (!mesh.is_empty()).then(|| (Layer::Copper(name.clone()), mesh))
-                })
-                .collect()
-        });
-        let mut vertices = scene.vertices.clone();
-        let mut indices = scene.indices.clone();
-        let mut ranges = Vec::new();
-        for (layer, mesh) in layers.iter() {
-            let base = u32::try_from(vertices.len()).unwrap_or(u32::MAX);
-            let start = u32::try_from(indices.len()).unwrap_or(u32::MAX);
-            vertices.extend(mesh.positions.iter().map(|position| Vertex {
-                position: relative(*position, scene.origin),
-            }));
-            indices.extend(mesh.indices.iter().map(|index| index + base));
-            let end = u32::try_from(indices.len()).unwrap_or(u32::MAX);
-            ranges.push((layer.clone(), start..end));
-        }
-        self.uploaded = Some((net, ranges));
-        Some((vertices, indices))
+        self.tail.sync(
+            &nets,
+            (scene.vertices.len(), scene.indices.len()),
+            scene.origin,
+        )
     }
 
-    /// The draws of one frame: the scene's under `state`, each at
-    /// [`DIM`] of its opacity when a net is highlighted (a page-coloured
-    /// slice stays as it is), then the net's copper on each shown copper
-    /// layer in the layer's colour, in the view's layer order. Without a
-    /// highlight, or before [`Highlight::geometry`] gave the net's
-    /// copper, the scene's draws as they are.
+    /// The draws of one frame: the scene's under `state` at the pick's
+    /// dim of their opacity (a page-coloured slice stays as it is), then
+    /// each lit net in pick order on each shown copper layer, bottom
+    /// first, in its slot's colour: its zones, then the rest. A lit net
+    /// [`Highlight::geometry`] has not given yet draws nothing.
     #[must_use]
     pub fn draws(
         &self,
@@ -303,30 +343,92 @@ impl Highlight {
         format: wgpu::TextureFormat,
     ) -> Vec<Draw> {
         let mut draws = scene.draw_list(state, format);
-        let (Some(net), Some((uploaded, ranges)), Some(view)) =
-            (self.active(), self.uploaded.as_ref(), scene.view(state))
-        else {
-            return draws;
-        };
-        if *uploaded != net {
-            return draws;
-        }
         for draw in &mut draws {
             if !is_page(scene, draw) {
-                draw.color[3] *= DIM;
+                draw.color[3] *= self.pick.dim();
             }
         }
-        for layer in shown_copper(scene, state) {
-            let Some((_, range)) = ranges.iter().find(|(on, _)| *on == layer) else {
+        let Some(view) = scene.view(state) else {
+            return draws;
+        };
+        let shown = shown_copper(scene, state);
+        for lit in self.pick.lit() {
+            let Some(runs) = self.tail.runs(lit.net) else {
                 continue;
             };
-            draws.push(Draw {
-                range: range.clone(),
-                color: view.color(&scene.stack, &layer).for_format(format),
-            });
+            let generated = Ramp::BOARD.color(lit.slot);
+            for layer in &shown {
+                let far = if generated.is_some() && Some(layer) != shown.last() {
+                    FAR_SIDE
+                } else {
+                    1.0
+                };
+                let rgb = generated.unwrap_or_else(|| view.color(&scene.stack, layer));
+                for (part, strength) in [
+                    (Part::Zones, lit.zone_strength()),
+                    (Part::Rest, lit.strength()),
+                ] {
+                    let Some((_, range)) =
+                        runs.iter().find(|(key, _)| *key == (layer.clone(), part))
+                    else {
+                        continue;
+                    };
+                    let mut color = rgb.for_format(format);
+                    color[3] = strength * far;
+                    draws.push(Draw {
+                        range: range.clone(),
+                        color,
+                    });
+                }
+            }
         }
         draws
     }
+
+    /// The colours of `slot`'s swatch under `state`: a generated slot's
+    /// one, and for slot 0 the colour of each shown copper layer, top
+    /// first, so a view with two has two. With no copper shown, the
+    /// front copper's.
+    #[must_use]
+    pub fn swatch(&self, scene: &Scene, state: &ViewState, slot: usize) -> Vec<Rgb> {
+        if let Some(generated) = Ramp::BOARD.color(slot) {
+            return vec![generated];
+        }
+        let Some(view) = scene.view(state) else {
+            return Vec::new();
+        };
+        let mut layers = shown_copper(scene, state);
+        layers.reverse();
+        if layers.is_empty() {
+            layers.extend(scene.stack.copper.first().cloned().map(Layer::Copper));
+        }
+        layers
+            .iter()
+            .map(|layer| view.color(&scene.stack, layer))
+            .collect()
+    }
+}
+
+/// `net`'s copper on each of `scene`'s copper layers, zones and the rest
+/// apart; an empty mesh has no entry.
+fn net_copper(board: &Board, scene: &Scene, net: NetId) -> Vec<((Layer, Part), Mesh)> {
+    let copper = net_only(board, net);
+    let tessellator = Tessellator::new(TOLERANCE);
+    let mut meshes = Vec::new();
+    for name in &scene.stack.copper {
+        let Some(id) = board.layer_named(name) else {
+            continue;
+        };
+        for (part, mesh) in [
+            (Part::Zones, tessellator.zones(&copper, id)),
+            (Part::Rest, tessellator.copper_without_zones(&copper, id)),
+        ] {
+            if !mesh.is_empty() {
+                meshes.push(((Layer::Copper(name.clone()), part), mesh));
+            }
+        }
+    }
+    meshes
 }
 
 /// Whether `draw` is one of `scene`'s page-coloured slices (a hole),
@@ -374,7 +476,7 @@ pub fn go_to_footprint(camera: &mut Camera, bounds: Bounds) {
     camera.frame(bounds, FOOTPRINT_MARGIN);
 }
 
-/// Look at a pad picked from the net's list: panned to its centre at the
+/// Look at a pad picked from a net's list: panned to its centre at the
 /// scale in force, and zoomed to [`PAD_MARGIN`] when it would be under
 /// [`PAD_MIN_PX`] across on screen.
 pub fn go_to_pad(camera: &mut Camera, bounds: Bounds) {
@@ -388,13 +490,17 @@ pub fn go_to_pad(camera: &mut Camera, bounds: Bounds) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::OnceLock;
 
     use kicad_core::hit::{find_footprint, footprint_bounds, net_pads};
     use kicad_core::model::LayerId;
+    use kiewer_assert::assert_is_not_empty;
+    use test_case::test_case;
 
     use super::*;
     use crate::camera::Size;
+    use crate::pick::Gesture;
 
     const BOARD_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -438,63 +544,55 @@ mod tests {
     }
 
     #[test]
-    fn a_pin_outlives_a_hover_and_escape_clears_both() {
-        let (board, _) = hand_off();
-        let mut highlight = Highlight::new(board);
-        let (pad, via) = gnd_pad_and_vdd_via(board, &highlight);
-        assert_eq!(highlight.active(), None);
-        assert!(highlight.hover(Some(pad)));
-        assert_eq!(highlight.active(), Some(pad.net));
-        assert!(
-            !highlight.hover(Some(pad)),
-            "the same net again is no change"
-        );
-        assert!(highlight.pin(Some(via)));
-        assert_eq!(highlight.active(), Some(via.net));
-        assert!(
-            !highlight.hover(Some(pad)),
-            "a hover under a pin changes nothing"
-        );
-        assert_eq!(highlight.hovered(), Some(pad));
-        assert_eq!(highlight.pinned(), Some(via.net));
-        assert!(!highlight.hover(None));
-        assert_eq!(
-            highlight.active(),
-            Some(via.net),
-            "the pin survives the pointer leaving"
-        );
-        assert!(highlight.pin(None), "a click on nothing clears the pin");
-        assert_eq!(highlight.active(), None);
-        highlight.hover(Some(pad));
-        assert!(highlight.clear());
-        assert_eq!((highlight.active(), highlight.hovered()), (None, None));
-        assert!(!highlight.clear(), "nothing to clear");
-    }
-
-    #[test]
     fn the_tooltip_names_the_item_and_its_net() {
         let (board, _) = hand_off();
         let mut highlight = Highlight::new(board);
         assert_eq!(highlight.tooltip(board), "");
         let (pad, via) = gnd_pad_and_vdd_via(board, &highlight);
-        highlight.hover(Some(pad));
+        highlight.pick_mut().hover(Some(pad));
         assert_eq!(highlight.tooltip(board), "LED6 pad 3: GND");
-        highlight.hover(Some(via));
+        highlight.pick_mut().hover(Some(via));
         assert_eq!(highlight.tooltip(board), "via: Net-(LED5-VDD)");
         let track = highlight
             .index()
             .hit(Point { x: 110.0, y: 86.5 }, 0.0, &f_cu(board))
             .expect("the first segment in the file");
-        highlight.hover(Some(track));
+        highlight.pick_mut().hover(Some(track));
         assert!(highlight.tooltip(board).starts_with("track: "));
     }
 
+    /// A highlight whose fades land at once, with `hits` pinned in turn.
+    fn pinned(board: &Board, hits: &[Hit]) -> Highlight {
+        let mut highlight = Highlight::new(board);
+        highlight.pick_mut().set_instant(true);
+        for hit in hits {
+            highlight
+                .pick_mut()
+                .press(Gesture::ModifiedClick, Some(*hit));
+        }
+        highlight
+    }
+
+    /// The draws past the scene's own, the lit nets'.
+    fn net_draws(scene: &Scene, draws: &[Draw]) -> Vec<Draw> {
+        draws
+            .iter()
+            .filter(|draw| usize::try_from(draw.range.start).expect("fits") >= scene.indices.len())
+            .cloned()
+            .collect()
+    }
+
+    fn close(actual: f32, expected: f32) -> bool {
+        (actual - expected).abs() < 1e-5
+    }
+
     #[test]
-    fn a_highlighted_net_dims_the_scene_and_adds_its_copper_on_the_shown_layers() {
+    fn a_pin_dims_the_scene_to_30_and_adds_its_copper_on_the_shown_layers() {
         let (board, scene) = hand_off();
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let state = ViewState::new(5);
         let mut highlight = Highlight::new(board);
+        highlight.pick_mut().set_instant(true);
         assert_eq!(
             highlight.geometry(board, scene),
             None,
@@ -503,59 +601,163 @@ mod tests {
         let plain = highlight.draws(scene, &state, format);
         assert_eq!(plain, scene.draw_list(&state, format));
         let (pad, _) = gnd_pad_and_vdd_via(board, &highlight);
-        highlight.pin(Some(pad));
-        let (vertices, indices) = highlight
+        highlight.pick_mut().press(Gesture::Click, Some(pad));
+        let splice = highlight
             .geometry(board, scene)
             .expect("the net's copper is appended");
-        assert!(vertices.len() > scene.vertices.len());
-        assert!(indices.len() > scene.indices.len());
-        assert_eq!(indices.len() % 3, 0);
-        let max_index = indices.iter().max().copied().unwrap_or(0);
-        assert!(usize::try_from(max_index).expect("fits") < vertices.len());
+        assert_eq!(
+            usize::try_from(splice.keep_indices).expect("fits"),
+            scene.indices.len()
+        );
+        assert_is_not_empty!(splice.vertices);
+        assert_eq!(splice.indices.len() % 3, 0);
+        let total = usize::try_from(splice.keep_vertices).expect("fits") + splice.vertices.len();
+        let max_index = splice.indices.iter().max().copied().unwrap_or(0);
+        assert!(usize::try_from(max_index).expect("fits") < total);
         assert_eq!(highlight.geometry(board, scene), None, "uploaded once");
         let draws = highlight.draws(scene, &state, format);
-        // View 5 shows one copper layer, F.Cu: one highlight draw after
-        // the scene's, in the copper colour at full opacity.
-        assert_eq!(draws.len(), plain.len() + 1);
-        // GND is appended for every copper layer, F.Cu's run first: the
-        // draw is a run past the scene's indices, inside the buffer.
-        let last = draws.last().expect("the highlight draw");
-        assert!(usize::try_from(last.range.start).expect("fits") >= scene.indices.len());
-        assert!(usize::try_from(last.range.end).expect("fits") <= indices.len());
-        assert!(last.range.end > last.range.start);
+        // View 5 shows one copper layer, F.Cu. GND has zones and the rest
+        // there: two draws after the scene's, in the copper colour, solid.
+        let lit = net_draws(scene, &draws);
+        assert_eq!(lit.len(), 2, "{lit:?}");
+        assert_eq!(draws.len(), plain.len() + 2);
         let copper = crate::view::palette::COPPER.for_format(format);
-        for (channel, expected) in last.color.iter().zip(copper) {
-            assert!((channel - expected).abs() < 1e-6, "{last:?}");
+        for draw in &lit {
+            for (channel, expected) in draw.color.iter().zip(copper) {
+                assert!((channel - expected).abs() < 1e-6, "{draw:?}");
+            }
+            assert!(draw.range.end > draw.range.start);
         }
         for (dimmed, original) in draws.iter().zip(&plain) {
             assert_eq!(dimmed.range, original.range);
             let expected = if is_page(scene, original) {
                 original.color[3]
             } else {
-                original.color[3] * DIM
+                original.color[3] * 0.3
             };
             assert!((dimmed.color[3] - expected).abs() < 1e-6, "{dimmed:?}");
             assert_eq!(dimmed.color[..3], original.color[..3]);
         }
-        // GND reaches every copper layer: the view with both outer
-        // coppers gets two highlight draws.
-        let both = highlight.draws(scene, &ViewState::new(7), format);
-        let highlights = both
-            .iter()
-            .filter(|draw| usize::try_from(draw.range.start).expect("fits") >= scene.indices.len())
-            .count();
-        assert_eq!(highlights, 2);
-        // Clearing hands the scene alone back once.
-        highlight.clear();
-        let (vertices, _) = highlight.geometry(board, scene).expect("the scene alone");
-        assert_eq!(vertices.len(), scene.vertices.len());
+        // Clearing leaves the scene alone in the draws, and the GPU has
+        // nothing more to take: the tail past the scene just goes unused.
+        highlight.pick_mut().clear();
         assert_eq!(highlight.geometry(board, scene), None);
+        assert_eq!(highlight.draws(scene, &state, format), plain);
         highlight.invalidate();
         assert_eq!(
             highlight.geometry(board, scene),
             None,
-            "nothing active, nothing to give"
+            "nothing lit, nothing to give"
         );
+    }
+
+    #[test]
+    fn a_hover_draws_the_scene_at_60_and_the_zones_at_35() {
+        let (board, scene) = hand_off();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let state = ViewState::new(5);
+        let mut highlight = Highlight::new(board);
+        highlight.pick_mut().set_instant(true);
+        let (pad, _) = gnd_pad_and_vdd_via(board, &highlight);
+        highlight.pick_mut().hover(Some(pad));
+        highlight.geometry(board, scene);
+        let draws = highlight.draws(scene, &state, format);
+        let plain = scene.draw_list(&state, format);
+        let dimmed = plain
+            .iter()
+            .position(|draw| !is_page(scene, draw))
+            .expect("a slice that dims");
+        assert!(close(draws[dimmed].color[3], plain[dimmed].color[3] * 0.6));
+        let lit = net_draws(scene, &draws);
+        let [zones, rest] = lit.as_slice() else {
+            panic!("{lit:?}");
+        };
+        assert!(close(zones.color[3], 0.35), "{zones:?}");
+        assert!(close(rest.color[3], 1.0), "{rest:?}");
+    }
+
+    #[test]
+    fn a_later_slot_draws_the_far_side_at_55_and_slot_0_keeps_both_colours() {
+        let (board, scene) = hand_off();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        // View 7 shows both outer coppers, B.Cu under F.Cu.
+        let state = ViewState::new(7);
+        let highlight = {
+            let probe = Highlight::new(board);
+            let (gnd, vdd) = gnd_pad_and_vdd_via(board, &probe);
+            let mut highlight = pinned(board, &[gnd, vdd]);
+            highlight.geometry(board, scene);
+            highlight
+        };
+        let draws = highlight.draws(scene, &state, format);
+        let lit = net_draws(scene, &draws);
+        // GND: zones and the rest on two layers, each at full strength in
+        // its layer's colour.
+        let (gnd, vdd) = lit.split_at(4);
+        assert!(gnd.iter().all(|draw| close(draw.color[3], 1.0)), "{gnd:?}");
+        assert_ne!(gnd[0].color[..3], gnd[3].color[..3], "two layer colours");
+        // The via's net: one colour, the far side at 55%, the near solid.
+        let generated = Ramp::BOARD.color(1).expect("slot 1").for_format(format);
+        assert!(vdd.iter().all(|draw| draw.color[..3] == generated[..3]));
+        let first = vdd.first().expect("a far side draw");
+        let last = vdd.last().expect("a near side draw");
+        assert!(close(first.color[3], 0.55), "{first:?}");
+        assert!(close(last.color[3], 1.0), "{last:?}");
+    }
+
+    #[test]
+    fn a_hover_change_with_pins_writes_only_past_the_pins() {
+        let (board, scene) = hand_off();
+        let highlight = Highlight::new(board);
+        let (gnd, vdd) = gnd_pad_and_vdd_via(board, &highlight);
+        let mut highlight = pinned(board, &[gnd]);
+        let pinned = highlight.geometry(board, scene).expect("the pin");
+        let after_pin = pinned.keep_indices + u32::try_from(pinned.indices.len()).expect("fits");
+        highlight.pick_mut().hover(Some(vdd));
+        let splice = highlight.geometry(board, scene).expect("the preview");
+        assert_eq!(splice.keep_indices, after_pin);
+        highlight.pick_mut().hover(None);
+        assert_eq!(
+            highlight.geometry(board, scene),
+            None,
+            "only a shorter tail"
+        );
+    }
+
+    #[test]
+    fn a_swatch_has_one_colour_a_shown_copper_layer_and_a_generated_slot_one() {
+        let (board, scene) = hand_off();
+        let highlight = Highlight::new(board);
+        let two = ViewState::new(7);
+        assert_eq!(highlight.swatch(scene, &two, 0).len(), 2);
+        assert_eq!(highlight.swatch(scene, &ViewState::new(5), 0).len(), 1);
+        assert_eq!(
+            highlight.swatch(scene, &two, 3),
+            vec![Ramp::BOARD.color(3).expect("slot 3")]
+        );
+    }
+
+    // The expected colours are what Chromium draws for the same oklch().
+    #[test_case(Ramp::BOARD, 1, "#00ecff" ; "board slot 1 at hue 205")]
+    #[test_case(Ramp::BOARD, 2, "#ea74c1" ; "board slot 2 at hue 342.5")]
+    #[test_case(Ramp::SHEET, 1, "#007285" ; "sheet slot 1 at hue 205")]
+    #[test_case(Ramp::SHEET, 2, "#a74586" ; "sheet slot 2 at hue 342.5")]
+    fn the_ramp_makes_the_issues_colours(ramp: Ramp, slot: usize, css: &str) {
+        assert_eq!(ramp.color(slot).expect("a slot").to_css(), css);
+    }
+
+    #[test]
+    fn slot_0_has_no_generated_colour() {
+        assert_eq!(Ramp::BOARD.color(0), None);
+    }
+
+    #[test]
+    fn no_two_of_the_first_17_slots_share_a_colour() {
+        let colours: BTreeSet<String> = (1..=17)
+            .filter_map(|slot| Ramp::BOARD.color(slot))
+            .map(Rgb::to_css)
+            .collect();
+        assert_eq!(colours.len(), 17);
     }
 
     #[test]

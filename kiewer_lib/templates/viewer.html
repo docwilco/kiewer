@@ -86,7 +86,8 @@
   #net { position: absolute; right: 0.8em; bottom: 2.4em; max-width: 20em; max-height: calc(100% - 4em); display: flex; flex-direction: column; gap: 0.4em; align-items: flex-end; font-size: 13px; }
   #net-tip { position: absolute; padding: 0.2em 0.5em; background: rgba(43, 43, 43, 0.95); border: 1px solid #666; border-radius: 3px; white-space: nowrap; pointer-events: none; font-size: 13px; }
   #net-pinned { padding: 0.3em 0.6em; background: rgba(43, 43, 43, 0.9); border: 1px solid #444; border-radius: 4px; overflow: auto; min-height: 0; }
-  #net-pinned p { margin: 0.2em 0; display: flex; gap: 0.6em; align-items: baseline; }
+  #net-pinned .pin { display: flex; gap: 0.4em; align-items: center; background: none; border: none; color: inherit; padding: 0.1em 0; cursor: pointer; text-align: left; }
+  #net-pinned .swatch { flex: none; width: 0.8em; height: 0.8em; border-radius: 2px; }
   #net-pinned ul { list-style: none; margin: 0.3em 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(5em, 1fr)); gap: 0.1em 0.6em; }
   #net-pinned button, #net-search button, #net-search input { font: inherit; }
   #net-pinned li button { background: none; border: none; color: inherit; padding: 0; cursor: pointer; text-decoration: underline dotted; }
@@ -124,10 +125,7 @@
   </div>
   <span id="net-tip" hidden></span>
   <div id="net" hidden>
-    <div id="net-pinned" hidden>
-      <p><b id="net-name"></b> <button id="net-clear" type="button" title="Escape">clear</button></p>
-      <ul id="net-pads"></ul>
-    </div>
+    <div id="net-pinned" hidden></div>
     <form id="net-search">
       <span id="net-miss"></span>
       <input id="net-query" type="search" placeholder="reference, e.g. U1" title="pan to a footprint by its reference designator" autocomplete="off">
@@ -232,11 +230,13 @@ function point(e) {
 }
 function schedule() {
   if (frame || !viewer) return;
-  frame = requestAnimationFrame(function () {
+  frame = requestAnimationFrame(function (now) {
     frame = 0;
-    try { viewer.render(); } catch (e) { fail(e); }
+    try { viewer.render(now); } catch (e) { fail(e); }
     showZoom();
     window.dispatchEvent(new Event("kiewer-frame"));
+    // A fade asks for its own next frame; otherwise frames are on demand.
+    if (viewer.fading()) schedule();
   });
 }
 // Lower right: the zoom relative to the fitted board and the scale in
@@ -835,9 +835,12 @@ window.addEventListener("kiewer-board", function (e) {
 // interaction, Search box; the wasm side is the net block of
 // kiewer_viewer/src/web.rs, the hit test kicad_core/src/hit.rs). Hovering
 // a pad, via, track or zone names its net in a tooltip beside the pointer
-// and dims everything not on that net; a click pins the highlight and
-// lists the net's pads, each a button that pans to the pad; Escape, the
-// clear button, or a click on empty space clears. The search box takes a
+// and dims everything else, softly and eased (the viewer asks for frames
+// through `fading`, with `prefers-reduced-motion` drawing the same levels
+// at once). A click leaves the net as the one pin, Ctrl or Cmd with a
+// click adds or removes one, and a tap or a pen always adds or removes;
+// the block lists the pinned nets. Escape or a click on empty space
+// clears them all, and Ctrl or Cmd with Z steps back. The search box takes a
 // reference designator, whatever its case, and frames the footprint, or
 // says it is not on the board. This block's listeners sit beside the
 // main module's: hover is a mouse move with no button held (a drag is a
@@ -851,9 +854,6 @@ const netStage = document.getElementById("stage");
 const netBox = document.getElementById("net");
 const netTip = document.getElementById("net-tip");
 const netPinned = document.getElementById("net-pinned");
-const netName = document.getElementById("net-name");
-const netPads = document.getElementById("net-pads");
-const netClear = document.getElementById("net-clear");
 const netSearch = document.getElementById("net-search");
 const netQuery = document.getElementById("net-query");
 const netMiss = document.getElementById("net-miss");
@@ -861,12 +861,17 @@ let netViewer = null;
 let netSchedule = null;
 // Where the pointer went down, in client pixels, for the drag check.
 let netDown = null;
+// What that pointer was: mouse, touch or pen.
+let netPointer = "mouse";
 
 function netPoint(e) {
   const r = netCanvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   return [(e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr];
 }
+const netMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+function followMotion() { if (netViewer) netViewer.set_reduced_motion(netMotion.matches); }
+netMotion.addEventListener("change", followMotion);
 function hideTip() { netTip.hidden = true; }
 function showTip(e, text) {
   if (!text) { hideTip(); return; }
@@ -876,14 +881,24 @@ function showTip(e, text) {
   netTip.style.top = (e.clientY - r.top + 14) + "px";
   netTip.hidden = false;
 }
-// The pinned net's name and its pads, one button per pad.
-function refreshPinned() {
-  const name = netViewer.pinned_net();
-  netPinned.hidden = !name;
-  if (!name) { netPads.replaceChildren(); return; }
-  netName.textContent = name;
-  netPads.replaceChildren();
-  netViewer.net_pads().forEach(function (entry, index) {
+// The net block: one row per pinned net, a swatch and the name. A click
+// on a name folds that net's pads open, each a button that pans to the
+// pad. Rows are rebuilt only when what they show changed.
+const netOpen = new Set();
+let netShown = null;
+function swatch(colours) {
+  const box = document.createElement("span");
+  box.className = "swatch";
+  const parts = colours.split(" ");
+  const stops = parts.map(function (colour, index) {
+    return colour + " " + (index * 100 / parts.length) + "% " + ((index + 1) * 100 / parts.length) + "%";
+  });
+  box.style.background = "linear-gradient(135deg, " + stops.join(", ") + ")";
+  return box;
+}
+function padList(row) {
+  const list = document.createElement("ul");
+  netViewer.net_pads(row).forEach(function (entry, index) {
     const [reference, number] = entry.split("\t");
     const item = document.createElement("li");
     const button = document.createElement("button");
@@ -891,10 +906,36 @@ function refreshPinned() {
     button.textContent = number ? reference + "." + number : reference;
     button.title = "pan to this pad";
     button.addEventListener("click", function () {
-      if (netViewer.go_to_pad(index)) netSchedule();
+      if (netViewer.go_to_pad(row, index)) netSchedule();
     });
     item.append(button);
-    netPads.append(item);
+    list.append(item);
+  });
+  return list;
+}
+function refreshPinned() {
+  const rows = netViewer.pinned_nets();
+  const names = rows.map(function (entry) { return entry.split("\t")[1]; });
+  netOpen.forEach(function (name) { if (!names.includes(name)) netOpen.delete(name); });
+  const shown = JSON.stringify([rows, Array.from(netOpen)]);
+  if (shown === netShown) return;
+  netShown = shown;
+  netPinned.hidden = rows.length === 0;
+  netPinned.replaceChildren();
+  rows.forEach(function (entry, row) {
+    const [colours, name] = entry.split("\t");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "pin";
+    button.title = "list this net's pads";
+    button.setAttribute("aria-expanded", netOpen.has(name));
+    button.append(swatch(colours), name);
+    button.addEventListener("click", function () {
+      if (!netOpen.delete(name)) netOpen.add(name);
+      refreshPinned();
+    });
+    netPinned.append(button);
+    if (netOpen.has(name)) netPinned.append(padList(row));
   });
 }
 netCanvas.addEventListener("pointermove", function (e) {
@@ -910,21 +951,29 @@ netCanvas.addEventListener("pointerleave", function () {
 });
 netCanvas.addEventListener("pointerdown", function (e) {
   netDown = [e.clientX, e.clientY];
+  netPointer = e.pointerType;
 });
 netCanvas.addEventListener("click", function (e) {
   if (!netViewer) return;
   if (netDown && Math.hypot(e.clientX - netDown[0], e.clientY - netDown[1]) > CLICK_SLOP) return;
   const [x, y] = netPoint(e);
-  if (netViewer.click(x, y)) netSchedule();
+  if (netPress(e, x, y)) netSchedule();
   refreshPinned();
 });
+// The press a click stands for: a touch or a pen is a tap whatever is
+// held, by the pointer type each event went down with, so a touchscreen
+// laptop gets both.
+function netPress(e, x, y) {
+  if (netPointer === "touch" || netPointer === "pen") return netViewer.tap(x, y);
+  if (e.ctrlKey || e.metaKey) return netViewer.modified_click(x, y);
+  return netViewer.click(x, y);
+}
 function clearNet() {
   if (!netViewer) return;
   hideTip();
   if (netViewer.clear_net()) netSchedule();
   refreshPinned();
 }
-netClear.addEventListener("click", clearNet);
 // Escape in the search box leaves the box; in any other input (the font
 // picker's text box, a slider) it is that input's, as the main script
 // leaves every key to an input.
@@ -933,6 +982,16 @@ window.addEventListener("keydown", function (e) {
   if (e.target === netQuery) { netQuery.blur(); return; }
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
   clearNet();
+});
+// Ctrl or Cmd with Z steps back a pin change, but never while an input
+// has the focus, so the search box keeps its own undo.
+window.addEventListener("keydown", function (e) {
+  if (!netViewer || !(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
+  if (e.key !== "z" && e.key !== "Z") return;
+  if (e.target instanceof Element && e.target.closest("input, textarea, select, [contenteditable]")) return;
+  e.preventDefault();
+  if (netViewer.undo_pin()) netSchedule();
+  refreshPinned();
 });
 netSearch.addEventListener("submit", function (e) {
   e.preventDefault();
@@ -951,9 +1010,12 @@ window.addEventListener("kiewer-board", function (e) {
   netViewer = e.detail.viewer;
   netSchedule = e.detail.schedule;
   netMiss.textContent = "";
+  followMotion();
   refreshPinned();
   netBox.hidden = false;
 });
+// A view or a layer toggle changes the colours of a first pin's swatch.
+window.addEventListener("kiewer-frame", function () { if (netViewer) refreshPinned(); });
 </script>
 {% if let Some(design) = design %}
 <script type="module">

@@ -157,6 +157,52 @@ pub struct Tessellator {
     tolerance: f64,
 }
 
+/// What [`Tessellator::copper_without_zones`] draws, into `builder`.
+fn add_copper_without_zones(
+    builder: &mut MeshBuilder,
+    board: &Board,
+    layer: LayerId,
+    tolerance: f64,
+) {
+    for segment in board.segments.iter().filter(|s| s.layer == layer) {
+        builder.stroke(&[segment.start, segment.end], segment.width, false);
+    }
+    for arc in board.arcs.iter().filter(|a| a.layer == layer) {
+        let points = match Arc::through(arc.start, arc.mid, arc.end) {
+            Some(arc) => arc.flatten(tolerance),
+            None => vec![arc.start, arc.end],
+        };
+        builder.stroke(&points, arc.width, false);
+    }
+    let copper: Vec<LayerId> = board.copper_layers().map(|(id, _)| id).collect();
+    for via in board.vias.iter().filter(|via| spans(via, &copper, layer)) {
+        builder.via(via);
+    }
+    for footprint in &board.footprints {
+        let frame = Transform::new(footprint.at, footprint.rotation);
+        for pad in footprint
+            .pads
+            .iter()
+            .filter(|pad| pad.layers.contains(&layer))
+        {
+            builder.pad(pad, &frame);
+        }
+    }
+}
+
+/// What [`Tessellator::zones`] draws, into `builder`.
+fn add_zones(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
+    for footprint in &board.footprints {
+        let frame = Transform::new(footprint.at, footprint.rotation);
+        for zone in &footprint.zones {
+            builder.zone(zone, &frame, layer);
+        }
+    }
+    for zone in &board.zones {
+        builder.zone(zone, &Transform::identity(), layer);
+    }
+}
+
 impl Tessellator {
     /// A tessellator flattening curves to within `tolerance` millimetres.
     #[must_use]
@@ -164,44 +210,34 @@ impl Tessellator {
         Self { tolerance }
     }
 
-    /// The copper on `layer`: tracks and track arcs with round ends, vias
-    /// and pads that reach the layer as rings around their holes, the
-    /// zone fills KiCad stored, and the outline of a zone without a
-    /// stored fill on the layer, hatched ([`HATCH_PITCH`]). An unplated
-    /// hole whose pad is no bigger than the hole is no copper.
+    /// The copper on `layer`: [`Tessellator::copper_without_zones`] and
+    /// [`Tessellator::zones`] as one mesh.
     #[must_use]
     pub fn copper(&self, board: &Board, layer: LayerId) -> Mesh {
         let mut builder = MeshBuilder::new(self.tolerance);
-        for segment in board.segments.iter().filter(|s| s.layer == layer) {
-            builder.stroke(&[segment.start, segment.end], segment.width, false);
-        }
-        for arc in board.arcs.iter().filter(|a| a.layer == layer) {
-            let points = match Arc::through(arc.start, arc.mid, arc.end) {
-                Some(arc) => arc.flatten(self.tolerance),
-                None => vec![arc.start, arc.end],
-            };
-            builder.stroke(&points, arc.width, false);
-        }
-        let copper: Vec<LayerId> = board.copper_layers().map(|(id, _)| id).collect();
-        for via in board.vias.iter().filter(|via| spans(via, &copper, layer)) {
-            builder.via(via);
-        }
-        for footprint in &board.footprints {
-            let frame = Transform::new(footprint.at, footprint.rotation);
-            for pad in footprint
-                .pads
-                .iter()
-                .filter(|pad| pad.layers.contains(&layer))
-            {
-                builder.pad(pad, &frame);
-            }
-            for zone in &footprint.zones {
-                builder.zone(zone, &frame, layer);
-            }
-        }
-        for zone in &board.zones {
-            builder.zone(zone, &Transform::identity(), layer);
-        }
+        add_copper_without_zones(&mut builder, board, layer, self.tolerance);
+        add_zones(&mut builder, board, layer);
+        builder.finish()
+    }
+
+    /// The copper on `layer` other than zones: tracks and track arcs with
+    /// round ends, vias and pads that reach the layer as rings around
+    /// their holes. An unplated hole whose pad is no bigger than the hole
+    /// is no copper. A net highlight draws this and a net's zones at
+    /// different strengths.
+    #[must_use]
+    pub fn copper_without_zones(&self, board: &Board, layer: LayerId) -> Mesh {
+        let mut builder = MeshBuilder::new(self.tolerance);
+        add_copper_without_zones(&mut builder, board, layer, self.tolerance);
+        builder.finish()
+    }
+
+    /// The zones on `layer`: the fills KiCad stored, and the outline of a
+    /// zone without a stored fill on the layer, hatched ([`HATCH_PITCH`]).
+    #[must_use]
+    pub fn zones(&self, board: &Board, layer: LayerId) -> Mesh {
+        let mut builder = MeshBuilder::new(self.tolerance);
+        add_zones(&mut builder, board, layer);
         builder.finish()
     }
 
