@@ -35,12 +35,16 @@
 //! site, which no other statement here does: what nothing names has no
 //! index to find it by. They run once a night, with no person waiting.
 //! Steps 5 and 6 are index ranges: `session_expires_at`, and the unique
-//! index on `account.handle`, which holds the nulls.
+//! index on `account.handle`, which holds the nulls; `tests/collector.rs`
+//! plans both.
 //!
-//! A handle chosen in the instant a sign-up goes is safe: the delete
-//! waits on the row the choice updates and then reads its new handle,
-//! so the account stays. If the delete commits first, the choice finds no
-//! row and fails, and the person signs in again.
+//! A sign-up the person is using in the instant it goes: a handle choice
+//! that commits first is safe, since the delete waits on the row the
+//! choice updates and then reads its new handle, so the account stays.
+//! Any other order costs the person one more sign-in: a sign-in waiting
+//! on the delete makes a fresh account; a sign-in that committed first
+//! loses its account under it, so the session it starts is refused or
+//! cascades away; a choice after the delete finds no row and fails.
 //!
 //! # A concurrent upload
 //!
@@ -89,7 +93,9 @@ use crate::error::{Error, Result};
 use crate::pending;
 
 /// How long a row is left alone: long enough that nothing still in
-/// flight can be holding it.
+/// flight can be holding it, and, for a sign-up, long enough to pick a
+/// handle. The two are one number by decision (#31): split it if either
+/// ever has to move.
 pub const GRACE_HOURS: i32 = 24;
 
 /// How long the store gets to delete one object: `remove_object` holds a
@@ -169,9 +175,8 @@ async fn claim(db: &PgPool, hash: &BlobHash, size: u64) -> Result<()> {
 
 /// One night's work: everything nothing names and the grace no longer
 /// covers, the sessions and sign-ups that have run out, and what a run
-/// before it did not finish. Each step commits
-/// on its own, since each is a whole outcome and the next run redoes
-/// nothing of it.
+/// before it did not finish. Each step commits on its own, since each is
+/// a whole outcome and the next run redoes nothing of it.
 ///
 /// # Errors
 ///
@@ -198,30 +203,32 @@ pub async fn run(db: &PgPool, blobs: &dyn BlobStore) -> Result<Collected> {
     })
 }
 
-/// Step 5's statement, public so that the plan test in
-/// `tests/collector.rs` plans the text the run executes.
+/// Step 5's statement. Steps 5 and 6 keep theirs public so that the plan
+/// test in `tests/collector.rs` plans the text the run executes.
 pub const EXPIRED_SESSIONS: &str = "DELETE FROM session WHERE expires_at <= now()";
+
+/// Step 6's statement; `$1` is [`GRACE_HOURS`].
+pub const OLD_SIGN_UPS: &str = "DELETE FROM account
+     WHERE handle IS NULL AND created_at <= now() - make_interval(hours => $1)";
 
 /// Step 5. The per-account sweep in [`crate::session::start`] stays: it
 /// keeps an account that signs in often tidy between runs.
 async fn remove_sessions(db: &PgPool) -> Result<u64> {
-    Ok(sqlx::query(EXPIRED_SESSIONS)
+    let removed = sqlx::query(EXPIRED_SESSIONS)
         .execute(db)
         .await?
-        .rows_affected())
+        .rows_affected();
+    Ok(removed)
 }
 
 /// Step 6. The grace counts from the account's first sign-in, which a
-/// later sign-in does not move: a day is long enough to pick a handle.
+/// later sign-in does not move.
 async fn remove_sign_ups(db: &PgPool) -> Result<u64> {
-    let removed = sqlx::query(
-        "DELETE FROM account
-         WHERE handle IS NULL AND created_at <= now() - make_interval(hours => $1)",
-    )
-    .bind(GRACE_HOURS)
-    .execute(db)
-    .await?
-    .rows_affected();
+    let removed = sqlx::query(OLD_SIGN_UPS)
+        .bind(GRACE_HOURS)
+        .execute(db)
+        .await?
+        .rows_affected();
     Ok(removed)
 }
 

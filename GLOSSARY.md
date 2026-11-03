@@ -57,7 +57,7 @@ A blob hash the operator has refused site-wide: not accepted, not served, not re
 _Avoid_: banned file, takedown entry
 
 **Collector**:
-The nightly job that removes revisions no branch reaches, then trees and blobs no revision names, as a file or as a thumbnail, then sessions past their expiry and accounts that never chose a handle.
+The nightly job that removes revisions no branch reaches, then trees and blobs no revision names, as a file or as a thumbnail, then sessions past their expiry and sign-ups a day old.
 _Avoid_: garbage collector, GC, cleanup
 
 **Thumbnail**:
@@ -98,6 +98,10 @@ _Avoid_: contributor, member, editor
 **Account**:
 What a person holds on kiewer: one handle, the sign-in methods that open it, the designs it owns. One per person.
 _Avoid_: user, profile
+
+**Sign-up**:
+An account with no handle yet: a first sign-in that has not reached the handle form. One a day old is the collector's, and the person who comes back starts a fresh one.
+_Avoid_: pending account, abandoned account, incomplete account
 
 **Identity**:
 One sign-in method of an account: a provider and that provider's own id for the person. An identity belongs to one account for good; an email address never finds an account.

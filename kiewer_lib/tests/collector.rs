@@ -3,7 +3,7 @@
 //! stays, a second run finds nothing, a run cut short leaves work the
 //! next one finds, and a concurrent upload of the same bytes survives.
 //! After those, expired sessions and day-old accounts with no handle go
-//! (#31), the sessions by an index range.
+//! (#31), each by an index range.
 //! A run acts on the whole database, so the tests here take turns, and
 //! each ages only its own rows to bring them inside what a run removes.
 //! The Postgres tests skip without `DATABASE_URL`, like `tests/db.rs`.
@@ -34,6 +34,7 @@ use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
 use sqlx::PgPool;
+use test_case::test_case;
 use tokio::sync::{Mutex, Notify};
 
 /// A run sees every test's rows and drains every test's removal queue
@@ -444,11 +445,14 @@ async fn a_sign_up_with_no_handle_goes_after_a_day_with_its_identities() {
     assert_ne!(again.account_id, abandoned);
 }
 
-/// The run's sweep of expired sessions, planned with sequential scans
-/// priced out: on a table this small the planner scans whenever it may,
-/// so a plan that still scans is one with no index to read.
+/// A sweep of the run, planned with sequential scans priced out: on
+/// tables this small the planner scans whenever it may, so a plan that
+/// still scans is one with no index to read. `grace` binds the
+/// statement's `$1`, for the one that has it.
+#[test_case(collector::EXPIRED_SESSIONS, None, "session_expires_at" ; "expired sessions")]
+#[test_case(collector::OLD_SIGN_UPS, Some(collector::GRACE_HOURS), "account_handle_key" ; "old sign-ups")]
 #[tokio::test]
-async fn the_sweep_of_expired_sessions_reads_its_index() {
+async fn a_sweep_reads_its_index(statement: &str, grace: Option<i32>, index: &str) {
     let Some(db) = pool_from_env().await else {
         return;
     };
@@ -457,14 +461,15 @@ async fn the_sweep_of_expired_sessions_reads_its_index() {
         .execute(&mut *tx)
         .await
         .expect("set");
-    let explain = format!("EXPLAIN {}", collector::EXPIRED_SESSIONS);
-    let lines: Vec<String> = sqlx::query_scalar(&explain)
-        .fetch_all(&mut *tx)
-        .await
-        .expect("a plan");
+    let explain = format!("EXPLAIN {statement}");
+    let mut query = sqlx::query_scalar(&explain);
+    if let Some(grace) = grace {
+        query = query.bind(grace);
+    }
+    let lines: Vec<String> = query.fetch_all(&mut *tx).await.expect("a plan");
     let plan = lines.join("\n");
     assert!(!plan.contains("Seq Scan"), "{plan}");
-    assert!(plan.contains("session_expires_at"), "{plan}");
+    assert!(plan.contains(index), "{plan}");
 }
 
 /// The blob of an aged revision no branch reaches, as a tree entry.
