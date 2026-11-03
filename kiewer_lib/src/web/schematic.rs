@@ -25,7 +25,7 @@ use kicad_core::schematic::sheet_tree::{self, SheetNode, SheetPath};
 
 use super::history::{self, Linked};
 use super::open_graph::{self, OpenGraph};
-use super::viewer::{NOT_BUILT, embedded, script_url};
+use super::viewer::{NOT_BUILT, embedded, page_script_url, script_url};
 use super::{AppState, blob};
 use crate::account::Handle;
 use crate::blob::blocking;
@@ -148,9 +148,12 @@ pub struct Page {
     pub build: String,
     pub embedded: bool,
     pub not_built: &'static str,
-    /// Where the page imports the viewer's script from
+    /// Where the page preloads the viewer's script from
     /// (`web/viewer.rs`).
     pub script_url: String,
+    /// Where the page imports the page script from, the one the board
+    /// page imports too (`web/viewer.rs`).
+    pub page_script_url: String,
     /// What the tab and the header name.
     pub title: String,
     /// The sheet panel, the root sheet first; empty for a revision
@@ -186,6 +189,7 @@ impl Page {
             embedded: embedded(),
             not_built: NOT_BUILT.trim_end(),
             script_url: script_url(),
+            page_script_url: page_script_url(),
             title,
             sheets,
             back,

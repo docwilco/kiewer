@@ -23,8 +23,16 @@
 // without compressing at request time. The wasm is hashed first, since
 // the script fetches the wasm by name: the script's one mention of the
 // plain name becomes the hashed one, and the script is hashed after
-// that rewrite. web/viewer.rs reads the names and the six paths from
-// the environment this script sets.
+// that rewrite. web/viewer.rs reads the names and the paths from the
+// environment this script sets.
+//
+// The page script, `assets/kiewer_viewer_page.js` (the gestures and the
+// beacon the board and schematic pages share), is in the repo and so is
+// emitted on every build the same way, viewer or not. It imports the
+// viewer's script as `./kiewer_viewer.js`; with the viewer embedded that
+// becomes the hashed name before the page script is hashed, so a new
+// viewer is a new page script too. Without it the import stays plain
+// and fails at the 503, as the viewer's own import did.
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -62,11 +70,20 @@ fn main() {
     let dist = viewer.join("dist");
     let script = dist.join("kiewer_viewer.js");
     let wasm = dist.join("kiewer_viewer_bg.wasm");
-    if script.is_file() && wasm.is_file() {
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    let page_script = manifest.join("assets").join("kiewer_viewer_page.js");
+    println!("cargo::rerun-if-changed={}", page_script.display());
+    let page_text = fs::read_to_string(&page_script).expect("the page script is UTF-8");
+    let page_mentions = page_text.matches("\"./kiewer_viewer.js\"").count();
+    assert_eq!(
+        page_mentions, 1,
+        "the page script imports the viewer's script once, by \"./kiewer_viewer.js\"; this one \
+         names it {page_mentions} times, so the rewrite to the hashed name needs a look"
+    );
+    let page_text = if script.is_file() && wasm.is_file() {
         println!("cargo::rustc-cfg=kiewer_viewer_embedded");
         println!("cargo::rerun-if-changed={}", script.display());
         println!("cargo::rerun-if-changed={}", wasm.display());
-        let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
         let wasm_bytes = fs::read(&wasm).expect("the wasm is readable");
         let wasm_name = hashed_name("kiewer_viewer_bg", &wasm_bytes, "wasm");
         let script_text = fs::read_to_string(&script).expect("the script is UTF-8");
@@ -85,6 +102,7 @@ fn main() {
             &script_name,
             script_text.as_bytes(),
         );
+        page_text.replace("\"./kiewer_viewer.js\"", &format!("\"./{script_name}\""))
     } else {
         assert!(
             env::var_os("KIEWER_VIEWER_REQUIRED").is_none_or(|value| value != "1"),
@@ -95,7 +113,10 @@ fn main() {
         // The whole viewer crate's directory, so the files' appearance
         // under dist/ reruns this script and the embed switches on.
         println!("cargo::rerun-if-changed={}", viewer.display());
-    }
+        page_text
+    };
+    let page_name = hashed_name("kiewer_viewer_page", page_text.as_bytes(), "js");
+    emit("KIEWER_VIEWER_PAGE", &out, &page_name, page_text.as_bytes());
 }
 
 /// `<stem>.<hash prefix>.<extension>` for `bytes`.

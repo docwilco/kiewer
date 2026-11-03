@@ -17,7 +17,7 @@ use kiewer_lib::design;
 use kiewer_lib::session;
 use kiewer_lib::web::AppState;
 use kiewer_lib::web::schematic::SCHEMATIC_PATH;
-use kiewer_lib::web::viewer::{NOT_BUILT, embedded, script_url};
+use kiewer_lib::web::viewer::{NOT_BUILT, embedded, page_script_url, script_url};
 use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
@@ -62,16 +62,18 @@ async fn the_schematic_page_has_the_canvas_and_loads_the_viewer_and_the_sheet() 
     assert!(body.contains("<canvas"), "{body}");
     assert!(body.contains("touch-action: none"), "{body}");
     assert!(
-        body.contains(&format!("from \"{}\"", script_url())),
+        body.contains(&format!("from \"{}\"", page_script_url())),
+        "the gestures and the beacon are the page script's, as on the board page: {body}"
+    );
+    assert!(
+        body.contains(&format!(
+            r#"<link rel="modulepreload" href="{}">"#,
+            script_url()
+        )),
         "{body}"
     );
     assert!(body.contains("load_schematic"), "{body}");
     assert!(body.contains("#f5f4ef"), "KiCad's paper colour: {body}");
-    assert!(body.contains("passive: false"), "{body}");
-    assert!(
-        body.contains("/api/beacon"),
-        "the beacon is sent here too: {body}"
-    );
     assert_eq!(
         body.contains(NOT_BUILT.trim_end()),
         !embedded(),

@@ -1,16 +1,24 @@
 //! The viewer page and what it loads: the wasm-bindgen output of
-//! `kiewer_viewer` (embedded at build time, see `build.rs`) and the board.
-//! At `/viewer` the board is the hand-off one at a fixed URL, kept until
-//! a design exists; a design page (`web/design.rs`, `web/history.rs`)
-//! renders the same [`Page`] with the revision's board blob and a
-//! [`DesignView`].
+//! `kiewer_viewer` (embedded at build time, see `build.rs`), the page
+//! script and the board. At `/viewer` the board is the hand-off one at a
+//! fixed URL, kept until a design exists; a design page (`web/design.rs`,
+//! `web/history.rs`) renders the same [`Page`] with the revision's board
+//! blob and a [`DesignView`].
 //!
-//! The script and the wasm are static assets under the caching policy
+//! The page script (`assets/kiewer_viewer_page.js`) holds what the board
+//! and schematic pages share: the gestures, the resize observer, the zoom
+//! read-out, the panic hook and the beacon. Each page imports it by
+//! [`page_script_url`] and calls its `start` with the canvas and the
+//! page's load; the page script imports the viewer's script.
+//!
+//! The three are static assets under the caching policy
 //! (`crate::cache`): each is served at `/viewer/<name>.<hash>.<ext>`,
 //! the name `build.rs` gave it from its bytes, as immutable for a year,
 //! in the brotli or gzip variant built then when the browser takes it.
-//! A page names the script by [`script_url`]; the script fetches the
-//! wasm by its hashed name.
+//! The page script names the viewer's script by its hashed name, and the
+//! viewer's script names the wasm by its own; a page preloads the
+//! viewer's script by [`script_url`] so the fetch of the two scripts
+//! overlaps.
 
 use askama::Template;
 use axum::Router;
@@ -43,10 +51,14 @@ const BOARD: &str = include_str!("../../../viewer-drop/board/midi8knob.kicad_pcb
 /// What an embedded file is to the page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetKind {
-    /// wasm-bindgen's ES module, which a page imports.
+    /// wasm-bindgen's ES module, which the page script imports.
     Script,
     /// The viewer itself, which the script fetches.
     Wasm,
+    /// The gestures and the beacon the board and schematic pages share,
+    /// an ES module each page imports. From the repo, so every build
+    /// carries it.
+    PageScript,
 }
 
 /// One embedded file in its three codings.
@@ -79,7 +91,18 @@ impl Asset {
     }
 }
 
-/// The embedded assets, when the build found the viewer.
+/// The page script, which every build carries.
+const PAGE_SCRIPT: Asset = Asset {
+    kind: AssetKind::PageScript,
+    name: env!("KIEWER_VIEWER_PAGE_NAME"),
+    content_type: "text/javascript; charset=utf-8",
+    identity: include_bytes!(env!("KIEWER_VIEWER_PAGE")),
+    brotli: include_bytes!(env!("KIEWER_VIEWER_PAGE_BR")),
+    gzip: include_bytes!(env!("KIEWER_VIEWER_PAGE_GZ")),
+};
+
+/// The embedded assets: the viewer's two when the build found the
+/// viewer, and the page script.
 #[cfg(kiewer_viewer_embedded)]
 const ASSETS: &[Asset] = &[
     Asset {
@@ -99,16 +122,17 @@ const ASSETS: &[Asset] = &[
         brotli: include_bytes!(env!("KIEWER_VIEWER_WASM_BR")),
         gzip: include_bytes!(env!("KIEWER_VIEWER_WASM_GZ")),
     },
+    PAGE_SCRIPT,
 ];
 #[cfg(not(kiewer_viewer_embedded))]
-const ASSETS: &[Asset] = &[];
+const ASSETS: &[Asset] = &[PAGE_SCRIPT];
 
 /// Whether this build carries the viewer. `false` on a tree where
 /// `scripts/build-viewer.sh` has not run: the page then says so and the
-/// asset routes answer 503.
+/// viewer's asset routes answer 503.
 #[must_use]
 pub fn embedded() -> bool {
-    !ASSETS.is_empty()
+    asset_of(AssetKind::Script).is_some()
 }
 
 /// The embedded asset of `kind`, when the build carries one.
@@ -116,12 +140,18 @@ fn asset_of(kind: AssetKind) -> Option<&'static Asset> {
     ASSETS.iter().find(|asset| asset.kind == kind)
 }
 
-/// The URL a page imports the viewer's script from: the hashed name
-/// when the build carries it, else the plain one, whose route says the
-/// viewer is not built in.
+/// The URL of the viewer's script, which the page script imports and a
+/// page preloads: the hashed name when the build carries it, else the
+/// plain one, whose route says the viewer is not built in.
 #[must_use]
 pub fn script_url() -> String {
     asset_of(AssetKind::Script).map_or_else(|| "/viewer/kiewer_viewer.js".to_owned(), Asset::url)
+}
+
+/// The URL a page imports the page script from, always hashed.
+#[must_use]
+pub fn page_script_url() -> String {
+    PAGE_SCRIPT.url()
 }
 
 /// The URL the script fetches the wasm from.
@@ -240,8 +270,10 @@ pub struct Page {
     pub build: String,
     pub embedded: bool,
     pub not_built: &'static str,
-    /// Where the page imports the viewer's script from ([`script_url`]).
+    /// Where the page preloads the viewer's script from ([`script_url`]).
     pub script_url: String,
+    /// Where the page imports the page script from ([`page_script_url`]).
+    pub page_script_url: String,
     /// What the tab and the header name.
     pub title: String,
     /// Where the page fetches the board from, or `None` for a revision
@@ -268,6 +300,7 @@ impl Page {
             embedded: embedded(),
             not_built: NOT_BUILT.trim_end(),
             script_url: script_url(),
+            page_script_url: page_script_url(),
             title,
             board_url,
             design,
@@ -362,5 +395,18 @@ mod tests {
             assert_eq!(script, "/viewer/kiewer_viewer.js");
             assert_eq!(wasm, "/viewer/kiewer_viewer_bg.wasm");
         }
+    }
+
+    #[test]
+    fn the_page_script_is_hashed_and_imports_the_viewer_script_by_its_name() {
+        let url = page_script_url();
+        assert!(hashed(&url, "/viewer/kiewer_viewer_page.", ".js"), "{url}");
+        let text = std::str::from_utf8(PAGE_SCRIPT.bytes(Encoding::Identity)).expect("UTF-8");
+        let script = script_url();
+        let name = script.strip_prefix("/viewer/").expect("under /viewer/");
+        assert!(
+            text.contains(&format!("from \"./{name}\";")),
+            "the page script imports {script}, which sits beside it"
+        );
     }
 }

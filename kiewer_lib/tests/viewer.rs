@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::cache::Policy;
-use kiewer_lib::web::viewer::{BOARD_PATH, NOT_BUILT, embedded, script_url, wasm_url};
+use kiewer_lib::web::viewer::{
+    BOARD_PATH, NOT_BUILT, embedded, page_script_url, script_url, wasm_url,
+};
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use test_case::test_case;
 
@@ -48,15 +50,18 @@ async fn the_viewer_page_has_the_canvas_and_loads_the_viewer_and_the_board() {
         "two-finger pinch needs it: {body}"
     );
     assert!(
-        body.contains(&format!("from \"{}\"", script_url())),
-        "the script is imported by its hashed URL: {body}"
+        body.contains(&format!("from \"{}\"", page_script_url())),
+        "the page script is imported by its hashed URL: {body}"
+    );
+    assert!(
+        body.contains(&format!(
+            r#"<link rel="modulepreload" href="{}">"#,
+            script_url()
+        )),
+        "the viewer's script is fetched beside the page script: {body}"
     );
     assert!(body.contains(BOARD_PATH), "{body}");
-    assert!(
-        body.contains("passive: false"),
-        "the wheel listener prevents the page scroll: {body}"
-    );
-    assert!(body.contains("preventDefault"), "{body}");
+    assert!(body.contains("load_board"), "{body}");
     assert_eq!(
         body.contains(NOT_BUILT.trim_end()),
         !embedded(),
@@ -102,6 +107,7 @@ const SCRIPT: &str = "text/javascript; charset=utf-8";
 const WASM: &str = "application/wasm";
 const SCRIPT_MARK: &[u8] = b"export class Viewer";
 const WASM_MARK: &[u8] = b"\0asm";
+const PAGE_SCRIPT_MARK: &[u8] = b"export async function start(canvas, load)";
 
 #[test_case(script_url, SCRIPT, SCRIPT_MARK, "gzip, deflate, br", Some("br"); "the script as brotli")]
 #[test_case(script_url, SCRIPT, SCRIPT_MARK, "gzip, deflate", Some("gzip"); "the script as gzip")]
@@ -109,6 +115,9 @@ const WASM_MARK: &[u8] = b"\0asm";
 #[test_case(wasm_url, WASM, WASM_MARK, "gzip, deflate, br", Some("br"); "the wasm as brotli")]
 #[test_case(wasm_url, WASM, WASM_MARK, "gzip, deflate", Some("gzip"); "the wasm as gzip")]
 #[test_case(wasm_url, WASM, WASM_MARK, "identity", None; "the wasm as it is")]
+#[test_case(page_script_url, SCRIPT, PAGE_SCRIPT_MARK, "gzip, deflate, br", Some("br"); "the page script as brotli")]
+#[test_case(page_script_url, SCRIPT, PAGE_SCRIPT_MARK, "gzip, deflate", Some("gzip"); "the page script as gzip")]
+#[test_case(page_script_url, SCRIPT, PAGE_SCRIPT_MARK, "identity", None; "the page script as it is")]
 #[tokio::test]
 async fn an_asset_is_served_hashed_immutable_and_in_the_coding_the_request_takes(
     url: fn() -> String,
@@ -119,7 +128,9 @@ async fn an_asset_is_served_hashed_immutable_and_in_the_coding_the_request_takes
 ) {
     let (addr, _dir) = start().await;
     let path = url();
-    if !embedded() {
+    // The page script is the repo's, in every build; the viewer's two
+    // need scripts/build-viewer.sh.
+    if !embedded() && path != page_script_url() {
         let response = http::request(addr, "GET", &path, &[], "").await;
         assert_eq!(response.status, 503);
         assert_eq!(response.body, NOT_BUILT);
@@ -183,6 +194,64 @@ async fn the_plain_names_are_gone_with_the_hash() {
     let (addr, _dir) = start().await;
     let plain = http::request(addr, "GET", "/viewer/kiewer_viewer.js", &[], "").await;
     assert_eq!(plain.status, if embedded() { 404 } else { 503 });
+    let page = http::request(addr, "GET", "/viewer/kiewer_viewer_page.js", &[], "").await;
+    assert_eq!(page.status, 404, "the page script is always hashed");
+}
+
+/// What a page hands the page script, by the page.
+#[test_case("/viewer", "board", "load_board"; "the board page")]
+#[test_case("/schematic", "sheet", "load_schematic"; "the schematic page")]
+#[tokio::test]
+async fn a_page_hands_its_canvas_and_its_load_to_the_page_script_and_holds_no_gesture_of_its_own(
+    page: &str,
+    canvas: &str,
+    load: &str,
+) {
+    let (addr, _dir) = start().await;
+    let (status, body) = http::get(addr, page).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains(&format!(
+            r#"start(document.getElementById("{canvas}"), async function"#
+        )),
+        "{body}"
+    );
+    assert!(body.contains(load), "{body}");
+    for handler in [
+        "\"wheel\"",
+        "\"gesturechange\"",
+        "\"dblclick\"",
+        "ResizeObserver",
+        "kiewerPanic",
+        "sendBeacon",
+        "showZoom",
+    ] {
+        assert!(!body.contains(handler), "{page} still has {handler}");
+    }
+}
+
+#[tokio::test]
+async fn the_page_script_wires_the_gestures_the_read_out_and_the_resize() {
+    let (addr, _dir) = start().await;
+    let (status, body) = http::get(addr, &page_script_url()).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("passive: false"),
+        "the wheel listener prevents the page scroll: {body}"
+    );
+    for wired in [
+        "\"wheel\"",
+        "\"pointerdown\"",
+        "\"pointermove\"",
+        "\"gesturechange\"",
+        "\"dblclick\"",
+        "\"keydown\"",
+        "new ResizeObserver(resize).observe(canvas)",
+        "viewer.pinch(",
+        "zoomBox.textContent",
+    ] {
+        assert!(body.contains(wired), "{wired}: {body}");
+    }
 }
 
 #[tokio::test]

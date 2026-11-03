@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use kiewer_assert::assert_is_empty;
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::web::beacon::{BEACON_PATH, LIMIT_PER_MINUTE, MAX_BODY, MAX_REASON, MAX_VENDOR};
+use kiewer_lib::web::viewer::page_script_url;
 use kiewer_test_support::db::fresh;
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use test_case::test_case;
@@ -290,10 +291,18 @@ async fn only_post_is_served() {
     assert_eq!(status, 405);
 }
 
+#[test_case("/viewer"; "the board page")]
+#[test_case("/schematic"; "the schematic page")]
 #[tokio::test]
-async fn the_viewer_page_sends_the_beacon_and_keeps_a_panic_for_it() {
+async fn a_page_sends_the_beacon_and_keeps_a_panic_for_it_through_the_page_script(page: &str) {
     let (addr, _dir) = start().await;
-    let (status, body) = http::get(addr, "/viewer").await;
+    let (status, html) = http::get(addr, page).await;
+    assert_eq!(status, 200);
+    assert!(
+        html.contains(&format!("from \"{}\"", page_script_url())),
+        "{page} imports the page script: {html}"
+    );
+    let (status, body) = http::get(addr, &page_script_url()).await;
     assert_eq!(status, 200);
     assert!(body.contains("navigator.sendBeacon"), "{body}");
     assert!(body.contains(BEACON_PATH), "{body}");
@@ -305,12 +314,13 @@ async fn the_viewer_page_sends_the_beacon_and_keeps_a_panic_for_it() {
     let hook = body
         .find("panicked at")
         .expect("the panic hook reads the hook's message");
-    let module = body
-        .find("<script type=\"module\">")
-        .expect("the module script");
+    let entry = body
+        .find("export async function start")
+        .expect("the entry a page calls");
     assert!(
-        hook < module,
-        "the panic hook runs before the module, so a panic in init is kept"
+        hook < entry,
+        "the panic hook is set when the module is evaluated, before a page can start it, \
+         so a panic in init is kept"
     );
     assert!(body.contains("kiewer-panic"), "{body}");
 }

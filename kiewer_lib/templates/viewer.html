@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ title }} - kiewer</title>
 {% if let Some(og) = og %}{% include "open_graph.html" %}{% endif %}
+<link rel="modulepreload" href="{{ script_url }}">
 <style>
   html, body { margin: 0; height: 100%; background: #2b2b2b; color: #d0d2cd; font: 14px system-ui, sans-serif; }
   body { display: flex; flex-direction: column; }
@@ -186,258 +187,23 @@
 {% if !embedded %}
 <p id="not-built">{{ not_built }}</p>
 {% endif %}
-<script>
-// A wasm panic reaches the page as a bare "unreachable" trap; its message
-// goes through console_error_panic_hook to console.error first. This
-// classic script runs before the module below, so a panic inside
-// Viewer.create or load_board is kept too; the beacon block at the end of
-// the module reads kiewerPanic and listens for kiewer-panic.
-(function () {
-  window.kiewerPanic = "";
-  var original = console.error.bind(console);
-  console.error = function () {
-    var text = Array.prototype.map.call(arguments, String).join(" ");
-    if (text.startsWith("panicked at")) {
-      window.kiewerPanic = text.split("\n\nStack:")[0];
-      window.dispatchEvent(new Event("kiewer-panic"));
-    }
-    original.apply(console, arguments);
-  };
-})();
-</script>
 <script type="module">
-// The page owns the listeners and hands each gesture to the wasm in
-// device pixels; the camera (f64) and the drawing are Rust. The bindings
-// are KiCad's (docs/v1-scope.md, Rendering, Zoom).
-import init, { Viewer } from "{{ script_url }}";
+// The gestures, the zoom read-out, the panic hook and the beacon are the
+// page script's (kiewer_lib/assets/kiewer_viewer_page.js), shared with
+// the schematic page; this hands it the canvas and the board's load. The
+// blocks below wake on kiewer-board.
+import { start } from "{{ page_script_url }}";
 
-const canvas = document.getElementById("board");
-const status = document.getElementById("status");
-const errorBox = document.getElementById("error");
-const zoomBox = document.getElementById("zoom");
-let viewer = null;
-let frame = 0;
-let gesturing = false;
-
-function fail(message) {
-  errorBox.textContent = String(message);
-  errorBox.hidden = false;
-}
-function dpr() { return window.devicePixelRatio || 1; }
-function point(e) {
-  const r = canvas.getBoundingClientRect();
-  return [(e.clientX - r.left) * dpr(), (e.clientY - r.top) * dpr()];
-}
-function schedule() {
-  if (frame || !viewer) return;
-  frame = requestAnimationFrame(function (now) {
-    frame = 0;
-    try { viewer.render(now); } catch (e) { fail(e); }
-    showZoom();
-    window.dispatchEvent(new Event("kiewer-frame"));
-    // A fade asks for its own next frame; otherwise frames are on demand.
-    if (viewer.fading()) schedule();
-  });
-}
-// Lower right: the zoom relative to the fitted board and the scale in
-// device pixels per millimetre, as the camera holds them.
-function showZoom() {
-  if (!viewer) return;
-  const zoom = viewer.zoom();
-  if (!(zoom > 0)) { zoomBox.textContent = ""; return; }
-  zoomBox.textContent = zoom.toPrecision(3).replace(/\.?0+$/, "") + "x fit, "
-    + viewer.scale().toPrecision(3) + " px/mm";
-}
-function resize() {
-  const r = canvas.getBoundingClientRect();
-  canvas.width = Math.max(1, Math.round(r.width * dpr()));
-  canvas.height = Math.max(1, Math.round(r.height * dpr()));
-  if (viewer) { viewer.resize(canvas.width, canvas.height); schedule(); }
-}
-
-// Wheel: zoom at the pointer; with ctrl a horizontal pan and with shift a
-// vertical one, as KiCad binds them. A trackpad pinch also arrives as a
-// wheel with ctrlKey, told apart from a mouse wheel with ctrl held by its
-// fractional, small pixel deltas (a mouse notch is an integer of 40 or
-// more, or arrives in line or page mode). Non-passive, so preventDefault
-// keeps the page from scrolling or zooming.
-const PINCH_GAIN = 5;
-canvas.addEventListener("wheel", function (e) {
-  e.preventDefault();
-  if (!viewer) return;
-  const [x, y] = point(e);
-  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? canvas.clientHeight : 1;
-  const dx = e.deltaX * unit, dy = e.deltaY * unit;
-  const notch = e.deltaMode !== 0 || (Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 40);
-  if (e.ctrlKey && !notch) {
-    if (!gesturing) viewer.wheel(x, y, dy * PINCH_GAIN);
-  } else if (e.ctrlKey) {
-    viewer.pan(x, y, x - dy, y);
-  } else if (e.shiftKey) {
-    viewer.pan(x, y, x, y - (dy || dx));
-  } else {
-    if (dx) viewer.pan(x, y, x - dx, y);
-    if (dy) viewer.wheel(x, y, dy);
-  }
-  schedule();
-}, { passive: false });
-
-// Pointers: a mouse pans with the middle or right button (the left is
-// kept for selection later); a touch or pen pans with one pointer and
-// pinches with two.
-const pointers = new Map();
-canvas.addEventListener("pointerdown", function (e) {
-  if (e.pointerType === "mouse" && e.button !== 1 && e.button !== 2) return;
-  canvas.setPointerCapture(e.pointerId);
-  pointers.set(e.pointerId, point(e));
-  e.preventDefault();
-});
-canvas.addEventListener("pointermove", function (e) {
-  if (!viewer || !pointers.has(e.pointerId)) return;
-  const now = point(e);
-  if (pointers.size === 2) {
-    const [idA, idB] = Array.from(pointers.keys());
-    const a0 = pointers.get(idA), b0 = pointers.get(idB);
-    const a1 = e.pointerId === idA ? now : a0;
-    const b1 = e.pointerId === idB ? now : b0;
-    viewer.pinch(a0[0], a0[1], b0[0], b0[1], a1[0], a1[1], b1[0], b1[1]);
-  } else if (pointers.size === 1) {
-    const was = pointers.get(e.pointerId);
-    viewer.pan(was[0], was[1], now[0], now[1]);
-  }
-  pointers.set(e.pointerId, now);
-  schedule();
-});
-function release(e) { pointers.delete(e.pointerId); }
-canvas.addEventListener("pointerup", release);
-canvas.addEventListener("pointercancel", release);
-canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
-canvas.addEventListener("dblclick", function (e) {
-  if (!viewer) return;
-  const [x, y] = point(e);
-  viewer.double_click(x, y);
-  schedule();
-});
-
-// Safari reports a trackpad pinch as gesture events with a running scale.
-// While one is under way, a wheel with ctrlKey is the same pinch seen
-// twice and is dropped (the wheel handler checks `gesturing`).
-let gestureScale = 1;
-canvas.addEventListener("gesturestart", function (e) { e.preventDefault(); gestureScale = 1; gesturing = true; });
-canvas.addEventListener("gestureend", function (e) { e.preventDefault(); gesturing = false; });
-canvas.addEventListener("gesturechange", function (e) {
-  e.preventDefault();
-  if (!viewer || !e.scale) return;
-  const [x, y] = point(e);
-  viewer.zoom_at(x, y, e.scale / gestureScale);
-  gestureScale = e.scale;
-  schedule();
-});
-
-function fit() { if (viewer) { viewer.fit(); schedule(); } }
-document.getElementById("fit").addEventListener("click", fit);
-window.addEventListener("keydown", function (e) {
-  if (!viewer || e.target instanceof HTMLInputElement) return;
-  if (e.key === "+" || e.key === "=") viewer.step(1);
-  else if (e.key === "-" || e.key === "_") viewer.step(-1);
-  else if (e.key === "Home") fit();
-  else return;
-  e.preventDefault();
-  schedule();
-});
-new ResizeObserver(resize).observe(canvas);
-
-try {
-  await init();
-  resize();
-  viewer = await Viewer.create(canvas, canvas.width, canvas.height);
-  const samples = viewer.samples();
-  status.textContent = viewer.backend() + (samples > 1 ? ", " + samples + "x msaa" : "");
-  // On WebGL2, hovering the status says why WebGPU was not used.
-  status.title = viewer.fallback_reasons();
+start(document.getElementById("board"), async function (viewer, schedule) {
 {% if let Some(url) = board_url %}
   const response = await fetch("{{ url }}");
   if (!response.ok) throw new Error("the board: HTTP " + response.status);
   viewer.load_board(await response.text());
   window.dispatchEvent(new CustomEvent("kiewer-board", { detail: { viewer, schedule } }));
 {% else %}
-  status.textContent += ", no board in this revision";
+  document.getElementById("status").textContent += ", no board in this revision";
 {% endif %}
-  schedule();
-} catch (e) {
-  fail(e && e.message ? e.message : e);
-}
-
-// Telemetry (docs/v1-scope.md, Telemetry; the server side is
-// kiewer_lib/src/web/beacon.rs): one beacon per page load, after the
-// adapter init above, with the backend, whether navigator.gpu existed, the
-// outcome of that init and the adapter vendor; a wasm panic sends one more
-// with its message. sendBeacon queues the POST and returns at once, so
-// nothing here waits on the network or runs before the first frame is
-// scheduled. The outcome is the adapter's: a board that fails to fetch or
-// parse after a working adapter is still "ok", and a module import that
-// fails sends nothing, since this block never runs. No identifiers, no
-// cookie: the body is the five fields below.
-const BEACON_PATH = "/api/beacon";
-const MAX_REASON = 1024;
-const MAX_VENDOR = 64;
-// The names are read once, here, and never again from the wasm: after a
-// panic inside a &mut self call the object stays borrowed and any call
-// into it throws, so the panic path below touches only these.
-function fromViewer(read, fallback) {
-  try { return viewer ? read() : fallback; } catch (e) { return fallback; }
-}
-// The status line was set from viewer.backend() right after create, so
-// it names the backend even when the viewer cannot be asked any more.
-const backendName = fromViewer(function () { return viewer.backend(); },
-  /^(webgpu|webgl2)\b/.test(status.textContent) ? status.textContent.split(",")[0] : "none");
-let vendorName = fromViewer(function () { return viewer.adapter_vendor(); }, "");
-let panicSent = false;
-function bounded(text, max) {
-  text = String(text || "").slice(0, max);
-  // A cut through a surrogate pair leaves a lone high surrogate, which is
-  // not JSON the server accepts.
-  return /[\uD800-\uDBFF]$/.test(text) ? text.slice(0, -1) : text;
-}
-function sendBeacon(outcome, reason) {
-  if (!navigator.sendBeacon) return;
-  const body = JSON.stringify({
-    backend: backendName,
-    webgpu_present: "gpu" in navigator,
-    outcome: outcome,
-    reason: bounded(reason, MAX_REASON),
-    vendor: bounded(vendorName.toLowerCase(), MAX_VENDOR),
-  });
-  try { navigator.sendBeacon(BEACON_PATH, body); } catch (e) { /* telemetry never fails the page */ }
-}
-function sendPanic() {
-  if (panicSent) return;
-  panicSent = true;
-  sendBeacon("panic", window.kiewerPanic);
-}
-// wgpu names the vendor on WebGL2 from the browser's vendor string and
-// not yet on WebGPU (kiewer_viewer/src/web.rs, vendor_name), where the
-// browser's own adapter info says it when the browser exposes one. Bounded
-// to a second, so a slow adapter request cannot hold the beacon.
-async function webgpuVendor() {
-  if (vendorName || backendName !== "webgpu" || !navigator.gpu) return vendorName;
-  try {
-    const adapter = await Promise.race([
-      navigator.gpu.requestAdapter(),
-      new Promise(function (resolve) { setTimeout(resolve, 1000, null); }),
-    ]);
-    return adapter && adapter.info ? adapter.info.vendor : "";
-  } catch (e) { return ""; }
-}
-window.addEventListener("kiewer-panic", sendPanic);
-if (window.kiewerPanic) {
-  sendPanic();
-} else if (viewer) {
-  vendorName = await webgpuVendor();
-  sendBeacon("ok", "");
-} else {
-  sendBeacon("failed", errorBox.textContent);
-}
+});
 </script>
 <script type="module">
 // Fonts (docs/v1-scope.md, Fonts; the wasm side is the font block of
@@ -664,7 +430,7 @@ window.addEventListener("kiewer-board", function (e) {
 // this block mirrors the state into the select, the checkboxes and the
 // sliders, sends every change back, and keeps the URL fragment equal to
 // viewer.fragment() so the address bar is always a link to what is shown.
-// It wakes on kiewer-board, which the main module script sends once the
+// It wakes on kiewer-board, which the board's load above sends once the
 // board is loaded, with the viewer and the frame scheduler.
 const layersPanel = document.getElementById("layers");
 const layerList = document.getElementById("layer-list");
@@ -843,7 +609,7 @@ window.addEventListener("kiewer-board", function (e) {
 // clears them all, and Ctrl or Cmd with Z steps back. The search box takes a
 // reference designator, whatever its case, and frames the footprint, or
 // says it is not on the board. This block's listeners sit beside the
-// main module's: hover is a mouse move with no button held (a drag is a
+// shared page script's (kiewer_viewer_page.js): hover is a mouse move with no button held (a drag is a
 // pan, and a touch has no hover), and a click is the browser's own
 // click event, which a middle or right drag never sends; a left drag or
 // a touch pan that still ends in one is told apart by how far the
@@ -978,8 +744,8 @@ function clearNet() {
   refreshPinned();
 }
 // Escape in the search box leaves the box; in any other input (the font
-// picker's text box, a slider) it is that input's, as the main script
-// leaves every key to an input.
+// picker's text box, a slider) it is that input's, as the shared page
+// script leaves every key to an input.
 window.addEventListener("keydown", function (e) {
   if (e.key !== "Escape" || !netViewer) return;
   if (e.target === netQuery) { netQuery.blur(); return; }
