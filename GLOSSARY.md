@@ -177,6 +177,10 @@ One image per system face holding every character the design draws in it, redraw
 **Knockout**:
 A text item drawn inverted: a filled box around the text with the glyphs cut out of it, as KiCad's `knockout` flag on a text's layer asks.
 
+**Knockout box**:
+The filled rectangle of a knockout: the bounds of the glyph ink, grown on every side by KiCad's margin and turned with the text.
+_Avoid_: text box (KiCad's name for a separate framed text item)
+
 **Upright**:
 A footprint text's rule that its drawn angle is folded into (-90, 90], so it reads from the left or from below whatever way the footprint turns. KiCad's default; `(unlocked yes)` in the file turns it off.
 
