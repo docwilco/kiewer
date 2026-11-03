@@ -309,6 +309,7 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
+    use kiewer_assert::assert_is_empty;
 
     /// The hand-off board, the one real file in the repo.
     const BOARD: &str = include_str!("../../viewer-drop/board/midi8knob.kicad_pcb");
@@ -462,7 +463,7 @@ mod tests {
         .expect("a bare board parses");
         let metadata = Metadata::of(&board);
         assert_eq!(metadata.board_size, None);
-        assert!(metadata.fonts.is_empty());
+        assert_is_empty!(metadata.fonts);
         assert_eq!(metadata.layer_count, 2);
         assert_eq!(metadata.copper_layer_count, 1);
         assert!(

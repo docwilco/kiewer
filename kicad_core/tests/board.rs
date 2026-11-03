@@ -1,6 +1,7 @@
 //! The hand-off board through `parse_board`: the counts the issue pins,
 //! and that every item resolves its layer and net.
 
+use kiewer_assert::assert_is_not_empty;
 use std::sync::OnceLock;
 
 use kicad_core::model::{Board, Layer, LayerKind, NetId, PadKind, Shape, TextRole, ViaKind};
@@ -102,7 +103,7 @@ fn every_via_segment_and_zone_carries_a_net_that_resolves() {
     for zone in board.all_zones() {
         let net = zone.net.expect("a zone on a net");
         assert!(board.net(net).is_some());
-        assert!(!zone.layers.is_empty());
+        assert_is_not_empty!(zone.layers);
         for fill in &zone.fills {
             assert!(
                 zone.layers.contains(&fill.layer),
@@ -165,10 +166,6 @@ fn nets_are_named_and_gnd_is_the_busiest() {
 }
 
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "the values are parsed from these very decimal literals, so they are bit-identical"
-)]
 fn the_first_footprint_is_led6_at_its_place() {
     let fp = &board().footprints[0];
     assert_eq!(fp.name, "LED_SMD:LED_WS2812B_PLCC4_5.0x5.0mm_P3.2mm");
@@ -383,10 +380,6 @@ fn a_kicad9_board_with_a_net_table_resolves_numbered_nets() {
 }
 
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "the values are parsed from these very decimal literals, so they are bit-identical"
-)]
 fn a_kicad9_board_reads_its_zone_footprint_and_pads() {
     let board = parse_board(KICAD9_BOARD).expect("parses");
     let zone = &board.zones[0];

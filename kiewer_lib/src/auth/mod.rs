@@ -358,6 +358,7 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
+    use kiewer_assert::{assert_is_empty, assert_is_not_empty};
 
     #[test_case(Provider::GitHub, "github")]
     #[test_case(Provider::Discord, "discord")]
@@ -400,7 +401,7 @@ mod tests {
             auth.callback_url(Provider::GitHub),
             "https://kiewer.example/auth/github/callback"
         );
-        assert!(auth.providers().is_empty());
+        assert_is_empty!(auth.providers());
         assert!(auth.begin(Provider::GitHub).is_none());
     }
 
@@ -438,7 +439,7 @@ mod tests {
                 .contains(&format!("state={}", start.state))
         );
         assert!(start.authorize_url.contains("code_challenge_method=S256"));
-        assert!(!start.verifier.is_empty());
+        assert_is_not_empty!(start.verifier);
         assert!(
             !start.authorize_url.contains(&start.verifier),
             "the verifier stays home"

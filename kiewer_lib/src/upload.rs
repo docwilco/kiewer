@@ -1055,6 +1055,7 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
+    use kiewer_assert::assert_is_not_empty;
 
     #[test_case("board.kicad_pcb", Some(FileKind::Board); "a board")]
     #[test_case("Board.KICAD_SCH", Some(FileKind::Schematic); "a schematic, any case")]
@@ -1189,7 +1190,7 @@ mod tests {
         match err {
             Error::Refused(Refusal::DoesNotParse { path, error }) => {
                 assert_eq!(path, "x.file");
-                assert!(!error.is_empty());
+                assert_is_not_empty!(error);
             }
             other => panic!("not a refusal: {other}"),
         }

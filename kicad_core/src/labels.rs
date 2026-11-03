@@ -1034,6 +1034,7 @@ mod tests {
 
     use super::*;
     use crate::parse_board;
+    use kiewer_assert::assert_is_empty;
 
     const BOARD_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1210,7 +1211,7 @@ mod tests {
         let text = text_length("GND", height);
         // Just under the gate: nothing. Just over: one label, centred.
         let short = board(&segment(0.0, 0.0, 1.29 * text, 0.0, 0.25, "F.Cu", "GND"));
-        assert!(of_class(&candidates(&short), LabelClass::TrackNet).is_empty());
+        assert_is_empty!(of_class(&candidates(&short), LabelClass::TrackNet));
         let gate = board(&segment(0.0, 0.0, 1.31 * text, 0.0, 0.25, "F.Cu", "GND"));
         let labels = candidates(&gate);
         let tracks = of_class(&labels, LabelClass::TrackNet);
@@ -1250,7 +1251,7 @@ mod tests {
     #[test]
     fn a_track_too_narrow_for_the_minimum_height_gets_no_label() {
         let board = board(&segment(0.0, 0.0, 50.0, 0.0, 0.1, "F.Cu", "GND"));
-        assert!(candidates(&board).is_empty());
+        assert_is_empty!(candidates(&board));
     }
 
     fn pad(number: &str, net: &str, w: f64, h: f64, layers: &str, extra: &str) -> String {
@@ -1407,7 +1408,7 @@ mod tests {
                  (filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10))))
                (zone (net "VCC") (layer "B.Cu") (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10))))"#,
         );
-        assert!(of_class(&candidates(&none), LabelClass::ZoneNet).is_empty());
+        assert_is_empty!(of_class(&candidates(&none), LabelClass::ZoneNet));
     }
 
     #[test]
@@ -1458,7 +1459,7 @@ mod tests {
             segment(0.0, 0.0, length, 0.0, 1.0, "F.Cu", "GND"),
         ));
         assert_eq!(of_class(&candidates(&board), LabelClass::TrackNet).len(), 1);
-        assert!(of_class(&labels(&board), LabelClass::TrackNet).is_empty());
+        assert_is_empty!(of_class(&labels(&board), LabelClass::TrackNet));
     }
 
     #[test]

@@ -443,6 +443,7 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
+    use kiewer_assert::assert_is_empty;
 
     #[test]
     fn cells_pack_into_shelves_with_padding_in_the_smallest_power_of_two_atlas() {
@@ -656,10 +657,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "the colour and the invert flag compared are the same bits copied into the vertex, so they are bit-identical"
-    )]
     fn a_knockouts_quads_sample_each_cell_inverted_and_strips_the_empty_corner() {
         let text = layout("A B", &placement_at_anchor(), METRICS, |_| 0.5, true);
         let mut quads = Quads::default();
@@ -707,7 +704,7 @@ mod tests {
         };
         let mut quads = Quads::default();
         quads.add(&missing, &glyphs(), Point::default(), [1.0; 4], false);
-        assert!(quads.vertices.is_empty());
+        assert_is_empty!(quads.vertices);
     }
 
     #[test]

@@ -420,6 +420,7 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
+    use kiewer_assert::assert_is_empty;
 
     fn handle(text: &str) -> Handle {
         text.parse().expect("a handle")
@@ -510,7 +511,7 @@ mod tests {
             [Key::Home, Key::Design(DesignId::for_test(1)), Key::Home]
         );
         recorder.clear();
-        assert!(recorder.calls().is_empty());
+        assert_is_empty!(recorder.calls());
         NoPurge.purge(&[Key::Home]).await.expect("nothing to fail");
     }
 

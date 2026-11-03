@@ -4,6 +4,7 @@
 //! and `power` holds a third, `reg`, that reuses `io`'s file; the tree,
 //! the sheet paths that name its nodes, and the fragment they travel in.
 
+use kiewer_assert::assert_is_empty;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -73,7 +74,7 @@ fn the_tree_hangs_every_sheet_symbol_under_its_sheet_with_its_file_resolved() {
         Some("sub/io.kicad_sch"),
         "a file in a subfolder is found beside its parent"
     );
-    assert!(io.children.is_empty());
+    assert_is_empty!(io.children);
     // power's own sheet symbol reuses io's file: a second node, its own
     // path, the same file.
     assert_eq!(power.children.len(), 1);
@@ -170,7 +171,7 @@ fn a_sheet_whose_file_the_revision_lacks_is_a_leaf_without_a_file() {
     let io = &root.children[1];
     assert_eq!(io.name, "io");
     assert_eq!(io.file, None);
-    assert!(io.children.is_empty());
+    assert_is_empty!(io.children);
     assert_eq!(build("missing.kicad_sch", &partial), None);
 }
 

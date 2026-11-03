@@ -278,6 +278,7 @@ mod tests {
     use std::sync::OnceLock;
 
     use super::*;
+    use kiewer_assert::assert_is_empty;
 
     const BOARD_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -431,6 +432,6 @@ mod tests {
                 .values()
                 .any(|r| r.fill == d.indices))
         );
-        assert!(draws(&batch.glyphs, &batch.groups, &[]).is_empty());
+        assert_is_empty!(draws(&batch.glyphs, &batch.groups, &[]));
     }
 }

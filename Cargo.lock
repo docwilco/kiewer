@@ -2041,6 +2041,7 @@ version = "0.1.0"
 dependencies = [
  "derive_more",
  "i_overlay",
+ "kiewer_assert",
  "lyon_tessellation",
  "test-case",
 ]
@@ -2054,6 +2055,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "kiewer_assert"
+version = "0.1.0"
 
 [[package]]
 name = "kiewer_lib"
@@ -2072,6 +2077,7 @@ dependencies = [
  "google-cloud-gax",
  "google-cloud-storage",
  "kicad_core",
+ "kiewer_assert",
  "kiewer_test_support",
  "kiewer_viewer",
  "oauth2",
@@ -2118,6 +2124,7 @@ dependencies = [
  "derive_more",
  "futures-executor",
  "kicad_core",
+ "kiewer_assert",
  "naga",
  "png",
  "test-case",

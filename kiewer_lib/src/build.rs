@@ -28,6 +28,7 @@ pub fn line() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiewer_assert::assert_is_not_empty;
 
     #[test]
     fn line_has_the_release_shape_first() {
@@ -37,7 +38,7 @@ mod tests {
             .expect("the target and profile follow in parentheses");
         assert_eq!(release, format!("kiewer {VERSION}+{BUILD}"));
         assert_eq!(rest, format!("{TARGET}, {PROFILE})"));
-        assert!(!TARGET.is_empty());
+        assert_is_not_empty!(TARGET);
         assert!(matches!(PROFILE, "debug" | "release"));
     }
 }

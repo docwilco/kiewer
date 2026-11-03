@@ -7,6 +7,7 @@
 //! The Postgres tests skip without `DATABASE_URL`, like `tests/db.rs`;
 //! the route-priority test and the cap tests need no database.
 
+use kiewer_assert::assert_is_empty;
 use std::io::{Cursor, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -1085,7 +1086,7 @@ async fn the_hourly_allowance_refuses_the_push_over_it_through_the_library() {
     let Outcome::Pushed(first) = first else {
         panic!("a new design has no head to have moved");
     };
-    assert!(first.warnings.is_empty());
+    assert_is_empty!(first.warnings);
 
     let mut incoming = Incoming::new(one_an_hour).unwrap();
     receive(&mut incoming, "a.kicad_sch", sheet(2).as_bytes(), 64)

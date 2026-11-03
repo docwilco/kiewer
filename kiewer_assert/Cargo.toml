@@ -1,0 +1,16 @@
+[package]
+name = "kiewer_assert"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Dev-only: assertion macros for every crate's tests, kicad_core's and
+# kiewer_viewer's included, which kiewer_test_support cannot serve: it
+# depends on kiewer_lib, and kiewer_lib on both of them. No dependencies,
+# so a dev-dependency on it costs nothing. Never a dependency of a shipped
+# crate.
+publish = false
+
+[lints]
+workspace = true

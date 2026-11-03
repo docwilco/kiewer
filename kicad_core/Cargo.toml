@@ -23,4 +23,5 @@ lyon_tessellation = { version = "1", default-features = false, features = ["std"
 i_overlay = { version = "9", default-features = false }
 
 [dev-dependencies]
+kiewer_assert = { path = "../kiewer_assert" }
 test-case = "3"

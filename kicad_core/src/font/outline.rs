@@ -339,6 +339,7 @@ mod tests {
 
     use super::*;
     use crate::model::{Justify, Size, Vertical};
+    use kiewer_assert::{assert_is_empty, assert_is_not_empty};
 
     /// Consolas as a browser measures it: every glyph 0.55 em wide, the
     /// line box 0.74 em up and 0.26 em down.
@@ -404,7 +405,7 @@ mod tests {
         assert_point(j[3], 10.0 - cell_width, baseline + 0.26 * 1.4);
         let one = cell(&text, 1).corners;
         assert_point(one[1], 10.0 + cell_width, baseline - 0.74 * 1.4);
-        assert!(text.strips.is_empty());
+        assert_is_empty!(text.strips);
     }
 
     #[test_case(Horizontal::Left, Vertical::Top, 0.0, 1.0; "left top: the block starts at the anchor and its baseline sits a height below")]
@@ -576,7 +577,7 @@ mod tests {
             true,
         );
         assert_eq!(text.cells.len(), 4);
-        assert!(!text.strips.is_empty());
+        assert_is_not_empty!(text.strips);
         let cells = text.cells.iter().map(|cell| cell.corners);
         let outer = bounds_of(cells.clone().chain(text.strips.iter().copied()));
         // Pen 0.15: half is 0.075; the margin is a ninth of the height,

@@ -5,6 +5,7 @@
 //! Run (`kiewer/src/main.rs`), so the line asserted here is the line a
 //! Cloud Logging metric reads.
 
+use kiewer_assert::assert_is_empty;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -228,7 +229,7 @@ async fn a_body_over_the_limit_is_refused() {
     let body = format!(r#"{{"reason":"{marker}{}"#, "x".repeat(MAX_BODY));
     let response = send(addr, "203.0.113.22", &body).await;
     assert_eq!(response.status, 413, "{}", response.body);
-    assert!(log_lines_with(&marker).is_empty());
+    assert_is_empty!(log_lines_with(&marker));
 }
 
 #[tokio::test]

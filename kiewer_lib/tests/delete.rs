@@ -5,6 +5,7 @@
 //! days; the keys of what went are purged. The Postgres tests skip
 //! without `DATABASE_URL`, like `tests/db.rs`.
 
+use kiewer_assert::assert_is_empty;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -250,7 +251,7 @@ async fn the_wrong_name_deletes_nothing(typed: &str) {
     let refused = delete_design(&mut owner, &handle, "kept-board", typed).await;
     assert_eq!(refused.status, 422, "{}", refused.body);
     assert_eq!(design_count(&db, owner_id).await, 1, "it stands");
-    assert!(purge.calls().is_empty());
+    assert_is_empty!(purge.calls());
 }
 
 #[tokio::test]
@@ -465,7 +466,7 @@ async fn the_wrong_handle_deletes_nothing(typed: &str) {
     assert_eq!(refused.status, 422, "{}", refused.body);
     assert_eq!(design_count(&db, leaver_id).await, 1, "it stands");
     assert_eq!(sessions_of(&db, leaver_id).await, 1, "still signed in");
-    assert!(purge.calls().is_empty());
+    assert_is_empty!(purge.calls());
     assert!(leaver.cookie("kiewer_session").is_some());
 }
 

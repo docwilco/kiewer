@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["kicad_core", "kiewer_viewer", "kiewer_lib", "kiewer", "kiewer_render_dev", "kiewer_test_support", "newstroke_dev"]
+members = ["kicad_core", "kiewer_viewer", "kiewer_lib", "kiewer", "kiewer_render_dev", "kiewer_test_support", "kiewer_assert", "newstroke_dev"]
 
 [workspace.package]
 version = "0.1.0"

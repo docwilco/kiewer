@@ -239,6 +239,7 @@ mod tests {
     use crate::render::{Rgb, Vertex};
     use crate::scene::{Paint, Slice};
     use crate::view::{Layer, Stack, palette};
+    use kiewer_assert::assert_is_not_empty;
 
     /// A board-shaped scene: one rectangle, the board fill, 112 by 58 mm
     /// around (106, 79) like the hand-off board's outline box, and no
@@ -374,7 +375,7 @@ mod tests {
             return;
         };
         let info = headless.adapter();
-        assert!(!info.name.is_empty());
+        assert_is_not_empty!(info.name);
         if info.device_type == wgpu::DeviceType::Cpu {
             assert!(
                 info.name.to_lowercase().contains("llvmpipe"),

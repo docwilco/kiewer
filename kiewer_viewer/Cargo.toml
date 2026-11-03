@@ -51,6 +51,7 @@ web-sys = { version = "0.3", features = ["HtmlCanvasElement", "console"] }
 wgpu = { version = "30", default-features = false, features = ["webgpu", "webgl"] }
 
 [dev-dependencies]
+kiewer_assert = { path = "../kiewer_assert" }
 # One case per input for the packing and sizing rules (rust-conventions).
 test-case = "3"
 # The shader is validated natively, where no GPU is: naga's WGSL front

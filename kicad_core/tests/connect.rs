@@ -3,6 +3,7 @@
 //! what the net is called, on the sheet tree fixture and the hand-off
 //! sheet.
 
+use kiewer_assert::assert_is_not_empty;
 use std::sync::OnceLock;
 
 use kicad_core::model::Point;
@@ -315,7 +316,7 @@ fn the_hand_off_sheet_connects_as_kicad_drew_it() {
         connectivity.net(swo_net).map(|n| n.name.as_str()),
         Some("SWO")
     );
-    assert!(!net_pins(sheet, connectivity, swo_net).is_empty());
+    assert_is_not_empty!(net_pins(sheet, connectivity, swo_net));
     assert!(
         connectivity.nets().len() > 40,
         "{}",

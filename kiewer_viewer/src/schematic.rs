@@ -152,10 +152,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "the colours compared were produced by the same conversion of the same bytes, so they are bit-identical"
-    )]
     fn the_hand_off_sheet_becomes_a_scene_around_its_a4_paper() {
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
         let sheet = build(hand_off(), format).expect("a sheet with content");

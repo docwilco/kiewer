@@ -94,6 +94,7 @@ flate2 = "1"
 sha2 = "0.11"
 
 [dev-dependencies]
+kiewer_assert = { path = "../kiewer_assert" }
 # The brotli decoder, so the asset test reads the .br variant back.
 brotli = { version = "9", default-features = false, features = ["std"] }
 kiewer_test_support = { path = "../kiewer_test_support" }
