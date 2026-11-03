@@ -28,10 +28,18 @@ stage_docs()   { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps; }
 # never overwrites it. The target and the tool come from rustup and cargo
 # install (README, Development; the CI workflow's wasm job); the script
 # names what is missing.
+#
+# Clippy after the build, so a missing target or tool is still named by
+# the script above: code behind cfg(target_arch = "wasm32") is linted
+# here and nowhere else. The same package and the same default target
+# directory as the build, so the two share build scripts and proc macros
+# and a run costs the clippy pass alone. The -p is the exception
+# scripts/build-viewer.sh documents.
 stage_wasm() {
   local target_dir
   target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
   scripts/build-viewer.sh debug "$target_dir/viewer-check"
+  cargo clippy -p kiewer_viewer --lib --target wasm32-unknown-unknown -- -D warnings
 }
 
 run() {

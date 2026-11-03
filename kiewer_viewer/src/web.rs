@@ -252,8 +252,13 @@ async fn request_gpu(canvas: HtmlCanvasElement) -> Result<Gpu> {
 #[wasm_bindgen]
 impl Viewer {
     /// A viewer drawing into `canvas`, whose backing size is `width` by
-    /// `height` device pixels. Fails with a message naming why neither
-    /// WebGPU nor WebGL2 could be had.
+    /// `height` device pixels.
+    ///
+    /// # Errors
+    ///
+    /// A message naming why neither WebGPU nor WebGL2 could be had: no
+    /// surface on the canvas, no adapter, no device, or an adapter that
+    /// does not draw to this canvas.
     pub async fn create(
         canvas: HtmlCanvasElement,
         width: u32,
@@ -365,8 +370,13 @@ impl Viewer {
 
     /// Parse a `.kicad_pcb` text, tessellate every layer, upload them,
     /// open on the board's default view ([`Stack::default_view`]) and
-    /// fit the camera to the board. A parse error is the error's message
-    /// with its line.
+    /// fit the camera to the board.
+    ///
+    /// # Errors
+    ///
+    /// The text does not parse (the message is the parse error's, with
+    /// its line), or the board has no outline and no front copper to
+    /// draw.
     ///
     /// [`Stack::default_view`]: crate::view::Stack::default_view
     pub fn load_board(&mut self, text: &str) -> core::result::Result<(), JsError> {
@@ -392,8 +402,12 @@ impl Viewer {
     /// Parse a `.kicad_sch` text, tessellate the one sheet, upload it,
     /// build its nets and hit test, and fit the camera to its paper. The
     /// sheet replaces any board: no views, no font round trip, the paper
-    /// colour behind it. A parse error is the error's message with its
-    /// line.
+    /// colour behind it.
+    ///
+    /// # Errors
+    ///
+    /// The text does not parse (the message is the parse error's, with
+    /// its line), or the sheet has nothing to draw.
     pub fn load_schematic(&mut self, text: &str) -> core::result::Result<(), JsError> {
         let parsed = kicad_core::parse_schematic(text).map_err(Error::Schematic)?;
         let sheet = schematic::build(&parsed, self.config.format).ok_or(Error::EmptySheet)?;
@@ -745,6 +759,11 @@ impl Viewer {
     /// moves a fade in progress on; [`Viewer::fading`] says whether
     /// another frame is due after it. A lost or outdated surface is
     /// reconfigured and the frame skipped; the next call draws.
+    ///
+    /// # Errors
+    ///
+    /// The surface refuses a frame for a reason that is not a resize: a
+    /// validation failure in the configuration.
     pub fn render(&mut self, now: f64) -> core::result::Result<(), JsError> {
         match &mut self.sheet_highlight {
             Some(sheet) => sheet.pick_mut().advance(now),

@@ -135,12 +135,12 @@ jobs:
           run: ./scripts/checks.sh docs
 
   # The viewer crate for the browser, through wasm-bindgen. The target
-  # comes with the toolchain step; a dev box adds it with rustup (README,
-  # Development). wasm-bindgen-cli is installed at the version Cargo.lock
-  # names for the wasm-bindgen crate (scripts/wasm-bindgen-version.sh),
-  # inside the cached step so the binary rides in the cached cargo bin
-  # and the install is a no-op after the first run; the release-build job
-  # does the same.
+  # and clippy come with the toolchain step; a dev box adds the target
+  # with rustup (README, Development). wasm-bindgen-cli is installed at
+  # the version Cargo.lock names for the wasm-bindgen crate
+  # (scripts/wasm-bindgen-version.sh), inside the cached step so the
+  # binary rides in the cached cargo bin and the install is a no-op after
+  # the first run; the release-build job does the same.
   wasm:
     name: Viewer for wasm32
     if: github.ref_type != 'tag'
@@ -150,6 +150,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: clippy
       - uses: ./.github/actions/cargo-cached
         with:
           run: |
