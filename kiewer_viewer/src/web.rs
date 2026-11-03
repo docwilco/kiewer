@@ -256,9 +256,9 @@ impl Viewer {
     ///
     /// # Errors
     ///
-    /// A message naming why neither WebGPU nor WebGL2 could be had: no
-    /// surface on the canvas, no adapter, no device, or an adapter that
-    /// does not draw to this canvas.
+    /// No GPU to draw with, the message naming why: neither WebGPU nor
+    /// WebGL2 gave an adapter, WebGL2 gave no surface on the canvas or no
+    /// device, or the adapter in hand does not draw to this canvas.
     pub async fn create(
         canvas: HtmlCanvasElement,
         width: u32,
@@ -374,9 +374,9 @@ impl Viewer {
     ///
     /// # Errors
     ///
-    /// The text does not parse (the message is the parse error's, with
-    /// its line), or the board has no outline and no front copper to
-    /// draw.
+    /// The text does not parse (malformed, with its line in the message,
+    /// or from a KiCad older than 9), or the board has no outline and no
+    /// front copper to draw.
     ///
     /// [`Stack::default_view`]: crate::view::Stack::default_view
     pub fn load_board(&mut self, text: &str) -> core::result::Result<(), JsError> {
@@ -406,8 +406,8 @@ impl Viewer {
     ///
     /// # Errors
     ///
-    /// The text does not parse (the message is the parse error's, with
-    /// its line), or the sheet has nothing to draw.
+    /// The text does not parse (malformed, with its line in the message,
+    /// or from a KiCad older than 9), or the sheet has nothing to draw.
     pub fn load_schematic(&mut self, text: &str) -> core::result::Result<(), JsError> {
         let parsed = kicad_core::parse_schematic(text).map_err(Error::Schematic)?;
         let sheet = schematic::build(&parsed, self.config.format).ok_or(Error::EmptySheet)?;

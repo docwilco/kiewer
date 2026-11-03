@@ -30,10 +30,12 @@ stage_docs()   { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps; }
 # names what is missing.
 #
 # Clippy after the build, so a missing target or tool is still named by
-# the script above: code behind cfg(target_arch = "wasm32") is linted
-# here and nowhere else. The same package and the same default target
-# directory as the build, so the two share build scripts and proc macros
-# and a run costs the clippy pass alone. The -p is the exception
+# scripts/build-viewer.sh: code behind cfg(target_arch = "wasm32") is
+# linted here and nowhere else. The same package and the same default
+# target directory as the build, so the two share build scripts and proc
+# macros. Cargo keeps check and build units apart, so the first run on a
+# target directory checks each wasm32 dependency once; after that a run
+# checks only what changed. The -p is the exception
 # scripts/build-viewer.sh documents.
 stage_wasm() {
   local target_dir
