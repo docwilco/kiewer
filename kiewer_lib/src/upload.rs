@@ -110,8 +110,11 @@ impl Limits {
 }
 
 /// How large the upload route lets a request body be: the revision cap
-/// with room for the multipart framing and the text fields. Over it, the
-/// body is refused before any part is read.
+/// with room for the multipart framing and the text fields. The parts are
+/// read as they arrive, so the body is refused where the read passes it,
+/// with what came before already received, and the refusal is
+/// `Refusal::UploadTooLarge`. The kept files meet the revision cap first,
+/// so the limit refuses an upload only for the bytes it leaves out.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "201 MiB fits a usize on every target the server builds for (64-bit)"

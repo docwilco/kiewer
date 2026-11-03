@@ -378,6 +378,7 @@ pub(super) fn status(refusal: &Refusal) -> StatusCode {
     match refusal {
         Refusal::FileTooLarge { .. }
         | Refusal::RevisionTooLarge { .. }
+        | Refusal::UploadTooLarge { .. }
         | Refusal::AccountFull { .. } => StatusCode::PAYLOAD_TOO_LARGE,
         Refusal::NoKicadFile
         | Refusal::DoesNotParse { .. }
@@ -398,11 +399,12 @@ pub(super) fn status(refusal: &Refusal) -> StatusCode {
     }
 }
 
-/// A multipart failure as a refusal: the body limit's 413 is the
-/// revision cap, anything else is a body the server could not read.
+/// A multipart failure as a refusal: the body limit's 413 is a refusal
+/// of its own, since the files left out count against it as well as
+/// the kept ones; anything else is a body the server could not read.
 fn multipart_refusal(error: &MultipartError) -> Refusal {
     if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        Refusal::RevisionTooLarge {
+        Refusal::UploadTooLarge {
             limit_mb: Limits::DEFAULT.revision_mb(),
         }
     } else {

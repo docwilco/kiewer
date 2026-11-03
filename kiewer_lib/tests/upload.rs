@@ -27,6 +27,8 @@ use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
 use sqlx::PgPool;
 use test_case::test_case;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
@@ -1220,6 +1222,102 @@ async fn a_refused_upload_counts_against_the_hourly_allowance() {
         recorded, 30,
         "the 429 is not recorded, or being limited would extend the limit"
     );
+}
+
+/// `POST /upload` of zero-filled files of `(name, MB)` with the browser's
+/// session, the whole response back. The body is written a megabyte at a
+/// time and never held, and the response is read while it goes out, as
+/// a browser does: the server answers a refusal where it meets it and
+/// closes with the rest of the body unread, so the writes may fail and
+/// the read may end in a reset once the response has arrived.
+async fn post_zeros(browser: &http::Browser, files: &[(&str, usize)]) -> String {
+    const MB: usize = 1024 * 1024;
+    let boundary = "kiewer-test-boundary-7d3f";
+    let head_of = |name: &str| {
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; \
+             filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        )
+    };
+    let end = format!("--{boundary}--\r\n");
+    let length = end.len()
+        + files
+            .iter()
+            .map(|(name, mb)| head_of(name).len() + mb * MB + b"\r\n".len())
+            .sum::<usize>();
+    let request = format!(
+        "POST /upload HTTP/1.0\r\nHost: {}\r\nCookie: kiewer_session={}\r\n\
+         Content-Type: multipart/form-data; boundary={boundary}\r\n\
+         Content-Length: {length}\r\n\r\n",
+        browser.addr(),
+        browser.cookie("kiewer_session").expect("signed in"),
+    );
+    let stream = TcpStream::connect(browser.addr()).await.expect("connect");
+    let (mut from_server, mut to_server) = stream.into_split();
+    let send = async {
+        let megabyte = vec![0; MB];
+        to_server.write_all(request.as_bytes()).await?;
+        for (name, mb) in files {
+            to_server.write_all(head_of(name).as_bytes()).await?;
+            for _ in 0..*mb {
+                to_server.write_all(&megabyte).await?;
+            }
+            to_server.write_all(b"\r\n").await?;
+        }
+        to_server.write_all(end.as_bytes()).await
+    };
+    let receive = async {
+        let mut raw = Vec::new();
+        let _reset_after_the_response = from_server.read_to_end(&mut raw).await;
+        String::from_utf8_lossy(&raw).into_owned()
+    };
+    let (_refused_part_way, response) = tokio::join!(send, receive);
+    response
+}
+
+const BODY_LIMIT_MESSAGE: &str =
+    "the upload is larger than 200 MB in all; leave out files that are not KiCad files";
+const REVISION_CAP_MESSAGE: &str =
+    "the files together are larger than 200 MB, the limit for one revision";
+
+#[test_case(
+    &[("a.kicad_sch", 50), ("b.kicad_sch", 50), ("c.kicad_sch", 50), ("notes.pdf", 60)],
+    BODY_LIMIT_MESSAGE, REVISION_CAP_MESSAGE;
+    "kept files that fit, padded by a dropped file after them"
+)]
+#[test_case(
+    &[("notes.pdf", 60), ("a.kicad_sch", 50), ("b.kicad_sch", 50), ("c.kicad_sch", 50)],
+    BODY_LIMIT_MESSAGE, REVISION_CAP_MESSAGE;
+    "kept files that fit, padded by a dropped file before them"
+)]
+#[test_case(
+    &[("a.kicad_sch", 42), ("b.kicad_sch", 42), ("c.kicad_sch", 42), ("d.kicad_sch", 42), ("e.kicad_sch", 42)],
+    REVISION_CAP_MESSAGE, BODY_LIMIT_MESSAGE;
+    "kept files over the revision cap"
+)]
+#[tokio::test]
+async fn an_upload_over_a_size_limit_is_refused_naming_that_limit(
+    files: &[(&str, usize)],
+    said: &str,
+    not_said: &str,
+) {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (browser, _, _) = signed_in(&db, addr).await;
+    let response = post_zeros(&browser, files).await;
+    let status = response.split_whitespace().nth(1);
+    assert_eq!(status, Some("413"), "{response}");
+    assert!(response.contains(said), "{response}");
+    assert!(!response.contains(not_said), "{response}");
+    assert!(
+        response.contains(r#"enctype="multipart/form-data""#),
+        "the form again, as for any refusal: {response}"
+    );
+    for framing in ["201 MB", "framing"] {
+        assert!(!response.contains(framing), "{framing}: {response}");
+    }
 }
 
 #[tokio::test]
