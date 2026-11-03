@@ -4,13 +4,17 @@
 //! start went and which adapter vendor the browser named; a wasm panic
 //! sends the same report with its message. The server checks the shape,
 //! limits each client to [`LIMIT_PER_MINUTE`] and writes one `tracing`
-//! event with the fields below, which the JSON formatter the server runs
-//! with on Cloud Run makes one `jsonPayload` line and a Cloud Logging
-//! metric counts (`infra/logging.tf`). A refused beacon is a 4xx and no
-//! event. No identifier is read or written: the client's address keys
-//! the limit and goes nowhere else. The limiter is per process: each
-//! Cloud Run instance counts on its own, so a client's ceiling is the
-//! limit times the instances serving it, which telemetry can bear.
+//! event with the fields below, which the JSON log the server runs with
+//! on Cloud Run makes one `jsonPayload` line and a Cloud Logging metric
+//! counts (`infra/logging.tf`). That log camelCases a field's key as it
+//! writes the line (`webgpu_present` is `webgpuPresent`), so renaming a
+//! field here renames the key the metric extracts, and
+//! `kiewer_lib/tests/beacon.rs` fails until both agree. A refused beacon
+//! is a 4xx and no event. No identifier is read or written: the client's
+//! address keys the limit and goes nowhere else. The limiter is per
+//! process: each Cloud Run instance counts on its own, so a client's
+//! ceiling is the limit times the instances serving it, which telemetry
+//! can bear.
 //!
 //! The body is read as bytes and parsed as JSON whatever its content
 //! type: `sendBeacon` sends a string as `text/plain`, and a `Blob` typed

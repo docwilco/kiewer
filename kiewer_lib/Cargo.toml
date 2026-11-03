@@ -100,6 +100,8 @@ brotli = { version = "9", default-features = false, features = ["std"] }
 kiewer_test_support = { path = "../kiewer_test_support" }
 test-case = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-# The JSON formatter the server logs with on Cloud Run (kiewer/src/main.rs),
-# so the beacon test reads the line a Cloud Logging metric reads.
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json"] }
+# The layer the server's JSON log runs on Cloud Run (kiewer/src/log.rs) and
+# the registry under it, so the beacon test reads the line a Cloud Logging
+# metric reads.
+tracing-stackdriver = "0.10"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }

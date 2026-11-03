@@ -1,9 +1,11 @@
 //! The renderer beacon (docs/v1-scope.md, Telemetry) through a real
 //! listener: an accepted beacon is one structured JSON log line, a
 //! malformed one is refused with no line, and the per-IP limit trips. The
-//! log is read through the JSON formatter the server runs with on Cloud
-//! Run (`kiewer/src/main.rs`), so the line asserted here is the line a
-//! Cloud Logging metric reads.
+//! log is read through the layer the server's JSON log runs on Cloud Run
+//! (`tracing_stackdriver`, installed in `kiewer/src/log.rs`), so the line
+//! asserted here is the line a Cloud Logging metric reads, and the
+//! metric's own keys are read from `infra/logging.tf` and checked against
+//! it.
 
 use std::io;
 use std::net::SocketAddr;
@@ -16,6 +18,7 @@ use kiewer_lib::web::viewer::page_script_url;
 use kiewer_test_support::db::fresh;
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use test_case::test_case;
+use tracing_subscriber::layer::SubscriberExt;
 
 const CHROME: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
@@ -44,11 +47,9 @@ fn log() -> Arc<Mutex<Vec<u8>>> {
     LOG.get_or_init(|| {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let writer = Arc::clone(&buffer);
-        tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_writer(move || LogWriter(Arc::clone(&writer)))
-            .init();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_stackdriver::layer().with_writer(move || LogWriter(Arc::clone(&writer))));
+        tracing::subscriber::set_global_default(subscriber).expect("the one global subscriber");
         buffer
     })
     .clone()
@@ -111,18 +112,69 @@ async fn an_accepted_beacon_is_one_structured_log_line() {
     let lines = log_lines_with(&vendor);
     assert_eq!(lines.len(), 1, "{lines:?}");
     let line = &lines[0];
-    assert_eq!(line["level"], "INFO");
+    assert_eq!(line["severity"], "INFO");
     assert_eq!(line["target"], "kiewer_lib::web::beacon");
+    assert_eq!(line["message"], "renderer beacon");
     assert_eq!(line["backend"], "webgpu");
-    assert_eq!(line["webgpu_present"], true);
+    assert_eq!(line["webgpuPresent"], true);
     assert_eq!(line["outcome"], "ok");
     assert_eq!(line["reason"], "");
     assert_eq!(line["vendor"], vendor);
-    assert_eq!(line["user_agent_family"], "chrome");
+    assert_eq!(line["userAgentFamily"], "chrome");
     assert!(
         line.get("ip").is_none() && !line.to_string().contains("203.0.113.10"),
         "no identifier in the line: {line}"
     );
+}
+
+/// The log-based metric the line feeds.
+const METRIC: &str = include_str!("../../infra/logging.tf");
+
+/// The keys the metric's label extractors read, sorted.
+fn extracted_keys() -> Vec<&'static str> {
+    let mut keys: Vec<&str> = METRIC
+        .split("EXTRACT(jsonPayload.")
+        .skip(1)
+        .map(|rest| rest.split_once(')').expect("the extractor closes").0)
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
+/// The key and value of each `jsonPayload` term in the metric's filter.
+fn filtered_fields() -> Vec<(&'static str, &'static str)> {
+    METRIC
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("jsonPayload."))
+        .map(|term| {
+            let (key, value) = term.split_once('=').expect("a key and a value");
+            (key, value.trim_matches('"'))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_metric_reads_the_keys_the_line_is_written_with() {
+    let (addr, _dir) = start().await;
+    let vendor = fresh("vendor");
+    let response = send(addr, "203.0.113.12", &beacon(&vendor)).await;
+    assert_eq!(response.status, 204, "{}", response.body);
+    let lines = log_lines_with(&vendor);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let line = &lines[0];
+    let keys = extracted_keys();
+    assert_eq!(
+        keys,
+        ["backend", "outcome", "userAgentFamily", "webgpuPresent"]
+    );
+    for key in keys {
+        assert!(line.get(key).is_some(), "no {key} in {line}");
+    }
+    let filter = filtered_fields();
+    assert_eq!(filter.len(), 2, "{filter:?}");
+    for (key, value) in filter {
+        assert_eq!(line[key], value, "the filter on {key}: {line}");
+    }
 }
 
 #[tokio::test]
@@ -147,11 +199,11 @@ async fn a_failure_and_a_panic_carry_their_reason() {
     let lines = log_lines_with(&reason);
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert_eq!(lines[0]["backend"], "none");
-    assert_eq!(lines[0]["webgpu_present"], false);
+    assert_eq!(lines[0]["webgpuPresent"], false);
     assert_eq!(lines[0]["outcome"], "failed");
     assert_eq!(lines[0]["reason"], reason);
     assert_eq!(lines[0]["vendor"], "");
-    assert_eq!(lines[0]["user_agent_family"], "safari");
+    assert_eq!(lines[0]["userAgentFamily"], "safari");
 
     let panic = fresh("panicked at kiewer_viewer/src/scene.rs:40:9");
     let body = format!(
@@ -171,10 +223,7 @@ async fn a_failure_and_a_panic_carry_their_reason() {
     assert_eq!(lines[0]["outcome"], "panic");
     assert_eq!(lines[0]["backend"], "webgl2");
     assert_eq!(lines[0]["vendor"], "intel");
-    assert_eq!(
-        lines[0]["user_agent_family"], "other",
-        "no user agent at all"
-    );
+    assert_eq!(lines[0]["userAgentFamily"], "other", "no user agent at all");
 }
 
 #[test_case("not json {m}" ; "not json")]

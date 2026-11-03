@@ -13,7 +13,18 @@ workspace = true
 kiewer_lib = { path = "../kiewer_lib" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
-# json: the one-object-per-event format the server logs with when stdout
-# is not a terminal (LOG_FORMAT), which Cloud Logging reads into
-# jsonPayload; ansi and fmt for the terminal's text.
-tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt", "json"] }
+# The JSON log the server writes when stdout is not a terminal
+# (LOG_FORMAT): one object per event in the shape Cloud Logging reads,
+# severity and time included. No features: the Cloud Trace and httpRequest
+# fields it can write are fed by nothing here. Its own dependency on
+# tracing-subscriber takes the default features, tracing-log among them
+# (kiewer/src/log.rs says why that matters).
+tracing-stackdriver = "0.10"
+# ansi and fmt for the terminal's text; env-filter for RUST_LOG over both.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt"] }
+
+[dev-dependencies]
+# The log crate's max level, which says whether anything routes it.
+log = "0.4"
+serde_json = "1"
+test-case = "3"

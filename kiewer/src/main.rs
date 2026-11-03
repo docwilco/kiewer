@@ -2,11 +2,12 @@
 //! library's server. Every non-zero exit is an `Exit` code from the
 //! library's one error type.
 
+mod log;
+
 use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use kiewer_lib::config::{Config, LogFormat};
-use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -19,16 +20,7 @@ async fn main() -> ExitCode {
         Ok(format) => format,
         Err(error) => return failed(&error),
     };
-    let log = tracing_subscriber::fmt().with_env_filter(
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-    );
-    match format {
-        // Flattened, so an event's fields are top-level keys of the
-        // jsonPayload Cloud Logging makes of the line, where a log-based
-        // metric's extractor reads them (infra/logging.tf).
-        LogFormat::Json => log.json().flatten_event(true).init(),
-        LogFormat::Text => log.with_ansi(terminal).init(),
-    }
+    log::init(format, terminal);
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => failed(&error),

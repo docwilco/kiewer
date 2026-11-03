@@ -250,9 +250,11 @@ impl Config {
 /// library only names it, so the variable is listed with the others.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
-    /// One JSON object per event with its fields flattened: what Cloud
-    /// Logging reads into `jsonPayload` and the renderer beacon's metric
-    /// counts (`infra/logging.tf`).
+    /// One JSON object per event in the shape Cloud Logging reads, its
+    /// `severity` and `time` included, with the event's fields as
+    /// camelCased top-level keys: what Cloud Logging reads into
+    /// `jsonPayload` and the renderer beacon's metric counts
+    /// (`infra/logging.tf`).
     Json,
     /// One line per event for a person reading a terminal.
     Text,
