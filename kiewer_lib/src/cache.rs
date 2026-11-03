@@ -417,10 +417,10 @@ impl Encoding {
 
 #[cfg(test)]
 mod tests {
+    use kiewer_assert::assert_is_empty;
     use test_case::test_case;
 
     use super::*;
-    use kiewer_assert::assert_is_empty;
 
     fn handle(text: &str) -> Handle {
         text.parse().expect("a handle")

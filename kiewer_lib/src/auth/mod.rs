@@ -355,10 +355,10 @@ type Client = oauth2::Client<
 
 #[cfg(test)]
 mod tests {
+    use kiewer_assert::{assert_is_empty, assert_is_not_empty};
     use test_case::test_case;
 
     use super::*;
-    use kiewer_assert::{assert_is_empty, assert_is_not_empty};
 
     #[test_case(Provider::GitHub, "github")]
     #[test_case(Provider::Discord, "discord")]

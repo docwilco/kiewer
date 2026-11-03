@@ -1030,11 +1030,11 @@ fn segment_distance_squared(point: Point, from: Point, to: Point) -> f64 {
 mod tests {
     use std::sync::OnceLock;
 
+    use kiewer_assert::assert_is_empty;
     use test_case::test_case;
 
     use super::*;
     use crate::parse_board;
-    use kiewer_assert::assert_is_empty;
 
     const BOARD_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),

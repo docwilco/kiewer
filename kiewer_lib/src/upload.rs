@@ -1052,10 +1052,10 @@ async fn resolve_branch(
 
 #[cfg(test)]
 mod tests {
+    use kiewer_assert::assert_is_not_empty;
     use test_case::test_case;
 
     use super::*;
-    use kiewer_assert::assert_is_not_empty;
 
     #[test_case("board.kicad_pcb", Some(FileKind::Board); "a board")]
     #[test_case("Board.KICAD_SCH", Some(FileKind::Schematic); "a schematic, any case")]

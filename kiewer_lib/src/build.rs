@@ -27,8 +27,9 @@ pub fn line() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use kiewer_assert::assert_is_not_empty;
+
+    use super::*;
 
     #[test]
     fn line_has_the_release_shape_first() {

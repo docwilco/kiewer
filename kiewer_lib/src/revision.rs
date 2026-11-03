@@ -306,10 +306,10 @@ fn shape_bounds(shape: &Shape) -> Option<Bounds> {
 
 #[cfg(test)]
 mod tests {
+    use kiewer_assert::assert_is_empty;
     use test_case::test_case;
 
     use super::*;
-    use kiewer_assert::assert_is_empty;
 
     /// The hand-off board, the one real file in the repo.
     const BOARD: &str = include_str!("../../viewer-drop/board/midi8knob.kicad_pcb");

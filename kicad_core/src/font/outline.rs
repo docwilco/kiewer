@@ -335,11 +335,11 @@ fn knockout_strips(lines: &[Rect], pen: f64, height: f64) -> Vec<Rect> {
 
 #[cfg(test)]
 mod tests {
+    use kiewer_assert::{assert_is_empty, assert_is_not_empty};
     use test_case::test_case;
 
     use super::*;
     use crate::model::{Justify, Size, Vertical};
-    use kiewer_assert::{assert_is_empty, assert_is_not_empty};
 
     /// Consolas as a browser measures it: every glyph 0.55 em wide, the
     /// line box 0.74 em up and 0.26 em down.

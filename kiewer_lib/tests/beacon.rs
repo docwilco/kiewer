@@ -5,11 +5,11 @@
 //! Run (`kiewer/src/main.rs`), so the line asserted here is the line a
 //! Cloud Logging metric reads.
 
-use kiewer_assert::assert_is_empty;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use kiewer_assert::assert_is_empty;
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::web::beacon::{BEACON_PATH, LIMIT_PER_MINUTE, MAX_BODY, MAX_REASON, MAX_VENDOR};
 use kiewer_test_support::db::fresh;

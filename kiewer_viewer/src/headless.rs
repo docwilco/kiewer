@@ -234,12 +234,13 @@ impl Headless {
 
 #[cfg(test)]
 mod tests {
+    use kiewer_assert::assert_is_not_empty;
+
     use super::*;
     use crate::labels::LabelBatch;
     use crate::render::{Rgb, Vertex};
     use crate::scene::{Paint, Slice};
     use crate::view::{Layer, Stack, palette};
-    use kiewer_assert::assert_is_not_empty;
 
     /// A board-shaped scene: one rectangle, the board fill, 112 by 58 mm
     /// around (106, 79) like the hand-off board's outline box, and no

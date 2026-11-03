@@ -4,13 +4,13 @@
 //! and `power` holds a third, `reg`, that reuses `io`'s file; the tree,
 //! the sheet paths that name its nodes, and the fragment they travel in.
 
-use kiewer_assert::assert_is_empty;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use kicad_core::parse_schematic;
 use kicad_core::schematic::model::Sheet;
 use kicad_core::schematic::sheet_tree::{SheetNode, SheetPath, build};
+use kiewer_assert::assert_is_empty;
 use test_case::test_case;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sheet_tree");

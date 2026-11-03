@@ -5,11 +5,11 @@
 //! days; the keys of what went are purged. The Postgres tests skip
 //! without `DATABASE_URL`, like `tests/db.rs`.
 
-use kiewer_assert::assert_is_empty;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kiewer_assert::assert_is_empty;
 use kiewer_lib::Error;
 use kiewer_lib::account::{self, AccountId, Handle};
 use kiewer_lib::auth::{Provider, ProviderUser};

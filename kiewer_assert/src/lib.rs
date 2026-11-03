@@ -15,7 +15,7 @@ macro_rules! assert_is_empty {
             value => {
                 if !value.is_empty() {
                     ::core::panic!(
-                        "assertion failed: `{}` is empty\n  it holds: {:?}",
+                        "assertion failed: `{}.is_empty()`\n  it holds: {:?}",
                         ::core::stringify!($value),
                         value,
                     );
@@ -25,16 +25,21 @@ macro_rules! assert_is_empty {
     };
 }
 
-/// Asserts that `$value.is_empty()` is false. The value is evaluated once
-/// and borrowed.
+/// Asserts that `$value.is_empty()` is false; clippy refuses the bare
+/// `assert!(!x.is_empty())` as well. The value is evaluated once and
+/// borrowed.
 #[macro_export]
 macro_rules! assert_is_not_empty {
     ($value:expr $(,)?) => {
-        if $value.is_empty() {
-            ::core::panic!(
-                "assertion failed: `{}` is not empty",
-                ::core::stringify!($value),
-            );
+        match &$value {
+            value => {
+                if value.is_empty() {
+                    ::core::panic!(
+                        "assertion failed: `!{}.is_empty()`",
+                        ::core::stringify!($value),
+                    );
+                }
+            }
         }
     };
 }
@@ -48,7 +53,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "assertion failed: `vec![1, 2]` is empty\n  it holds: [1, 2]")]
+    #[should_panic(expected = "assertion failed: `vec![1, 2].is_empty()`\n  it holds: [1, 2]")]
     fn a_value_with_items_fails_naming_the_expression_and_its_items() {
         assert_is_empty!(vec![1, 2]);
     }
@@ -59,7 +64,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "assertion failed: `String::new()` is not empty")]
+    #[should_panic(expected = "assertion failed: `!String::new().is_empty()`")]
     fn an_empty_value_fails_not_empty_naming_the_expression() {
         assert_is_not_empty!(String::new());
     }

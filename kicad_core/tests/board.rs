@@ -1,13 +1,13 @@
 //! The hand-off board through `parse_board`: the counts the issue pins,
 //! and that every item resolves its layer and net.
 
-use kiewer_assert::assert_is_not_empty;
 use std::sync::OnceLock;
 
 use kicad_core::model::{
     Board, Layer, LayerKind, NetId, PadKind, Shape, Tenting, TentingOverride, TextRole, ViaKind,
 };
 use kicad_core::parse_board;
+use kiewer_assert::assert_is_not_empty;
 use test_case::test_case;
 
 const BOARD_PATH: &str = concat!(

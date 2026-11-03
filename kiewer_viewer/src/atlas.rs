@@ -440,10 +440,10 @@ mod tests {
     use kicad_core::font::Placement;
     use kicad_core::font::outline::{Cell, FaceMetrics, layout};
     use kicad_core::model::{Justify, Size};
+    use kiewer_assert::assert_is_empty;
     use test_case::test_case;
 
     use super::*;
-    use kiewer_assert::assert_is_empty;
 
     #[test]
     fn cells_pack_into_shelves_with_padding_in_the_smallest_power_of_two_atlas() {

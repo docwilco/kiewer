@@ -277,8 +277,9 @@ pub fn draws(glyphs: &GlyphSet, groups: &[Group], layers: &[Layer]) -> Vec<Label
 mod tests {
     use std::sync::OnceLock;
 
-    use super::*;
     use kiewer_assert::assert_is_empty;
+
+    use super::*;
 
     const BOARD_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),

@@ -3,13 +3,13 @@
 //! what the net is called, on the sheet tree fixture and the hand-off
 //! sheet.
 
-use kiewer_assert::assert_is_not_empty;
 use std::sync::OnceLock;
 
 use kicad_core::model::Point;
 use kicad_core::parse_schematic;
 use kicad_core::schematic::connect::{Connectivity, SheetItem, net_pins};
 use kicad_core::schematic::model::Sheet;
+use kiewer_assert::assert_is_not_empty;
 use test_case::test_case;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sheet_tree");
