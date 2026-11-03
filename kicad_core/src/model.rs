@@ -509,6 +509,47 @@ impl Footprint {
     }
 }
 
+/// Which faces of the board the solder mask covers a via on: the board's
+/// default, from `(setup ...)`. A board that does not say tents both, as
+/// KiCad's own default does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tenting {
+    /// The mask covers the via on the front.
+    pub front: bool,
+    /// The mask covers the via on the back.
+    pub back: bool,
+}
+
+impl Default for Tenting {
+    fn default() -> Self {
+        Tenting {
+            front: true,
+            back: true,
+        }
+    }
+}
+
+/// A via's own tenting: `None` for each side it leaves to the board's
+/// [`Tenting`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TentingOverride {
+    /// Whether the mask covers the via on the front.
+    pub front: Option<bool>,
+    /// Whether the mask covers the via on the back.
+    pub back: Option<bool>,
+}
+
+impl TentingOverride {
+    /// This override with every unset side taken from `fallback`.
+    #[must_use]
+    pub fn or(self, fallback: Tenting) -> Tenting {
+        Tenting {
+            front: self.front.unwrap_or(fallback.front),
+            back: self.back.unwrap_or(fallback.back),
+        }
+    }
+}
+
 /// A via's reach through the stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ViaKind {
@@ -537,6 +578,8 @@ pub struct Via {
     pub net: Option<NetId>,
     /// Placed by hand, not by the router.
     pub free: bool,
+    /// The via's own tenting, over the board's ([`Board::tenting`]).
+    pub tenting: TentingOverride,
 }
 
 /// A straight track segment.
@@ -650,10 +693,20 @@ pub struct Board {
     /// The board's mask and paste clearances from `(setup ...)`, the last
     /// fallback for pads and footprints that set none.
     pub clearances: Clearances,
+    /// Which sides the mask covers a via on, from `(setup ...)`, for vias
+    /// that do not say ([`Via::tenting`]).
+    pub tenting: Tenting,
 }
 
 /// The canonical name of the layer the board outline is drawn on.
 pub const EDGE_CUTS: &str = "Edge.Cuts";
+
+// The canonical names of the two mask layers and of the two outer
+// copper layers, the faces a via's mask opening is decided on.
+const F_MASK: &str = "F.Mask";
+const B_MASK: &str = "B.Mask";
+const F_CU: &str = "F.Cu";
+const B_CU: &str = "B.Cu";
 
 impl Board {
     /// The layer an id names.
@@ -735,5 +788,23 @@ impl Board {
     #[must_use]
     pub fn pad_clearances(&self, footprint: &Footprint, pad: &Pad) -> Clearances {
         pad.clearances.or(footprint.clearances).or(self.clearances)
+    }
+
+    /// How far past its copper `via` opens the mask layer `mask`: the
+    /// board's mask clearance, 0 when unset. A via has no margin of its
+    /// own: KiCad writes `solder_mask_margin` on tracks only. `None` when
+    /// it opens nothing there: the side is tented, the via does not reach
+    /// that side's outer copper, or `mask` is not one of the two mask
+    /// layers.
+    #[must_use]
+    pub fn via_mask_expansion(&self, via: &Via, mask: LayerId) -> Option<f64> {
+        let tenting = via.tenting.or(self.tenting);
+        let (tented, copper) = match self.layer(mask)?.name.as_str() {
+            F_MASK => (tenting.front, F_CU),
+            B_MASK => (tenting.back, B_CU),
+            _ => return None,
+        };
+        let copper = self.layer_named(copper)?;
+        (!tented && via.layers.contains(&copper)).then(|| self.clearances.mask_expansion())
     }
 }

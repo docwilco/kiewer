@@ -4,7 +4,9 @@
 use kiewer_assert::assert_is_not_empty;
 use std::sync::OnceLock;
 
-use kicad_core::model::{Board, Layer, LayerKind, NetId, PadKind, Shape, TextRole, ViaKind};
+use kicad_core::model::{
+    Board, Layer, LayerKind, NetId, PadKind, Shape, Tenting, TentingOverride, TextRole, ViaKind,
+};
 use kicad_core::parse_board;
 use test_case::test_case;
 
@@ -458,4 +460,63 @@ fn layers_know_whether_they_are_copper(name: &str, copper: bool) {
     let board = parse_board(KICAD9_BOARD).expect("parses");
     let id = board.layer_named(name).expect("the layer exists");
     assert_eq!(board.layer(id).expect("resolves").is_copper(), copper);
+}
+
+#[test]
+fn the_hand_off_board_tents_every_via() {
+    let board = board();
+    assert_eq!(
+        board.tenting,
+        Tenting {
+            front: true,
+            back: true
+        }
+    );
+    assert!(
+        board
+            .vias
+            .iter()
+            .all(|via| via.tenting == TentingOverride::default()),
+        "no via says anything of its own"
+    );
+}
+
+/// A board with `setup` and one via carrying `via`.
+fn tenting_board(setup: &str, via: &str) -> Board {
+    parse_board(&format!(
+        r#"(kicad_pcb (version 20241229) (generator "pcbnew")
+  (layers (0 "F.Cu" signal) (2 "B.Cu" signal))
+  {setup}
+  (via (at 0 0) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") {via})
+)"#
+    ))
+    .expect("the test board parses")
+}
+
+#[test_case("", true, true; "a board that says nothing tents, as KiCad's default does")]
+#[test_case("(setup (pad_to_mask_clearance 0))", true, true; "a setup that says nothing tents")]
+#[test_case("(setup (tenting front back))", true, true; "KiCad 9 both sides")]
+#[test_case("(setup (tenting front))", true, false; "KiCad 9 front only")]
+#[test_case("(setup (tenting back))", false, true; "KiCad 9 back only")]
+#[test_case("(setup (tenting none))", false, false; "KiCad 9 neither side")]
+#[test_case("(setup (tenting (front yes) (back no)))", true, false; "KiCad 10 front only")]
+#[test_case("(setup (tenting (front no) (back yes)))", false, true; "KiCad 10 back only")]
+#[test_case("(setup (tenting (front no) (back no)))", false, false; "KiCad 10 neither side")]
+fn the_setup_states_the_boards_tenting(setup: &str, front: bool, back: bool) {
+    assert_eq!(tenting_board(setup, "").tenting, Tenting { front, back });
+}
+
+#[test_case("", None, None; "no tenting leaves both sides to the board")]
+#[test_case("(tenting front back)", Some(true), Some(true); "KiCad 9 both sides")]
+#[test_case("(tenting front)", Some(true), Some(false); "KiCad 9 front only states the back as well")]
+#[test_case("(tenting back)", Some(false), Some(true); "KiCad 9 back only states the front as well")]
+#[test_case("(tenting none)", Some(false), Some(false); "KiCad 9 none is untented, not unstated")]
+#[test_case("(tenting (front yes) (back no))", Some(true), Some(false); "KiCad 10 both stated")]
+#[test_case("(tenting (front no) (back none))", Some(false), None; "KiCad 10 none leaves the side to the board")]
+#[test_case("(tenting (back yes))", None, Some(true); "KiCad 10 an unwritten side is left to the board")]
+fn a_via_states_its_own_tenting(via: &str, front: Option<bool>, back: Option<bool>) {
+    assert_eq!(
+        tenting_board("", via).vias[0].tenting,
+        TentingOverride { front, back }
+    );
 }

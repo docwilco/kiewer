@@ -784,6 +784,152 @@ fn the_mask_overlay_is_the_board_minus_the_openings_grown_by_the_margin() {
     assert_close(back.area(), 200.0, 1e-6, "back mask area");
 }
 
+/// `(setup ...)` of a board whose vias are tented on both sides unless
+/// they say otherwise, with a mask clearance of 0.05.
+const TENTED_SETUP: &str = "(setup (pad_to_mask_clearance 0.05) (tenting front back))";
+
+/// The area a round opening of `radius` takes out of a mask. The tests
+/// compare it with what the 200 square millimetre board lost, since
+/// [`assert_close`] is relative and a fraction of the whole board would
+/// swallow an opening.
+fn disc(radius: f64) -> f64 {
+    PI * radius * radius
+}
+
+/// The two masks of `board`, front then back.
+fn masks(board: &Board) -> (Mesh, Mesh) {
+    let tessellator = Tessellator::new(TOLERANCE);
+    (
+        tessellator.mask(board, on_layer(board, "F.Mask")),
+        tessellator.mask(board, on_layer(board, "B.Mask")),
+    )
+}
+
+#[test]
+fn a_via_opens_the_mask_on_exactly_its_untented_sides() {
+    // Three 0.8 vias: one left to the tented board, one tented on neither
+    // side, one tented on the front only. Each opening is the diameter
+    // plus the board's clearance on every side: a radius of 0.45.
+    let board = board(&format!(
+        r#"{TENTED_SETUP} {RECT_OUTLINE}
+           (via (at 5 5) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu"))
+           (via (at 10 5) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (tenting none))
+           (via (at 15 5) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (tenting front))"#
+    ));
+    let (front, back) = masks(&board);
+    assert_close(200.0 - front.area(), disc(0.45), 1e-2, "front opening");
+    assert_close(200.0 - back.area(), 2.0 * disc(0.45), 1e-2, "back opening");
+
+    assert!(
+        front.covers(Point { x: 5.0, y: 5.0 }),
+        "tented on the front"
+    );
+    assert!(back.covers(Point { x: 5.0, y: 5.0 }), "tented on the back");
+    assert!(
+        !front.covers(Point { x: 10.0, y: 5.0 }),
+        "untented on the front"
+    );
+    assert!(
+        !back.covers(Point { x: 10.0, y: 5.0 }),
+        "untented on the back"
+    );
+    assert!(
+        front.covers(Point { x: 15.0, y: 5.0 }),
+        "front-only: tented on the front"
+    );
+    assert!(
+        !back.covers(Point { x: 15.0, y: 5.0 }),
+        "front-only: open on the back"
+    );
+
+    assert!(
+        !front.covers(Point { x: 10.43, y: 5.0 }),
+        "the clearance past the copper is open"
+    );
+    assert!(
+        front.covers(Point { x: 10.47, y: 5.0 }),
+        "mask past the clearance"
+    );
+}
+
+#[test]
+fn a_via_takes_the_boards_tenting_side_by_side() {
+    // KiCad 10's form: a board tented on the front only, and a via that
+    // states its front and leaves its back to the board.
+    let board = board(&format!(
+        r#"(setup (tenting (front yes) (back no))) {RECT_OUTLINE}
+           (via (at 5 5) (size 1) (drill 0.4) (layers "F.Cu" "B.Cu"))
+           (via (at 10 5) (size 1) (drill 0.4) (layers "F.Cu" "B.Cu") (tenting (front no) (back none)))
+           (via (at 15 5) (size 1) (drill 0.4) (layers "F.Cu" "B.Cu") (tenting (back yes)))"#
+    ));
+    let (front, back) = masks(&board);
+    assert!(front.covers(Point { x: 5.0, y: 5.0 }), "the board's front");
+    assert!(!back.covers(Point { x: 5.0, y: 5.0 }), "the board's back");
+    assert!(!front.covers(Point { x: 10.0, y: 5.0 }), "its own front");
+    assert!(
+        !back.covers(Point { x: 10.0, y: 5.0 }),
+        "none is the board's"
+    );
+    assert!(
+        front.covers(Point { x: 15.0, y: 5.0 }),
+        "unstated is the board's"
+    );
+    assert!(back.covers(Point { x: 15.0, y: 5.0 }), "its own back");
+}
+
+#[test_case::test_case("", 0.4; "no clearance opens the via itself")]
+#[test_case::test_case("(pad_to_mask_clearance -0.1)", 0.3; "a negative clearance shrinks the opening")]
+fn the_boards_clearance_sizes_a_vias_opening(clearance: &str, radius: f64) {
+    let board = board(&format!(
+        r#"(setup {clearance} (tenting none)) {RECT_OUTLINE}
+           (via (at 10 5) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu"))"#
+    ));
+    let (front, back) = masks(&board);
+    assert_close(200.0 - front.area(), disc(radius), 1e-2, "front opening");
+    assert_close(200.0 - back.area(), disc(radius), 1e-2, "back opening");
+}
+
+#[test]
+fn a_clearance_that_eats_the_via_opens_nothing() {
+    let board = board(&format!(
+        r#"(setup (pad_to_mask_clearance -0.5) (tenting none)) {RECT_OUTLINE}
+           (via (at 10 5) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu"))"#
+    ));
+    let (front, back) = masks(&board);
+    assert_close(front.area(), 200.0, 1e-6, "front mask area");
+    assert_close(back.area(), 200.0, 1e-6, "back mask area");
+}
+
+#[test]
+fn a_via_opens_only_the_mask_of_an_outer_layer_it_reaches() {
+    // Untented by the board, so only the reach decides: a blind via from
+    // the front stops inside, a buried one touches neither face.
+    let board = board(&format!(
+        r#"(setup (tenting none)) {RECT_OUTLINE}
+           (via blind (at 5 5) (size 0.8) (drill 0.4) (layers "F.Cu" "In1.Cu"))
+           (via blind (at 15 5) (size 0.8) (drill 0.4) (layers "In1.Cu" "In2.Cu"))"#
+    ));
+    let (front, back) = masks(&board);
+    assert_close(200.0 - front.area(), disc(0.4), 1e-2, "front opening");
+    assert_close(back.area(), 200.0, 1e-6, "back mask area");
+}
+
+#[test_case::test_case("F.Mask"; "the front")]
+#[test_case::test_case("B.Mask"; "the back")]
+fn the_hand_off_boards_vias_open_nothing_in_its_mask(layer: &str) {
+    let board = hand_off_board();
+    let layer = on_layer(board, layer);
+    let mut bare = board.clone();
+    bare.vias.clear();
+    let tessellator = Tessellator::new(TOLERANCE);
+    // Compared whole and not with assert_eq!, whose message would print
+    // two meshes of the whole board.
+    assert!(
+        tessellator.mask(board, layer) == tessellator.mask(&bare, layer),
+        "a via of the hand-off board changed its mask"
+    );
+}
+
 #[test]
 fn a_mask_graphic_and_a_through_hole_pad_open_the_mask_as_well() {
     // A filled rectangle drawn on F.Mask is an opening, its stroke of 0.2

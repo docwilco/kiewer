@@ -699,6 +699,7 @@ pub fn net_only(board: &Board, net: NetId) -> Board {
             .cloned()
             .collect(),
         clearances: board.clearances,
+        tenting: board.tenting,
     }
 }
 

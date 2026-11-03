@@ -221,9 +221,10 @@ impl Tessellator {
     /// ([`Tessellator::board_fill`]) less every opening on the layer, as
     /// one polygon difference. An opening is a pad that reaches the layer,
     /// grown by its mask clearance ([`Board::pad_clearances`]; its hole
-    /// grown the same, so an unplated hole opens the mask), and any
-    /// graphic drawn on the layer. Empty for a board without a closed
-    /// outline.
+    /// grown the same, so an unplated hole opens the mask), a via that
+    /// is not tented on the layer's side, grown by its mask clearance
+    /// ([`Board::via_mask_expansion`]), and any graphic drawn on the
+    /// layer. Empty for a board without a closed outline.
     #[must_use]
     pub fn mask(&self, board: &Board, layer: LayerId) -> Mesh {
         let mut builder = MeshBuilder::new(self.tolerance);
@@ -239,6 +240,11 @@ impl Tessellator {
                 openings.push(builder.hole(drill, &shape, grow));
             }
             openings.extend(builder.primitive_polygons(pad, &shape));
+        }
+        for via in &board.vias {
+            if let Some(grow) = board.via_mask_expansion(via, layer) {
+                openings.push(circle(via.at, via.size / 2.0 + grow, self.tolerance));
+            }
         }
         for drawing in layer_drawings(board, layer) {
             openings.extend(drawing_polygons(&drawing, self.tolerance));

@@ -13,7 +13,8 @@ use crate::error::{Error, MIN_BOARD_VERSION, Result};
 use crate::model::{
     Board, Clearances, Drawing, Drill, Fill, Font, Footprint, FootprintAttributes, Graphic,
     Horizontal, Justify, Layer, LayerId, LayerKind, Net, NetId, Pad, PadKind, PadShape, Point,
-    Property, Segment, Shape, Size, Text, TextRole, TrackArc, Vertical, Via, ViaKind, Zone,
+    Property, Segment, Shape, Size, Tenting, TentingOverride, Text, TextRole, TrackArc, Vertical,
+    Via, ViaKind, Zone,
 };
 use crate::sexpr::{self, Node};
 
@@ -65,6 +66,7 @@ pub fn parse_board(source: &str) -> Result<Board> {
         vias: Vec::new(),
         zones: Vec::new(),
         clearances: Clearances::default(),
+        tenting: Tenting::default(),
     };
     for node in root.lists() {
         match node.head()? {
@@ -78,6 +80,14 @@ pub fn parse_board(source: &str) -> Result<Board> {
                     solder_paste_margin: optional_number(node, "pad_to_paste_clearance")?,
                     solder_paste_ratio: optional_number(node, "pad_to_paste_clearance_ratio")?,
                 };
+                // A tenting written here decides both sides; only a setup
+                // without one keeps the default.
+                if let Some(written) = node.child("tenting") {
+                    board.tenting = tenting(written)?.or(Tenting {
+                        front: false,
+                        back: false,
+                    });
+                }
             }
             "footprint" => board.footprints.push(parser.footprint(node)?),
             "segment" => board.segments.push(parser.segment(node)?),
@@ -403,6 +413,11 @@ impl Parser {
             layers,
             net: self.net(node)?,
             free: flag(node, "free"),
+            tenting: node
+                .child("tenting")
+                .map(tenting)
+                .transpose()?
+                .unwrap_or_default(),
         })
     }
 
@@ -562,6 +577,54 @@ fn clearances(node: &Node) -> Result<Clearances> {
         solder_paste_margin: optional_number(node, "solder_paste_margin")?,
         solder_paste_ratio: optional_number(node, "solder_paste_ratio")?,
     })
+}
+
+/// A `(tenting ...)`, of the setup or of a via. KiCad 9 writes bare
+/// words, `front`, `back` or `none`, and they state both sides: a side
+/// not named is untented. KiCad 10 writes `(front yes)` and `(back no)`,
+/// where `none` or no entry leaves the side unstated. KiCad 10 reads the
+/// bare words as leaving an unnamed side unstated too; every file holding
+/// them came from KiCad 9, so KiCad 9's reading is the one kept here. A
+/// bare word that is none of the three is an error, as it is to KiCad 9:
+/// the form is frozen, so no newer KiCad adds one.
+fn tenting(node: &Node) -> Result<TentingOverride> {
+    if node.lists().next().is_none() {
+        let mut stated = TentingOverride {
+            front: Some(false),
+            back: Some(false),
+        };
+        for index in 0..node.args().len() {
+            match node.atom(index)? {
+                "front" => stated.front = Some(true),
+                "back" => stated.back = Some(true),
+                "none" => {}
+                other => {
+                    return Err(
+                        node.error(format!("expected front, back or none, found {other:?}"))
+                    );
+                }
+            }
+        }
+        return Ok(stated);
+    }
+    Ok(TentingOverride {
+        front: tenting_side(node, "front")?,
+        back: tenting_side(node, "back")?,
+    })
+}
+
+/// The `(front yes)` or `(back no)` of a KiCad 10 tenting: `None` for
+/// `none` or no entry.
+fn tenting_side(node: &Node, name: &str) -> Result<Option<bool>> {
+    let Some(side) = node.child(name) else {
+        return Ok(None);
+    };
+    match side.atom(0)? {
+        "yes" => Ok(Some(true)),
+        "no" => Ok(Some(false)),
+        "none" => Ok(None),
+        other => Err(side.error(format!("expected yes, no or none, found {other:?}"))),
+    }
 }
 
 /// A `(start x y)`, `(end x y)`, `(xy x y)`: two numbers.
