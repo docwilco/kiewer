@@ -19,12 +19,15 @@
 use i_overlay::core::fill_rule::FillRule as OverlayFill;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::float::single::SingleFloatOverlay as _;
-use lyon_tessellation::geometry_builder::{BuffersBuilder, VertexBuffers};
+use lyon_tessellation::geometry_builder::{
+    BuffersBuilder, FillGeometryBuilder, FillVertexConstructor, GeometryBuilder,
+    GeometryBuilderError, StrokeGeometryBuilder, StrokeVertexConstructor, VertexBuffers,
+};
 use lyon_tessellation::math::{Point as LyonPoint, point};
 use lyon_tessellation::path::Path;
 use lyon_tessellation::{
     FillOptions, FillRule, FillTessellator, FillVertex, LineCap, LineJoin, StrokeOptions,
-    StrokeTessellator, StrokeVertex,
+    StrokeTessellator, StrokeVertex, VertexId,
 };
 
 pub mod schematic;
@@ -40,7 +43,8 @@ use crate::model::{
 /// the outer boundary and the rest holes.
 type OverlayShape = Vec<Vec<[f64; 2]>>;
 
-/// Triangles: positions in millimetres, indices in threes.
+/// Triangles: positions in millimetres, indices in threes. A mesh from a
+/// [`Tessellator`] holds none of zero area.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mesh {
     /// Every vertex, `[x, y]` in millimetres, y down.
@@ -63,13 +67,7 @@ impl Mesh {
             .0
             .iter()
             .filter_map(|&[a, b, c]| {
-                let corner = |index: u32| {
-                    let position = self.positions.get(usize::try_from(index).ok()?)?;
-                    Some(Point {
-                        x: f64::from(position[0]),
-                        y: f64::from(position[1]),
-                    })
-                };
+                let corner = |index| corner(&self.positions, index);
                 Some([corner(a)?, corner(b)?, corner(c)?])
             })
     }
@@ -115,6 +113,15 @@ impl Mesh {
             !(negative && positive)
         })
     }
+}
+
+/// The vertex at `index` as a point, or `None` past the end of `positions`.
+fn corner(positions: &[[f32; 2]], index: u32) -> Option<Point> {
+    let position = positions.get(usize::try_from(index).ok()?)?;
+    Some(Point {
+        x: f64::from(position[0]),
+        y: f64::from(position[1]),
+    })
 }
 
 /// Twice the signed area of the triangle `a`, `b`, `c`.
@@ -861,6 +868,55 @@ fn signed_area(polygon: &[Point]) -> f64 {
         .sum()
 }
 
+/// Lyon's own buffers, less every triangle of zero area: the stroke
+/// tessellator emits them at a join of collinear edges, its join quad with
+/// coincident corners and an arc fan over a zero angle. One draws nothing,
+/// but a point test takes three zero cross products for inside, so it
+/// would claim every point on the triangle's line. The test is exact, in
+/// the arithmetic of [`Mesh::covers`]; the vertices stay, so the bounds of
+/// a mesh do not move.
+struct SolidTriangles<'a, Ctor>(BuffersBuilder<'a, [f32; 2], u32, Ctor>);
+
+impl<Ctor> GeometryBuilder for SolidTriangles<'_, Ctor> {
+    fn begin_geometry(&mut self) {
+        self.0.begin_geometry();
+    }
+
+    fn end_geometry(&mut self) {
+        self.0.end_geometry();
+    }
+
+    fn abort_geometry(&mut self) {
+        self.0.abort_geometry();
+    }
+
+    fn add_triangle(&mut self, a: VertexId, b: VertexId, c: VertexId) {
+        let positions = &self.0.buffers().vertices;
+        let corners = [a, b, c].map(|id| corner(positions, id.0));
+        if let [Some(first), Some(second), Some(third)] = corners
+            && cross(first, second, third) == 0.0
+        {
+            return;
+        }
+        self.0.add_triangle(a, b, c);
+    }
+}
+
+impl<Ctor: FillVertexConstructor<[f32; 2]>> FillGeometryBuilder for SolidTriangles<'_, Ctor> {
+    fn add_fill_vertex(&mut self, vertex: FillVertex) -> Result<VertexId, GeometryBuilderError> {
+        self.0.add_fill_vertex(vertex)
+    }
+}
+
+impl<Ctor: StrokeVertexConstructor<[f32; 2]>> StrokeGeometryBuilder for SolidTriangles<'_, Ctor> {
+    fn add_stroke_vertex(
+        &mut self,
+        vertex: StrokeVertex,
+    ) -> Result<VertexId, GeometryBuilderError> {
+        self.0.add_stroke_vertex(vertex)
+    }
+}
+
 /// Accumulates fills and strokes into one mesh.
 struct MeshBuilder {
     tolerance: f64,
@@ -916,7 +972,9 @@ impl MeshBuilder {
         let _ = self.fill.tessellate_path(
             &path,
             &options,
-            &mut BuffersBuilder::new(&mut self.buffers, |v: FillVertex| v.position().to_array()),
+            &mut SolidTriangles(BuffersBuilder::new(&mut self.buffers, |v: FillVertex| {
+                v.position().to_array()
+            })),
         );
     }
 
@@ -944,7 +1002,9 @@ impl MeshBuilder {
         let _ = self.stroke.tessellate_path(
             &path,
             &options,
-            &mut BuffersBuilder::new(&mut self.buffers, |v: StrokeVertex| v.position().to_array()),
+            &mut SolidTriangles(BuffersBuilder::new(&mut self.buffers, |v: StrokeVertex| {
+                v.position().to_array()
+            })),
         );
     }
 

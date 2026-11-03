@@ -939,3 +939,32 @@ fn the_hand_off_board_fills_its_outline_and_opens_its_mask_at_the_pads() {
         "plated holes have rims"
     );
 }
+
+/// A stroke along the x axis through a join of collinear edges: lyon's
+/// join quad has coincident corners there, so it hands over a triangle
+/// with no area, across the stroke.
+fn collinear_stroke() -> Mesh {
+    let along_x = [0.0, 1.0, 2.0].map(|x| Point { x, y: 0.0 }).to_vec();
+    Tessellator::new(TOLERANCE).polylines(&[along_x], 0.2)
+}
+
+#[test]
+fn a_join_of_collinear_edges_leaves_no_zero_area_triangle_in_the_mesh() {
+    let mesh = collinear_stroke();
+    assert!(!mesh.is_empty(), "the stroke is drawn");
+    let zero_area = mesh
+        .triangles()
+        .filter(|[a, b, c]| (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) == 0.0)
+        .count();
+    assert_eq!(zero_area, 0, "of {} indices", mesh.indices.len());
+}
+
+#[test]
+fn a_point_far_along_the_line_through_a_collinear_join_is_not_covered() {
+    let mesh = collinear_stroke();
+    assert!(mesh.covers(Point { x: 1.0, y: 0.1 }), "on the stroke");
+    assert!(
+        !mesh.covers(Point { x: 1.0, y: 10.0 }),
+        "the join's zero-area triangle lies across the stroke, on this line"
+    );
+}

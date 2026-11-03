@@ -310,10 +310,8 @@ fn a_global_input_label_is_a_flag_pointed_at_its_anchor_with_the_text_past_the_t
         "the slant has not reached the top yet"
     );
     // The text starts past the tip: margin plus three quarters of the height.
-    // Just off the wire's line: a zero-area triangle of the round join at
-    // the tip lies along it, and `covers` counts a point on such a line.
     assert!(
-        !label.covers(at(50.8, 50.05)),
+        !label.covers(at(50.8, 50.0)),
         "nothing between the tip and the text"
     );
     assert!(b.max.x > 50.0 + 1.43 + 1.0, "the text is drawn: {b:?}");
