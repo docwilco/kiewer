@@ -81,13 +81,12 @@ impl Mesh {
             .extend(other.indices.iter().map(|index| index + base));
     }
 
-    /// The box around every vertex, or `None` for an empty mesh.
+    /// The box around every vertex, or `None` for a mesh with no vertices.
+    /// A mesh can be empty and still have some: a shape that came to
+    /// nothing but zero-area triangles keeps its vertices.
     #[must_use]
     pub fn bounds(&self) -> Option<Bounds> {
-        Bounds::around(self.positions.iter().map(|position| Point {
-            x: f64::from(position[0]),
-            y: f64::from(position[1]),
-        }))
+        Bounds::around(self.positions.iter().copied().map(vertex_point))
     }
 
     /// The area the triangles cover, in square millimetres, each triangle
@@ -115,13 +114,20 @@ impl Mesh {
     }
 }
 
+/// A mesh vertex as a point.
+fn vertex_point([x, y]: [f32; 2]) -> Point {
+    Point {
+        x: f64::from(x),
+        y: f64::from(y),
+    }
+}
+
 /// The vertex at `index` as a point, or `None` past the end of `positions`.
 fn corner(positions: &[[f32; 2]], index: u32) -> Option<Point> {
-    let position = positions.get(usize::try_from(index).ok()?)?;
-    Some(Point {
-        x: f64::from(position[0]),
-        y: f64::from(position[1]),
-    })
+    positions
+        .get(usize::try_from(index).ok()?)
+        .copied()
+        .map(vertex_point)
 }
 
 /// Twice the signed area of the triangle `a`, `b`, `c`.
@@ -910,16 +916,18 @@ fn signed_area(polygon: &[Point]) -> f64 {
         .sum()
 }
 
-/// Lyon's own buffers, less every triangle of zero area: the stroke
-/// tessellator emits them at a join of collinear edges, its join quad with
-/// coincident corners and an arc fan over a zero angle. One draws nothing,
-/// but a point test takes three zero cross products for inside, so it
-/// would claim every point on the triangle's line. The test is exact, in
-/// the arithmetic of [`Mesh::covers`]; the vertices stay, so the bounds of
-/// a mesh do not move.
-struct SolidTriangles<'a, Ctor>(BuffersBuilder<'a, [f32; 2], u32, Ctor>);
+/// A [`BuffersBuilder`] that drops every triangle of zero area as lyon
+/// hands it over. The stroke tessellator emits them at a join of collinear
+/// edges, its join quad with coincident corners and an arc fan over a zero
+/// angle; the fill tessellator has no area check either, so both go
+/// through here. Such a triangle draws nothing, but a point test takes
+/// three zero cross products for inside, so it would claim every point on
+/// the triangle's line, or every point at all when its corners coincide.
+/// The area check is exact, in the arithmetic of [`Mesh::covers`]. The
+/// vertices stay, so the bounds of a mesh do not move.
+struct ZeroAreaFilter<'a, Ctor>(BuffersBuilder<'a, [f32; 2], u32, Ctor>);
 
-impl<Ctor> GeometryBuilder for SolidTriangles<'_, Ctor> {
+impl<Ctor> GeometryBuilder for ZeroAreaFilter<'_, Ctor> {
     fn begin_geometry(&mut self) {
         self.0.begin_geometry();
     }
@@ -944,13 +952,13 @@ impl<Ctor> GeometryBuilder for SolidTriangles<'_, Ctor> {
     }
 }
 
-impl<Ctor: FillVertexConstructor<[f32; 2]>> FillGeometryBuilder for SolidTriangles<'_, Ctor> {
+impl<Ctor: FillVertexConstructor<[f32; 2]>> FillGeometryBuilder for ZeroAreaFilter<'_, Ctor> {
     fn add_fill_vertex(&mut self, vertex: FillVertex) -> Result<VertexId, GeometryBuilderError> {
         self.0.add_fill_vertex(vertex)
     }
 }
 
-impl<Ctor: StrokeVertexConstructor<[f32; 2]>> StrokeGeometryBuilder for SolidTriangles<'_, Ctor> {
+impl<Ctor: StrokeVertexConstructor<[f32; 2]>> StrokeGeometryBuilder for ZeroAreaFilter<'_, Ctor> {
     fn add_stroke_vertex(
         &mut self,
         vertex: StrokeVertex,
@@ -1014,7 +1022,7 @@ impl MeshBuilder {
         let _ = self.fill.tessellate_path(
             &path,
             &options,
-            &mut SolidTriangles(BuffersBuilder::new(&mut self.buffers, |v: FillVertex| {
+            &mut ZeroAreaFilter(BuffersBuilder::new(&mut self.buffers, |v: FillVertex| {
                 v.position().to_array()
             })),
         );
@@ -1044,7 +1052,7 @@ impl MeshBuilder {
         let _ = self.stroke.tessellate_path(
             &path,
             &options,
-            &mut SolidTriangles(BuffersBuilder::new(&mut self.buffers, |v: StrokeVertex| {
+            &mut ZeroAreaFilter(BuffersBuilder::new(&mut self.buffers, |v: StrokeVertex| {
                 v.position().to_array()
             })),
         );
