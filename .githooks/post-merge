@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Tracked post-merge hook, enabled with pre-commit by
+#   git config core.hooksPath .githooks
+#
+# Sweeps the checkout's own target after a merge, the way pre-commit does
+# before its checks (.githooks/sweep.sh). A checkout that receives its
+# changes by merge, the main checkout taking agent branches by fast-forward,
+# makes few commits of its own with code in them, so pre-commit alone left
+# its target unswept for days at a time (68 GiB on 2026-11-03, #101).
+#
+# Git runs post-merge after `git merge` and `git pull`, fast-forwards
+# included. A landing by `git rebase`, `git reset` or `git update-ref` runs
+# no post-merge, and gets its sweep at the next commit instead. The merge is
+# done by the time this runs: its exit status changes nothing.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+. "$(dirname "${BASH_SOURCE[0]}")/sweep.sh"
+sweep_checkout post-merge "$root"

@@ -65,48 +65,11 @@ flock -n 9 || {
   exit 1
 }
 
-# cargo-sweep keeps both build directories from growing without bound. Cargo
-# never removes an artifact: any change to a dependency list or a feature set
-# gives the same crate a new hash and the old files stay (one manifest change
-# left a workspace 12 GiB of stale test binaries). The working tree's own
-# target is swept here, before CARGO_TARGET_DIR is redirected below, so the
-# sweep sees whatever this shell builds into. Its measure is age: the last
-# read of a unit's fingerprint, which relatime refreshes at most once a day,
-# so three days keeps everything built or checked daily and drops the rest.
-# A release build a daemon runs from goes cold after three unused days.
-# Skipped while a build holds a profile's lock, and when cargo-sweep is
-# missing, with a line saying so either way.
-#
-# rustc's incremental cache is outside cargo-sweep's reach: one directory per
-# crate id, which is a hash of the same metadata, so every cause of a stale
-# artifact in deps leaves an orphaned directory of object files here, and
-# neither rustc nor cargo ever removes one. A fresh unit never opens its
-# directory, so use cannot be seen; the directory's mtime is its last
-# compile, and one not compiled in three days belongs to a hash that will
-# not be compiled again.
-sweep_incremental() {  # $1: a target directory
-  local old
-  old=$(find "$1"/*/incremental -mindepth 1 -maxdepth 1 -type d -mtime +3 \
-    2>/dev/null || true)
-  [ -n "$old" ] || return 0
-  echo "pre-commit: removing $(printf '%s\n' "$old" | wc -l) incremental" \
-    "directories not compiled in three days under $1"
-  printf '%s\n' "$old" | xargs -d '\n' rm -rf --
-}
-busy=0
-for lock in "$root"/target/*/.cargo-lock; do
-  if [ -e "$lock" ] && ! flock -n "$lock" true; then busy=1; fi
-done
-if [ "$busy" = 1 ]; then
-  echo "pre-commit: a build holds the working tree's target; its sweep is skipped."
-else
-  sweep_incremental "$root/target"
-  if command -v cargo-sweep >/dev/null; then
-    cargo sweep --time 3 "$root"
-  else
-    echo "pre-commit: cargo-sweep is missing (cargo install cargo-sweep --locked); no sweep."
-  fi
-fi
+# The checkout's own target is swept here (.githooks/sweep.sh says how),
+# before CARGO_TARGET_DIR is redirected below, so the sweep sees whatever
+# this shell builds into.
+. "$(dirname "${BASH_SOURCE[0]}")/sweep.sh"
+sweep_checkout pre-commit "$root"
 
 # Export the index git is about to commit. Git points GIT_INDEX_FILE at a
 # temporary index for partial commits, and checkout-index honours it, so the
@@ -155,7 +118,7 @@ bash "$snapshot/scripts/checks.sh" all 9>&- || {
   exit 1
 }
 
-sweep_incremental "$CARGO_TARGET_DIR"
+sweep_incremental pre-commit "$CARGO_TARGET_DIR"
 if [ "$have_sweep" = 1 ]; then
   cargo sweep --file "$snapshot"
 fi
