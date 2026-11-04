@@ -50,7 +50,7 @@ resource "google_service_account_iam_member" "deploy_impersonated_by_github" {
 # pushed manifest) and delete tags (scripts/prune-images.sh). repoAdmin is
 # writer plus the deletes; read, which imagetools inspect needs, comes
 # with it.
-resource "google_artifact_registry_repository_iam_member" "deploy_manages_images" {
+resource "google_artifact_registry_repository_iam_member" "deploy_writes_images" {
   location   = google_artifact_registry_repository.kiewer.location
   repository = google_artifact_registry_repository.kiewer.name
   role       = "roles/artifactregistry.repoAdmin"

@@ -310,27 +310,30 @@ jobs:
   #
   # The Version is read from the manifest. v<Version> in git already means
   # a plain push, and the job ends there: the run has done what every push
-  # does. Otherwise the job names the image this run pushed, deploys that
-  # digest to the production service, makes the annotated tag and prunes
-  # the registry. The tag comes after the deploy because it is the record
-  # of a Release that happened: a refused retag or a failed deploy leaves
-  # the Version untagged, so a rerun of this job cuts it, and so does the
-  # green run of a fix pushed above the Bump. Every step before the tag
-  # repeats to the same result.
+  # does. Otherwise the job deploys the digest of the image this run
+  # pushed to the production service, names the image, makes the annotated
+  # tag and prunes the registry. The names and the tag come after the
+  # deploy because they are the record of a Release that happened: a
+  # failed deploy leaves the Version untagged and nothing pointing at the
+  # image, so a rerun of this job cuts it, and so does the green run of a
+  # fix pushed above the Bump. Every step before the tag repeats to the
+  # same result.
   #
   # With the tag last, it cannot settle two runs racing for one Version;
-  # the concurrency group does. Release jobs run one at a time, the later
-  # one finds the tag and ends. A queued job a newer one replaces loses
-  # nothing: the newer commit carries the same Version or a later one.
+  # the concurrency group does. Release jobs run one at a time, and the
+  # later one finds the tag and ends. GitHub keeps one job waiting in a
+  # group: a job already waiting when another arrives is cancelled, and a
+  # rerun or the next push cuts its Version.
   #
   # A Release moves traffic to the new revision once it is ready; a
   # Release candidate becomes a revision with no traffic under the Cloud
   # Run tag `rc`, reachable on its tag URL
-  # (https://rc---kiewer-<hash>.a.run.app), so it is tried by hand and the
-  # plain Release that follows moves traffic. The image production runs is
-  # the image this run built and staging already ran.
+  # (https://rc---kiewer-<hash>.a.run.app), so it is tried by hand. The
+  # image production runs is the image this run built and staging already
+  # ran.
   release:
     name: Release
+    # Every other job of this workflow: a job added above joins this list.
     needs: [fmt, clippy, test, docs, wasm, msrv, release-build, image]
     # The GCP variables as in the image job: until they exist nothing was
     # pushed, so there is nothing to name and no Release to record.
@@ -354,68 +357,99 @@ jobs:
         # bash by name is bash with pipefail, so a read that fails is not
         # taken as an empty Version. The checkout is shallow and carries no
         # tags, so the question goes to the remote, and it is asked in an
-        # assignment so a failed ls-remote stops the step: inside a test
-        # its empty output would read as an untagged Version.
+        # assignment so a failed ls-remote stops the step: inside an
+        # `if [ -n ... ]` its empty output would read as an untagged
+        # Version. The two shapes a Release takes are spelled here and in
+        # scripts/prune-images.sh.
+        #
+        # A failed prune leaves the Release made and the run red with the
+        # tag already in git, so a rerun finds the Version tagged. The
+        # `prune` output is true on any rerun, so the rerun repeats the
+        # prune all the same; a first attempt on a tagged Version prunes
+        # nothing, and a plain push ends at staging.
         shell: bash
         run: |
           version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kiewer") | .version')"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            kind=release
+          elif [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+            kind=candidate
+          else
             echo "::error::the Version '$version' is neither X.Y.Z nor X.Y.Z-rc.N, the two shapes a Release takes"
             exit 1
           fi
           tagged="$(git ls-remote --refs origin "refs/tags/v$version")"
           if [ -n "$tagged" ]; then
             echo "v$version is in git: a plain push, nothing to cut"
-            echo "cut=false" >> "$GITHUB_OUTPUT"
+            cut=false
           else
             echo "v$version is not in git: this run cuts it"
-            echo "cut=true" >> "$GITHUB_OUTPUT"
+            cut=true
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - if: steps.version.outputs.cut == 'true' || github.run_attempt > 1
+          prune="$cut"
+          [ "$GITHUB_RUN_ATTEMPT" = 1 ] || prune=true
+          {
+            echo "cut=$cut"
+            echo "prune=$prune"
+            echo "version=$version"
+            echo "kind=$kind"
+          } >> "$GITHUB_OUTPUT"
+      - if: steps.version.outputs.prune == 'true'
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SA }}
-      - if: steps.version.outputs.cut == 'true' || github.run_attempt > 1
+      - if: steps.version.outputs.prune == 'true'
         uses: google-github-actions/setup-gcloud@v2
       - if: steps.version.outputs.cut == 'true'
         run: gcloud auth configure-docker europe-west4-docker.pkg.dev --quiet
-      - name: Name the image this run pushed
+      - name: Read the digest of the image this run pushed
         if: steps.version.outputs.cut == 'true'
-        id: name
-        # The short hash is the image's identity; the image job pushed it
-        # moments ago, so no image under it means the push did not land.
+        id: digest
+        # The short hash is the image's identity. The image job pushed it
+        # earlier in the run, so it is missing only on a late rerun: the
+        # cleanup policy takes an image older than a day and behind the
+        # five most recent.
+        shell: bash
+        run: |
+          short="$(git rev-parse --short HEAD)"
+          if ! digest="$(docker buildx imagetools inspect "$IMAGE:$short" --format '{{.Manifest.Digest}}' 2>/dev/null)" || [ -z "$digest" ]; then
+            echo "::error::the registry has no $IMAGE:$short; the image job of this run pushed it, so the cleanup policy has taken it. A new push cuts the Version"
+            exit 1
+          fi
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+          echo "digest=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
+      - name: Deploy to production
+        if: steps.version.outputs.cut == 'true'
+        # A candidate's --no-traffic takes LATEST out of the service's
+        # traffic for good: every later deploy, however it is spelled, gets
+        # none until --to-latest puts LATEST back. So a plain Release asks
+        # for it every time; after a plain Release it changes nothing. Its
+        # failure fails this step, before the names and the tag, so the
+        # run is red and a rerun does it again.
+        shell: bash
+        run: |
+          kind="${{ steps.version.outputs.kind }}"
+          traffic=()
+          if [ "$kind" = candidate ]; then traffic=(--no-traffic --tag rc); fi
+          gcloud run deploy kiewer --project "${{ vars.GCP_PROJECT_ID }}" \
+            --region europe-west4 --image "${{ steps.digest.outputs.digest }}" \
+            "${traffic[@]}" --quiet
+          [ "$kind" != release ] || gcloud run services update-traffic kiewer \
+            --project "${{ vars.GCP_PROJECT_ID }}" --region europe-west4 --to-latest --quiet
+      - name: Name the image
+        if: steps.version.outputs.cut == 'true'
         # imagetools create adds a tag to the manifest in the registry
         # without a pull; --prefer-index=false keeps it the same manifest
         # and digest.
         shell: bash
         run: |
-          short="$(git rev-parse --short HEAD)"
+          short="${{ steps.digest.outputs.short }}"
           version="${{ steps.version.outputs.version }}"
-          if ! digest="$(docker buildx imagetools inspect "$IMAGE:$short" --format '{{.Manifest.Digest}}' 2>/dev/null)" || [ -z "$digest" ]; then
-            echo "::error::the registry has no $IMAGE:$short, which this run's image job pushed"
-            exit 1
-          fi
           tags=(--tag "$IMAGE:$version")
-          case "$version" in
-            *-rc.*) ;;
-            *) tags+=(--tag "$IMAGE:latest") ;;
-          esac
+          [ "${{ steps.version.outputs.kind }}" = candidate ] || tags+=(--tag "$IMAGE:latest")
           docker buildx imagetools create --prefer-index=false "${tags[@]}" "$IMAGE:$short"
-          echo "named $IMAGE@$digest as $version"
-          echo "digest=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
-      - name: Deploy to production
-        if: steps.version.outputs.cut == 'true'
-        shell: bash
-        run: |
-          case "${{ steps.version.outputs.version }}" in
-            *-rc.*) traffic=(--no-traffic --tag rc) ;;
-            *) traffic=() ;;
-          esac
-          gcloud run deploy kiewer --project "${{ vars.GCP_PROJECT_ID }}" \
-            --region europe-west4 --image "${{ steps.name.outputs.digest }}" \
-            "${traffic[@]}" --quiet
+          echo "named ${{ steps.digest.outputs.digest }} as $version"
       - name: Make the Release tag
         if: steps.version.outputs.cut == 'true'
         # Annotated, as a Release tag is; git refuses one without a
@@ -428,14 +462,9 @@ jobs:
             --message "kiewer ${{ steps.version.outputs.version }}"
           git push origin "refs/tags/v${{ steps.version.outputs.version }}"
       # After the tag: the prune keeps what git lists, so before it the new
-      # Release is not on the list and its registry tag would go. A prune
-      # that fails leaves the Release made and the run red, with the tag
-      # already in git, so a rerun finds the Version tagged; the rerun still
-      # repeats this step, which is why it and the two sign-in steps above
-      # also run on a second attempt. A first attempt on a tagged Version
-      # skips them: a plain push ends at staging.
+      # Release is not on the list and its registry tag would go.
       - name: Prune the registry
-        if: steps.version.outputs.cut == 'true' || github.run_attempt > 1
+        if: steps.version.outputs.prune == 'true'
         env:
           GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
         run: scripts/prune-images.sh

@@ -6,6 +6,9 @@
 //! clone of it, which is what CI's checkout gives the script. The registry
 //! is a stand-in `gcloud` on PATH over a file of tags, answering what
 //! Artifact Registry answers: a refused delete of a tag it does not hold.
+//!
+//! A script's test, in `kiewer_lib`'s binary because the workspace has no
+//! crate for its scripts and this one needs only cargo's scratch directory.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -16,6 +19,7 @@ use kiewer_test_support::{TempDir, scratch_dir};
 use test_case::test_case;
 
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/prune-images.sh");
+const CHECKOUT_SCRIPT: &str = "checkout/scripts/prune-images.sh";
 
 /// Takes exactly the two spellings the script is meant to use; anything
 /// else fails the run.
@@ -100,6 +104,8 @@ impl Fixture {
                 "checkout",
             ],
         );
+        fs::create_dir(root.join("checkout/scripts")).expect("the scripts directory");
+        fs::copy(SCRIPT, root.join(CHECKOUT_SCRIPT)).expect("the script in the checkout");
         fixture
     }
 
@@ -134,15 +140,17 @@ impl Fixture {
         );
     }
 
+    /// Started from outside the checkout: the script finds its repository
+    /// from its own path, as the other scripts do.
     fn prune(&self) -> Output {
-        self.command(Path::new(SCRIPT))
+        self.command(&self.dir.path().join(CHECKOUT_SCRIPT))
             .env("GCP_PROJECT_ID", "a-project")
-            .current_dir(self.dir.path().join("checkout"))
+            .current_dir(self.dir.path())
             .output()
             .expect("the script runs")
     }
 
-    fn pruned(&self) {
+    fn assert_prune_succeeds(&self) {
         let output = self.prune();
         assert!(
             output.status.success(),
@@ -206,7 +214,7 @@ fn keeps_three_releases_one_candidate_and_every_other_tag() {
         ],
     );
 
-    fixture.pruned();
+    fixture.assert_prune_succeeds();
 
     assert_eq!(
         fixture.registry(),
@@ -259,7 +267,7 @@ fn newest_is_by_version_order(git_tags: &[&str], kept: &[&str]) {
         .collect();
     let fixture = Fixture::new(git_tags, &registry);
 
-    fixture.pruned();
+    fixture.assert_prune_succeeds();
 
     assert_eq!(fixture.registry(), sorted(kept));
 }
@@ -271,20 +279,20 @@ fn a_second_run_deletes_nothing() {
         &["0.1.0", "0.2.0", "0.3.0", "0.4.0"],
     );
 
-    fixture.pruned();
+    fixture.assert_prune_succeeds();
     assert_eq!(fixture.deleted(), "0.1.0\n");
 
-    fixture.pruned();
+    fixture.assert_prune_succeeds();
     assert_eq!(fixture.deleted(), "0.1.0\n");
 }
 
-/// A cut whose deploy failed named its image and made no git tag, so the
-/// Release-shaped registry tag has no line in git's list.
+/// A cut whose tag push was refused named its image and made no git tag,
+/// so the Release-shaped registry tag has no line in git's list.
 #[test]
 fn a_release_shaped_tag_git_does_not_list_goes() {
     let fixture = Fixture::new(&["v0.1.0"], &["0.1.0", "0.2.0", "0.2.0-rc.1", "latest"]);
 
-    fixture.pruned();
+    fixture.assert_prune_succeeds();
 
     assert_eq!(fixture.registry(), sorted(&["0.1.0", "latest"]));
 }
@@ -293,7 +301,7 @@ fn a_release_shaped_tag_git_does_not_list_goes() {
 fn a_kept_release_the_registry_lost_is_no_failure() {
     let fixture = Fixture::new(&["v0.1.0", "v0.2.0"], &["0.2.0"]);
 
-    fixture.pruned();
+    fixture.assert_prune_succeeds();
 
     assert_eq!(fixture.registry(), sorted(&["0.2.0"]));
 }
@@ -315,7 +323,7 @@ fn other_v_tags_take_no_place() {
         &["0.1.0", "0.2.0", "0.3.0"],
     );
 
-    fixture.pruned();
+    fixture.assert_prune_succeeds();
 
     assert_eq!(fixture.registry(), sorted(&["0.1.0", "0.2.0", "0.3.0"]));
 }

@@ -16,10 +16,9 @@
 # .cargo/config.toml, which the lock hash reads raw: any changed file
 # moves the lock hash alone (fallback to the newest cache under the
 # prefix, warm, saved under the new key); an identical tree (a rerun) is
-# an exact match with no save. The step
-# refuses a tracked .cargo/config.toml, since the append would mark the
-# tree dirty for the build and a version banner would carry it, and
-# writes the line once.
+# an exact match with no save. The step refuses a tracked
+# .cargo/config.toml, since the append would mark the tree dirty for the
+# build and a version banner would carry it, and writes the line once.
 #
 # The freshness mark. The workspace crates are cached
 # (cache-workspace-crates), and cargo keeps a unit when every source's

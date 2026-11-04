@@ -26,9 +26,9 @@
 #                    which is where an image lands when the prune takes
 #                    its Release tag.
 #
-# The day's floor on the delete keeps an image out of reach between its
-# push and its naming later in the same run, however many pushes land in
-# between.
+# The day's floor on the delete keeps an image out of reach for its first
+# day, so the run that pushed it can still name it however many pushes
+# land meanwhile.
 resource "google_artifact_registry_repository" "kiewer" {
   location      = var.region
   repository_id = "kiewer"

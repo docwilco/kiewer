@@ -8,8 +8,8 @@
 #
 # The list of Releases is git's tags, read from the remote: CI's checkout
 # is shallow and carries none. The registry says only which tags there are
-# to delete, so a Release-shaped tag git never made (a cut whose deploy
-# failed) goes too. A second run finds nothing to delete.
+# to delete, so a Release-shaped tag git never made (a cut whose tag push
+# was refused) goes too. A second run finds nothing to delete.
 #
 # Usage: scripts/prune-images.sh
 #
@@ -17,20 +17,24 @@
 # repository, and GCP_PROJECT_ID in the environment (the same value as the
 # repository variable CI reads).
 set -euo pipefail
+cd "$(dirname "$0")/.."
 
+releases=3
+candidates=1
 project="${GCP_PROJECT_ID:?set GCP_PROJECT_ID}"
-image="europe-west4-docker.pkg.dev/$project/kiewer/kiewer"
+region=europe-west4
+image="$region-docker.pkg.dev/$project/kiewer/kiewer"
 
-# The two shapes a Release takes.
-release='^[0-9]+\.[0-9]+\.[0-9]+$'
-candidate='^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$'
+# The two shapes a Release takes, here and in the CI workflow's release job.
+release_shape='^[0-9]+\.[0-9]+\.[0-9]+$'
+candidate_shape='^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$'
 
 newest() {  # $1: a shape, $2: a count; the Versions on stdin
   { grep -E "$1" || true; } | sort -V | tail -n "$2"
 }
 
 versions="$(git ls-remote --refs --tags origin 'v*' | sed -n 's|^.*refs/tags/v||p')"
-keep="$(newest "$release" 3 <<<"$versions"; newest "$candidate" 1 <<<"$versions")"
+keep="$(newest "$release_shape" "$releases" <<<"$versions"; newest "$candidate_shape" "$candidates" <<<"$versions")"
 
 # A prune follows a cut, so git lists at least the Release just made. An
 # empty list is a read that went wrong, and taken as it stands it would
@@ -42,7 +46,7 @@ fi
 echo "prune-images: keeping $(tr '\n' ' ' <<<"$keep")"
 
 tags="$(gcloud artifacts docker tags list "$image" --format='value(tag.basename())')"
-stale="$(grep -E "$release|$candidate" <<<"$tags" | grep -Fxv -f <(echo "$keep") || true)"
+stale="$(grep -E "$release_shape|$candidate_shape" <<<"$tags" | grep -Fxv -f <(echo "$keep") || true)"
 
 for tag in $stale; do
   echo "prune-images: deleting $image:$tag"
