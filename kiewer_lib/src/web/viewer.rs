@@ -405,7 +405,7 @@ mod tests {
         let script = script_url();
         let name = script.strip_prefix("/viewer/").expect("under /viewer/");
         assert!(
-            text.contains(&format!("from \"./{name}\";")),
+            text.contains(&format!("import(\"./{name}\")")),
             "the page script imports {script}, which sits beside it"
         );
     }

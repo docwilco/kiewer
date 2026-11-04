@@ -88,10 +88,12 @@ pub enum Backend {
 }
 
 /// How the page load went: the adapter and device came up, they did
-/// not, or the wasm panicked (at any point in the page's life); or the
-/// canvas was held to the device's texture limit, sent beside `ok` the
-/// first time it happens in a page load (`cap_canvas` in
-/// `kiewer_viewer/src/render.rs`), with no reason and no sizes.
+/// not (or the viewer's script failed to import, backend `none` and a
+/// reason starting `import: `), or the wasm panicked (at any point in
+/// the page's life); or the canvas was held to the device's texture
+/// limit, sent beside `ok` the first time it happens in a page load
+/// (`cap_canvas` in `kiewer_viewer/src/render.rs`), with no reason and
+/// no sizes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Display)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {

@@ -4,8 +4,9 @@
 //! `scripts/browser.sh` pins) loads it over the Chrome DevTools Protocol
 //! and draws WebGL2 on SwiftShader, with no GPU. The board page's first
 //! load is checked through the network, its beacon answered by the
-//! server; the canvas cases of #94 below read the beacons the page hands
-//! to `sendBeacon`, through the server's parser.
+//! server; the canvas cases of #94 and the failed import of #96 below
+//! read the beacons the page hands to `sendBeacon`, through the server's
+//! parser.
 //!
 //! Runs when `KIEWER_BROWSER` names the browser's executable, which the
 //! browser stage of `scripts/checks.sh` sets, along with
@@ -17,9 +18,13 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
+use chromiumoxide::cdp::browser_protocol::fetch::{
+    self, EventRequestPaused, FulfillRequestParams, RequestPattern,
+};
 use chromiumoxide::cdp::browser_protocol::network::{
     EventRequestWillBeSent, EventResponseReceived, GetRequestPostDataParams, RequestId,
 };
@@ -29,7 +34,7 @@ use futures_util::StreamExt as _;
 use kiewer_assert::assert_is_empty;
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::web::beacon::{BEACON_PATH, Backend, Beacon, Outcome};
-use kiewer_lib::web::viewer::embedded;
+use kiewer_lib::web::viewer::{embedded, script_url};
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use serde::Deserialize;
 use test_case::test_case;
@@ -343,6 +348,45 @@ impl Session {
         session
     }
 
+    /// Has the browser answer every request for `path` with a 404 and no
+    /// body, before it reaches the server. The count is how many it
+    /// answered so.
+    async fn answer_not_found(&self, path: &str) -> Arc<AtomicUsize> {
+        let mut paused = self
+            .page
+            .event_listener::<EventRequestPaused>()
+            .await
+            .expect("paused request events");
+        self.page
+            .execute(
+                fetch::EnableParams::builder()
+                    .pattern(
+                        RequestPattern::builder()
+                            .url_pattern(format!("*{path}"))
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .expect("request interception");
+        let answered = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&answered);
+        let page = self.page.clone();
+        // Ends with the browser, when the event stream does.
+        tokio::spawn(async move {
+            while let Some(event) = paused.next().await {
+                if page
+                    .execute(FulfillRequestParams::new(event.request_id.clone(), 404))
+                    .await
+                    .is_ok()
+                {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        answered
+    }
+
     /// The viewport, `width` by `height` CSS pixels at `dpr` device
     /// pixels each; on a loaded page this is a resize.
     async fn viewport(&self, width: u32, height: u32, dpr: u32) {
@@ -633,6 +677,51 @@ async fn a_panic_inside_viewer_create_shows_and_sends_its_beacon(viewed: Viewed)
         Backend::None,
         "no viewer yet: {beacons:?}"
     );
+    assert_eq!(
+        beacons[0].reason, error,
+        "the beacon carries what the box shows"
+    );
+    session.close().await;
+}
+
+// A viewer script that fails to load (#96): the page script imports it
+// inside start's try, so the failure shows in the error box and sends one
+// failed beacon, where a static import stopped the whole module first and
+// the page stayed blank.
+#[test_case(Viewed::Board; "the board page")]
+#[test_case(Viewed::Schematic; "the schematic page")]
+#[tokio::test]
+async fn a_viewer_script_that_answers_404_shows_and_sends_its_beacon(viewed: Viewed) {
+    let Some(executable) = executable() else {
+        return;
+    };
+    let session = Session::new(executable).await;
+    let script = script_url();
+    let answered = session.answer_not_found(&script).await;
+    session.viewport(1000, 700, 1).await;
+    session.goto(viewed).await;
+    let failed = session
+        .held_within_deadline(r#"!document.getElementById("error").hidden"#)
+        .await;
+    tokio::time::sleep(SETTLE).await;
+    let shown = session.shown().await;
+    assert!(
+        failed,
+        "no error within {DEADLINE:?}; the page shows {shown:?}"
+    );
+
+    assert!(
+        answered.load(Ordering::SeqCst) > 0,
+        "the browser answered {script} with a 404"
+    );
+    let error = shown.error.expect("the error box shows");
+    assert!(
+        error.starts_with("import: ") && error.contains(&script),
+        "the failed import, naming the script: {error}"
+    );
+    let beacons = session.beacons().await;
+    assert_eq!(outcomes(&beacons), [Outcome::Failed], "{beacons:?}");
+    assert_eq!(beacons[0].backend, Backend::None, "no viewer: {beacons:?}");
     assert_eq!(
         beacons[0].reason, error,
         "the beacon carries what the box shows"

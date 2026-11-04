@@ -38,7 +38,8 @@
 // viewer's script as `./kiewer_viewer.js`; with the viewer embedded that
 // becomes the hashed name before the page script is hashed, so a new
 // viewer is a new page script too. Without it the import stays plain
-// and fails at the 503, as the viewer's own import did.
+// and fails at the 503, which the page shows in its error box and sends
+// as a failed beacon (#96).
 use std::env;
 use std::fmt::Write as _;
 use std::fs;

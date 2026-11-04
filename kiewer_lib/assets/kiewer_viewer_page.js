@@ -6,25 +6,25 @@
 // (kiewer-board, kiewer-sheet) and on kiewer-frame, which this sends.
 // Served beside the viewer's script as one more hashed asset
 // (kiewer_lib/build.rs, kiewer_lib/src/web/viewer.rs); build.rs rewrites
-// the import below to the viewer script's hashed name before hashing
-// this file, so a new viewer is a new URL here too.
+// the import in importViewer to the viewer script's hashed name before
+// hashing this file, so a new viewer is a new URL here too.
 //
 // The page holds the elements this script writes by their ids: `status`
 // (the backend line), `error` (the failure box), `zoom` (the read-out)
 // and `fit` (the Fit button).
-import init, { Viewer } from "./kiewer_viewer.js";
 
 // Telemetry (docs/v1-scope.md, Telemetry; the server side is
 // kiewer_lib/src/web/beacon.rs): one beacon per page load, after the
 // adapter init in `start`, with the backend, whether navigator.gpu
 // existed, the outcome of that init and the adapter vendor; a wasm panic
 // sends one more with its message, and a capped canvas one `capped`
-// (kiewer_lib/src/web/beacon.rs, Outcome). sendBeacon queues the POST and returns at once, so nothing here waits
-// on the network or runs before the first frame is scheduled. The
-// outcome is the adapter's: a board or sheet that fails to fetch or
-// parse after a working adapter is still "ok", and a module import that
-// fails sends nothing, since nothing here runs. No identifiers, no
-// cookie: the body is the five fields below.
+// (kiewer_lib/src/web/beacon.rs, Outcome). sendBeacon queues the POST
+// and returns at once, so nothing here waits on the network or runs
+// before the first frame is scheduled. The outcome is the adapter's: a
+// board or sheet that fails to fetch or parse after a working adapter is
+// still "ok". A viewer script that fails to import is "failed" with
+// backend "none" and the reason `import: <message>` (importViewer). No
+// identifiers, no cookie: the body is the five fields below.
 const BEACON_PATH = "/api/beacon";
 const MAX_REASON = 1024;
 const MAX_VENDOR = 64;
@@ -90,6 +90,20 @@ function showError(message) {
 // the panic: the trap that follows it reaches a catch as "unreachable".
 export function fail(message) {
   if (!window.kiewerPanic) showError(message);
+}
+
+// The viewer's module, imported in `start`'s try rather than at the top
+// of this file: a static import that fails (a 404, a network error)
+// stops this whole module before any of it runs, and the page stays
+// blank with no beacon. A failure is thrown on as `import: <message>`,
+// so the error box and the failed beacon say what broke. The panic hook
+// above is set before this runs, as before.
+async function importViewer() {
+  try {
+    return await import("./kiewer_viewer.js");
+  } catch (e) {
+    throw new Error("import: " + (e && e.message ? e.message : e));
+  }
 }
 
 // Device pixels for the pointer event `e` over `canvas`: its offset from
@@ -267,6 +281,7 @@ export async function start(canvas, load) {
   new ResizeObserver(resize).observe(canvas);
 
   try {
+    const { default: init, Viewer } = await importViewer();
     await init();
     const [width, height] = wanted();
     viewer = await Viewer.create(canvas, width, height);
