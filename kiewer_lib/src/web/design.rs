@@ -634,21 +634,64 @@ async fn refused(
 /// What follows a revision landing, a push's or a pending revision's: the
 /// thumbnail (ADR 0004), drawn within the render budget, else queued for
 /// a retry, which never fails the upload; then the purge of `keys`, so it
-/// covers a thumbnail drawn within the budget. A task of their own: a
-/// browser that gives up during the render drops the handler, and a
-/// purge lost with it would leave the pages stale for the hour.
+/// covers a thumbnail drawn within the budget. Its caller runs it in a
+/// task of its own: a browser that gives up during the render drops the
+/// handler, and a purge lost with it would leave the pages stale for the
+/// hour.
+async fn settle(state: &AppState, revision: RevisionHash, keys: Vec<Key>) {
+    state
+        .thumbnails
+        .after_push(&state.db, state.blobs.as_ref(), revision)
+        .await;
+    cache::after_write(state.purge.as_ref(), &keys).await;
+}
+
+/// [`settle`] in a task of its own, awaited: a pending revision's, once
+/// its decision has landed.
 pub(super) async fn after_landing(state: &AppState, revision: RevisionHash, keys: Vec<Key>) {
     let after = state.clone();
-    let settled = tokio::spawn(async move {
-        after
-            .thumbnails
-            .after_push(&after.db, after.blobs.as_ref(), revision)
-            .await;
-        cache::after_write(after.purge.as_ref(), &keys).await;
-    });
+    let settled = tokio::spawn(async move { settle(&after, revision, keys).await });
     if let Err(error) = settled.await {
         tracing::warn!(%error, "the render and purge after a push did not finish");
     }
+}
+
+/// The push of `incoming` to `target` and what follows a revision it
+/// lands ([`settle`], with the keys of the design under `owner`), together
+/// in one task, which the handler awaits. A browser that leaves drops only
+/// the wait, so it can no longer land between the push's commit and the
+/// render and purge (#91).
+async fn push_and_settle(
+    state: &AppState,
+    author: Author,
+    owner: Handle,
+    target: Target,
+    message: Option<String>,
+    incoming: Incoming,
+) -> Result<Outcome> {
+    let state = state.clone();
+    let pushed = tokio::spawn(async move {
+        let outcome = upload::push(
+            &state.db,
+            state.blobs.as_ref(),
+            &Limits::DEFAULT,
+            &author,
+            target,
+            message.as_deref(),
+            incoming,
+        )
+        .await?;
+        if let Outcome::Pushed(committed) = &outcome {
+            let keys = cache::of_design(committed.design.id, &owner, committed.design.visibility);
+            settle(&state, committed.revision, keys).await;
+        }
+        Ok(outcome)
+    });
+    pushed.await.unwrap_or_else(|error| {
+        Err(Error::Failed {
+            reason: format!("the push did not finish: {error}"),
+        })
+    })
 }
 
 /// `POST /upload`: the files become a revision and the browser goes to
@@ -687,13 +730,12 @@ pub(super) async fn upload(
     };
     let committed = match target {
         Ok(target) => {
-            upload::push(
-                &state.db,
-                state.blobs.as_ref(),
-                &Limits::DEFAULT,
-                &author,
+            push_and_settle(
+                &state,
+                author,
+                owner.clone(),
                 target,
-                fields.message.as_deref(),
+                fields.message.clone(),
                 incoming,
             )
             .await
@@ -706,8 +748,6 @@ pub(super) async fn upload(
             Ok(personal(settled.jar, Redirect::to(&choice)))
         }
         Ok(Outcome::Pushed(committed)) => {
-            let keys = cache::of_design(committed.design.id, &owner, committed.design.visibility);
-            after_landing(&state, committed.revision, keys).await;
             let next = history::branch_url(&owner, &committed.design, &committed.branch);
             if committed.warnings.is_empty() {
                 return Ok(personal(settled.jar, Redirect::to(&next)));
