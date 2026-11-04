@@ -5,7 +5,7 @@
 //! while the other lands, and two forms open at one head; both outcomes'
 //! graphs are read back, and so are expiry, the hourly allowance and who
 //! may decide. The Postgres tests skip without `DATABASE_URL`, like
-//! `tests/db.rs`.
+//! `tests/it/db.rs`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

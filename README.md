@@ -36,7 +36,7 @@ on a terminal and JSON lines anywhere else (Cloud Run reads those into
 them); `LOG_FORMAT=json` or `text` overrides. Ctrl-c or SIGTERM stops it
 after the requests in flight.
 
-The tests that need Postgres (`kiewer_lib/tests/db.rs`, `accounts.rs`,
+The tests that need Postgres (`kiewer_lib/tests/it/db.rs`, `accounts.rs`,
 `sign_in.rs`) run when `DATABASE_URL` is exported and skip when it is not,
 in the hook as in a shell; CI sets it against a service container that
 matches `compose.yaml`. The schema is `migrations/` (its README has the
@@ -70,7 +70,7 @@ Cookies are `Secure` under an `https` `PUBLIC_URL`, so a dev box over
 provider on loopback and need no app. Production and staging get their
 registrations through Secret Manager, not `.env`.
 
-The GCS store test (`kiewer_lib/tests/gcs_blob_store.rs`) runs the same way
+The GCS store test (`kiewer_lib/tests/it/gcs_blob_store.rs`) runs the same way
 when `KIEWER_GCS_EMULATOR` names a
 [fake-gcs-server](https://github.com/fsouza/fake-gcs-server) and skips when
 it is not set. On a dev box: the release binary for your platform (v1.56.1,

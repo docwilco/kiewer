@@ -2,7 +2,7 @@
 //! fake of it on loopback (an axum server answering the authorize, token
 //! and user endpoints on the real paths, so no network is touched), the
 //! welcome page's handle form and sign-out. The flow tests need Postgres and skip without
-//! `DATABASE_URL`, like `tests/db.rs`; `/api/me` without a session needs
+//! `DATABASE_URL`, like `tests/it/db.rs`; `/api/me` without a session needs
 //! no database.
 
 use std::collections::HashMap;
@@ -989,7 +989,7 @@ async fn a_use_after_a_day_sets_the_cookie_again_with_the_full_lifetime() {
         quiet.header("set-cookie").is_none(),
         "a fresh session has nothing to renew"
     );
-    // Twenty of thirty days left: in place of a clock, as tests/accounts.rs.
+    // Twenty of thirty days left: in place of a clock, as tests/it/accounts.rs.
     let aged = sqlx::query(
         "UPDATE session SET expires_at = now() + interval '20 days' WHERE id_hash = sha256($1)",
     )

@@ -6,7 +6,7 @@
 //! (#31), each by an index range.
 //! A run acts on the whole database, so the tests here take turns, and
 //! each ages only its own rows to bring them inside what a run removes.
-//! The Postgres tests skip without `DATABASE_URL`, like `tests/db.rs`.
+//! The Postgres tests skip without `DATABASE_URL`, like `tests/it/db.rs`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -201,7 +201,7 @@ async fn age_account(db: &PgPool, account: AccountId) {
 }
 
 /// `id`'s row past its expiry. The row is keyed by the SHA-256 of the
-/// id's text form, as `tests/accounts.rs` finds it.
+/// id's text form, as `tests/it/accounts.rs` finds it.
 async fn expire_session(db: &PgPool, id: SessionId) {
     sqlx::query(
         "UPDATE session SET expires_at = now() - interval '1 second' WHERE id_hash = sha256($1)",

@@ -67,7 +67,7 @@ jobs:
     # Postgres beside the job, as compose.yaml gives a dev box: the same
     # major and the same role, password and database triple, so the
     # DATABASE_URL below is .env.example's. The tests gated on DATABASE_URL
-    # (kiewer_lib/tests/db.rs) run here and skip on a box without it.
+    # (kiewer_lib/tests/it/db.rs) run here and skip on a box without it.
     services:
       postgres:
         image: postgres:16
@@ -85,7 +85,7 @@ jobs:
     env:
       DATABASE_URL: postgres://kiewer:kiewer@127.0.0.1:5432/kiewer
       # The GCS emulator the step below starts; the tests gated on it
-      # (kiewer_lib/tests/gcs_blob_store.rs) run here and skip on a box
+      # (kiewer_lib/tests/it/gcs_blob_store.rs) run here and skip on a box
       # without it.
       KIEWER_GCS_EMULATOR: http://127.0.0.1:8092
     steps:
@@ -98,11 +98,11 @@ jobs:
       # mesa-vulkan-drivers: Mesa's lavapipe, the software Vulkan driver the
       # headless renderer draws with on a machine without a GPU (ADR 0004),
       # for the golden-image test (kiewer_viewer/tests/golden.rs) and the
-      # thumbnail tests (kiewer_lib/tests/thumbnails.rs), which fail rather
+      # thumbnail tests (kiewer_lib/tests/it/thumbnails.rs), which fail rather
       # than skip here when the loader finds no driver. The Vulkan loader
       # itself comes with the package.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
-      # fake-gcs-server, the GCS emulator for kiewer_lib/tests/gcs_blob_store.rs:
+      # fake-gcs-server, the GCS emulator for kiewer_lib/tests/it/gcs_blob_store.rs:
       # Google's own storage client against it over plain http on the
       # loopback. Pinned by version and checksum; the tests make their own
       # buckets through its JSON API, so it starts empty. Only the tests run

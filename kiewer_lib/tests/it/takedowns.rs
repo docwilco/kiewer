@@ -3,7 +3,7 @@
 //! the block arrived, both routes that serve it answer 410 and a brief
 //! cache lifetime, the schematic page leaves it unread, and no thumbnail
 //! is drawn from it. The Postgres tests skip without `DATABASE_URL`, like
-//! `tests/db.rs`.
+//! `tests/it/db.rs`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -102,9 +102,10 @@ async fn a_tree_read_runs_inside_the_writers_transaction() {
     tx.rollback().await.expect("rollback");
 }
 
-const ROOT: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/sheet_tree/hier.kicad_sch");
-const POWER: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/sheet_tree/power.kicad_sch");
-const IO: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/sheet_tree/sub/io.kicad_sch");
+const ROOT: &[u8] = include_bytes!("../../../kicad_core/tests/fixtures/sheet_tree/hier.kicad_sch");
+const POWER: &[u8] =
+    include_bytes!("../../../kicad_core/tests/fixtures/sheet_tree/power.kicad_sch");
+const IO: &[u8] = include_bytes!("../../../kicad_core/tests/fixtures/sheet_tree/sub/io.kicad_sch");
 
 /// The server over `db` with a filesystem store under cargo's scratch
 /// directory.

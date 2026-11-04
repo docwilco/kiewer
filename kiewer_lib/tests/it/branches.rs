@@ -2,7 +2,7 @@
 //! author and offers what the viewer's role allows; each role on each
 //! branch action; the default branch cannot be deleted while it is the
 //! default; new-branch-here writes a branch and no revision. The Postgres
-//! tests skip without `DATABASE_URL`, like `tests/db.rs`.
+//! tests skip without `DATABASE_URL`, like `tests/it/db.rs`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

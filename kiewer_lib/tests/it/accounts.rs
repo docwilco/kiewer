@@ -1,6 +1,6 @@
 //! Accounts, identities and sessions against Postgres: the three tables
 //! and the session lifecycle through `kiewer_lib::account` and
-//! `kiewer_lib::session`. Gated on `DATABASE_URL` like `tests/db.rs`.
+//! `kiewer_lib::session`. Gated on `DATABASE_URL` like `tests/it/db.rs`.
 //! Rows persist between runs on a dev box, so every test picks its own
 //! provider user id and handle.
 

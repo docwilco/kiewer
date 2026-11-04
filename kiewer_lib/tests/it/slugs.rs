@@ -2,7 +2,7 @@
 //! a slug changed leaves a redirect, a new design at the old slug ends
 //! it, a taken slug is refused, and the description's HTML is kept in the
 //! row and rendered again at every edit. Gated on `DATABASE_URL` like
-//! `tests/db.rs`; rows persist between runs on a dev box, so every test
+//! `tests/it/db.rs`; rows persist between runs on a dev box, so every test
 //! picks its own handle.
 
 use kiewer_lib::account::{self, AccountId, Handle};

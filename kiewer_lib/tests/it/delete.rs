@@ -3,7 +3,7 @@
 //! their own account, with their handle typed out, and its designs,
 //! roles and sessions go with it; the handle stays out of reach for 90
 //! days; the keys of what went are purged. The Postgres tests skip
-//! without `DATABASE_URL`, like `tests/db.rs`.
+//! without `DATABASE_URL`, like `tests/it/db.rs`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -1,7 +1,7 @@
 //! The history tables (ADR 0002) through `kiewer_lib::design`: the
 //! migration's tables and constraints, one revision written as the upload
 //! writes it, a second on top by compare-and-set, and the reads a design
-//! page makes. Gated on `DATABASE_URL` like `tests/db.rs`; rows persist
+//! page makes. Gated on `DATABASE_URL` like `tests/it/db.rs`; rows persist
 //! between runs on a dev box, so every test picks its own handle.
 
 use kiewer_lib::account::{self, AccountId, Handle};

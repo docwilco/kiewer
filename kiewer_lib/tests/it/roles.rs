@@ -1,6 +1,6 @@
 //! Roles and visibility (#21): who may write what on a design, through
 //! `kiewer_lib::roles` and over HTTP. Gated on `DATABASE_URL` like
-//! `tests/db.rs`; rows persist between runs on a dev box, so every test
+//! `tests/it/db.rs`; rows persist between runs on a dev box, so every test
 //! picks its own handles.
 
 use std::net::SocketAddr;

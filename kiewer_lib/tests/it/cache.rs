@@ -4,7 +4,7 @@
 //! of it on loopback, so no network is touched), every kind of route
 //! names its policy and its keys, and each write purges the keys of the
 //! pages it changed. The Postgres tests skip without `DATABASE_URL`, like
-//! `tests/db.rs`; the Fastly fake needs none.
+//! `tests/it/db.rs`; the Fastly fake needs none.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -29,9 +29,9 @@ use kiewer_test_support::{TempDir, scratch_dir};
 use sqlx::PgPool;
 use test_case::test_case;
 
-const BOARD: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pcb");
-const SCHEMATIC: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_sch");
-const PROJECT: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pro");
+const BOARD: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_pcb");
+const SCHEMATIC: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_sch");
+const PROJECT: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_pro");
 
 /// What the fake Fastly saw: one entry per purge call, the service id
 /// from the path, the token header and the body.

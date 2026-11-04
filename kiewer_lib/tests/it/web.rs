@@ -1,6 +1,6 @@
 //! The served pages, through a real listener on a free port. The database
 //! is a pool that never connects (`DATABASE_URL`-free), so these run on
-//! any machine; `tests/db.rs` has the routes that need Postgres.
+//! any machine; `tests/it/db.rs` has the routes that need Postgres.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -31,7 +31,7 @@ async fn an_unknown_path_is_not_found() {
     let (addr, _dir) = start().await;
     // A segment no handle can be (a dot): the person route answers before
     // any lookup, so the closed-port pool is never touched. A segment that
-    // is a handle is looked up, and `tests/roles.rs` covers that.
+    // is a handle is looked up, and `tests/it/roles.rs` covers that.
     let (status, _) = http::get(addr, "/not-a-page.txt").await;
     assert_eq!(status, 404);
 }

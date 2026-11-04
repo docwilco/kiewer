@@ -4,7 +4,7 @@
 //! sheet tree fixture of `kicad_core` uploaded as a design with no board
 //! shows the tree, and its design page (the base, branch and revision
 //! forms) sends the browser to the schematic page. The Postgres tests
-//! skip without `DATABASE_URL`, like `tests/db.rs`.
+//! skip without `DATABASE_URL`, like `tests/it/db.rs`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -31,9 +31,10 @@ const SCHEMATIC_FILE: &str = concat!(
 
 /// The sheet tree fixture: a root, a child beside it, a child in a
 /// subfolder that the first child reuses under a third sheet symbol.
-const ROOT: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/sheet_tree/hier.kicad_sch");
-const POWER: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/sheet_tree/power.kicad_sch");
-const IO: &[u8] = include_bytes!("../../kicad_core/tests/fixtures/sheet_tree/sub/io.kicad_sch");
+const ROOT: &[u8] = include_bytes!("../../../kicad_core/tests/fixtures/sheet_tree/hier.kicad_sch");
+const POWER: &[u8] =
+    include_bytes!("../../../kicad_core/tests/fixtures/sheet_tree/power.kicad_sch");
+const IO: &[u8] = include_bytes!("../../../kicad_core/tests/fixtures/sheet_tree/sub/io.kicad_sch");
 
 fn state(db: PgPool, dir: &TempDir) -> AppState {
     http::state(db, Arc::new(FsBlobStore::new(dir.path())))

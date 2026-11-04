@@ -4,7 +4,7 @@
 //! through `kiewer_lib::upload` directly; and (#17) a zip and a dropped
 //! folder with their paths, the skip list, the rooting with its warning,
 //! the zip caps against the central directory, and the hourly allowance.
-//! The Postgres tests skip without `DATABASE_URL`, like `tests/db.rs`;
+//! The Postgres tests skip without `DATABASE_URL`, like `tests/it/db.rs`;
 //! the route-priority test and the cap tests need no database.
 
 use std::io::{Cursor, Write};
@@ -32,9 +32,9 @@ use tokio::net::TcpStream;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
-const BOARD: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pcb");
-const SCHEMATIC: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_sch");
-const PROJECT: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pro");
+const BOARD: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_pcb");
+const SCHEMATIC: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_sch");
+const PROJECT: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_pro");
 /// A sheet below the root sheet: the least the parser takes.
 const LOWER_SHEET: &[u8] = b"(kicad_sch (version 20250114) (generator \"test\"))";
 
@@ -266,7 +266,7 @@ async fn uploading_the_hand_off_files_makes_a_design_shown_with_the_viewer() {
         .await;
     assert_eq!(again.status, 303, "{}", again.body);
     assert_eq!(again.header("location"), Some(design_path.as_str()));
-    // A revision with no board opens on its schematic (tests/schematic.rs
+    // A revision with no board opens on its schematic (tests/it/schematic.rs
     // has the page itself).
     let page = http::request(addr, "GET", &design_path, &[], "").await;
     assert_eq!(page.status, 303, "{}", page.body);

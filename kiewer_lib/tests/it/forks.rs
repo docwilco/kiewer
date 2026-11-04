@@ -4,7 +4,7 @@
 //! blob row; its history shows the original authors; the forked-from
 //! line links the source, or says it is gone; a revision reachable only
 //! from a branch the fork did not take is 404 under the fork's URLs. The
-//! Postgres tests skip without `DATABASE_URL`, like `tests/db.rs`.
+//! Postgres tests skip without `DATABASE_URL`, like `tests/it/db.rs`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -5,7 +5,7 @@
 //! the placeholder until the retry path renders it; a revision with only
 //! a schematic draws its sheet and its schematic page carries the tags; a
 //! blocked file takes its thumbnail off the route and every page. The
-//! Postgres tests skip without `DATABASE_URL`, like `tests/db.rs`, and
+//! Postgres tests skip without `DATABASE_URL`, like `tests/it/db.rs`, and
 //! the renders skip on a box with no Vulkan driver, as the viewer's
 //! golden test does; on CI (`CI` set) that skip is a failure, since the
 //! runner has lavapipe.
@@ -41,9 +41,9 @@ use kiewer_viewer::view::palette;
 use sqlx::PgPool;
 use test_case::test_case;
 
-const BOARD: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pcb");
-const SCHEMATIC: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_sch");
-const PROJECT: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pro");
+const BOARD: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_pcb");
+const SCHEMATIC: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_sch");
+const PROJECT: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_pro");
 
 /// The public URL the test's sign-in flow is built with, which the Open
 /// Graph tags' absolute URLs start with.

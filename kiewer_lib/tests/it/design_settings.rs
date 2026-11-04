@@ -3,7 +3,7 @@
 //! moves its slug, the old slug answers 301 until a new design takes it,
 //! a taken slug is 409 with the page and the reason, and anyone else is
 //! turned away. The Postgres tests skip without `DATABASE_URL`, like
-//! `tests/db.rs`.
+//! `tests/it/db.rs`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

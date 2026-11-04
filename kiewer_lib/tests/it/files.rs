@@ -4,7 +4,7 @@
 //! and immutable cache headers under the revision hash; a path the
 //! tree does not hold is 404, a revision the design does not reach is
 //! 404, a blocked blob is 410. The Postgres tests skip without
-//! `DATABASE_URL`, like `tests/db.rs`.
+//! `DATABASE_URL`, like `tests/it/db.rs`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use kiewer_test_support::{TempDir, scratch_dir};
 use sqlx::PgPool;
 use test_case::test_case;
 
-const BOARD: &[u8] = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pcb");
+const BOARD: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_pcb");
 
 /// The smallest board that parses. A revision without a board opens on
 /// its schematic, and the design page is what these tests read the

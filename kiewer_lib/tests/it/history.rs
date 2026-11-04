@@ -3,7 +3,7 @@
 //! URL forms resolve (the latter only for a revision the design
 //! reaches), the banner shows off the head, a push goes to a selected or
 //! a new branch, and a taken branch name is refused. The Postgres tests
-//! skip without `DATABASE_URL`, like `tests/db.rs`.
+//! skip without `DATABASE_URL`, like `tests/it/db.rs`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -106,7 +106,7 @@ async fn push(browser: &mut http::Browser, slug: &str, fields: &[(&str, &str)]) 
 /// `rev 1` to `rev 3`; the design's page afterwards.
 /// The design page at `path`, asked to stay: the revisions here hold a
 /// sheet and no board, so the bare page opens on the schematic
-/// (tests/schematic.rs) and `design` in the query keeps it.
+/// (tests/it/schematic.rs) and `design` in the query keeps it.
 async fn design_page(addr: SocketAddr, path: &str) -> http::Response {
     let separator = if path.contains('?') { '&' } else { '?' };
     http::request(addr, "GET", &format!("{path}{separator}design"), &[], "").await

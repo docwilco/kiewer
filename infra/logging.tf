@@ -7,7 +7,7 @@
 # jsonPayload. The JSON layer camelCases each field's key as it writes
 # the line, so an extractor names the written key (webgpuPresent for the
 # code's webgpu_present) while the label keeps the code's name;
-# kiewer_lib/tests/beacon.rs reads this file and checks the filter and
+# kiewer_lib/tests/it/beacon.rs reads this file and checks the filter and
 # the extractors against a real line. The vendor is in the line but not a
 # label: it is a string the client chose, and a label of unbounded
 # cardinality is a metric nobody can chart.

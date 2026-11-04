@@ -9,7 +9,7 @@
 //! counts (`infra/logging.tf`). That log camelCases a field's key as it
 //! writes the line (`webgpu_present` is `webgpuPresent`), so renaming a
 //! field here renames the key the metric extracts, and
-//! `kiewer_lib/tests/beacon.rs` fails until both agree. A refused beacon
+//! `kiewer_lib/tests/it/beacon.rs` fails until both agree. A refused beacon
 //! is a 4xx and no event. No identifier is read or written: the client's
 //! address keys the limit and goes nowhere else. The limiter is per
 //! process: each Cloud Run instance counts on its own, so a client's

@@ -22,9 +22,12 @@ use tracing_subscriber::layer::SubscriberExt;
 
 const CHROME: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
-/// The process's log as JSON lines. A global subscriber is per process
-/// and the tests of this file share one, so each test finds its own
-/// lines by a marker no other test uses.
+/// The process's log as JSON lines. A global subscriber is per process,
+/// and every module of this test binary shares this one once a test here
+/// installs it, so each test finds its own lines by a marker no other test
+/// uses. It is the binary's only global subscriber: installing a second
+/// one fails, so another module that needs the log reads this one or
+/// scopes its own with `tracing::subscriber::with_default`.
 static LOG: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
 
 struct LogWriter(Arc<Mutex<Vec<u8>>>);
@@ -128,7 +131,7 @@ async fn an_accepted_beacon_is_one_structured_log_line() {
 }
 
 /// The log-based metric the line feeds.
-const METRIC: &str = include_str!("../../infra/logging.tf");
+const METRIC: &str = include_str!("../../../infra/logging.tf");
 
 /// Each of the metric's labels with the `jsonPayload` key its extractor
 /// reads (the `label = "EXTRACT(jsonPayload.key)"` lines), sorted by
