@@ -57,6 +57,18 @@ pub(super) fn people_url(handle: &Handle, slug: &Slug) -> String {
     format!("/{handle}/{slug}/people")
 }
 
+/// The schematic page of `shown` at `at`, the same branch or revision:
+/// the design page's schematic link and the redirect of a revision with
+/// no board, one URL for both (#69).
+fn sheets_url(shown: &DesignHead, at: At<'_>) -> String {
+    schematic::url_at(
+        &shown.owner,
+        &shown.design.slug,
+        &shown.design.default_branch,
+        at,
+    )
+}
+
 /// The design page for `shown`, the design at `at`: the viewer at the
 /// revision shown, in the context of its branch, with the revision's
 /// details, the design's `description`, `settings` as its settings
@@ -74,16 +86,7 @@ pub(super) fn design_page(
     og: OpenGraph,
 ) -> Result<String> {
     let board_url = shown.board().map(|entry| blob::url(&entry.blob));
-    // The sheets of the same branch or revision, as the redirect for a
-    // revision with no board names them in `show`.
-    let schematic_url = shown.schematic().map(|_| {
-        schematic::url_at(
-            &shown.owner,
-            &shown.design.slug,
-            &shown.design.default_branch,
-            at,
-        )
-    });
+    let schematic_url = shown.schematic().map(|_| sheets_url(shown, at));
     let at_branch = |name: &BranchName| history::branch_url(&shown.owner, &shown.design, name);
     let recent_view = |ordinal: u32, revision: &design::Revision| RecentView {
         ordinal,
@@ -242,15 +245,9 @@ pub(super) async fn show(
     // the schematic page at the same branch or revision. `?design` keeps
     // this page, which is where its settings and history links are.
     if shown.opens_on_schematic() && !stay {
-        let sheet = schematic::url_at(
-            &handle,
-            &shown.design.slug,
-            &shown.design.default_branch,
-            at,
-        );
         return Ok(cache::page(
             &[Key::Design(shown.design.id)],
-            Redirect::to(&sheet),
+            Redirect::to(&sheets_url(&shown, at)),
         ));
     }
     let description = description::of(&state.db, shown.design.id).await?;

@@ -605,7 +605,9 @@ async fn the_schematic_link_keeps_the_branch_or_revision_the_page_shows(shown: S
     let side_history = history_page(addr, &handle, "sheets", "side").await;
     let on_side = linked_revisions(&side_history.body, &handle, "sheets")[0].clone();
 
-    let (page_path, sheets, back) = match shown {
+    // The page, the schematic page its link should name, and that
+    // schematic page's link back to the design page.
+    let (page_path, schematic_url, back_url) = match shown {
         Shown::Head => (
             path.clone(),
             format!("{path}/schematic"),
@@ -632,17 +634,17 @@ async fn the_schematic_link_keeps_the_branch_or_revision_the_page_shows(shown: S
     assert_eq!(page.status, 200, "{}", page.body);
     assert!(
         page.body
-            .contains(&format!(r#"<a href="{sheets}">schematic</a>"#)),
+            .contains(&format!(r#"<a href="{schematic_url}">schematic</a>"#)),
         "{page_path} links its own sheets: {}",
         page.body
     );
-    let followed = http::request(addr, "GET", &sheets, &[], "").await;
+    let followed = http::request(addr, "GET", &schematic_url, &[], "").await;
     assert_eq!(followed.status, 200, "{}", followed.body);
     assert!(
         followed
             .body
-            .contains(&format!(r#"<a href="{back}">design page</a>"#)),
-        "{sheets} is the sheets of {page_path}: {}",
+            .contains(&format!(r#"<a href="{back_url}">design page</a>"#)),
+        "{schematic_url} is the sheets of {page_path}: {}",
         followed.body
     );
 }
