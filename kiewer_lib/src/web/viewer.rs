@@ -11,14 +11,19 @@
 //! [`page_script_url`] and calls its `start` with the canvas and the
 //! page's load; the page script imports the viewer's script.
 //!
-//! The three are static assets under the caching policy
+//! The page script also fetches the Newstroke glyph table
+//! (`kicad_core/src/font/newstroke.txt`, [`kicad_core::font::NEWSTROKE`]
+//! in a native build) and hands it to the viewer, whose wasm leaves the
+//! table out.
+//!
+//! The four are static assets under the caching policy
 //! (`crate::cache`): each is served at `/viewer/<name>.<hash>.<ext>`,
 //! the name `build.rs` gave it from its bytes, as immutable for a year,
 //! in the brotli or gzip variant built then when the browser takes it.
-//! The page script names the viewer's script by its hashed name, and the
-//! viewer's script names the wasm by its own; a page preloads the
-//! viewer's script by [`script_url`] so the fetch of the two scripts
-//! overlaps.
+//! The page script names the viewer's script and the glyph table by
+//! their hashed names, and the viewer's script names the wasm by its
+//! own; a page preloads the viewer's script by [`script_url`] so the
+//! fetch of the two scripts overlaps.
 
 use askama::Template;
 use axum::Router;
@@ -59,6 +64,11 @@ pub enum AssetKind {
     /// an ES module each page imports. From the repo, so every build
     /// carries it.
     PageScript,
+    /// The Newstroke glyph table, which the page script fetches and hands
+    /// to the viewer: the file `kicad_core` includes in a native build
+    /// and leaves out of the wasm. From the repo, so every build carries
+    /// it.
+    Newstroke,
 }
 
 /// One embedded file in its three codings.
@@ -101,8 +111,18 @@ const PAGE_SCRIPT: Asset = Asset {
     gzip: include_bytes!(env!("KIEWER_VIEWER_PAGE_GZ")),
 };
 
+/// The glyph table, which every build carries.
+const NEWSTROKE: Asset = Asset {
+    kind: AssetKind::Newstroke,
+    name: env!("KIEWER_VIEWER_NEWSTROKE_NAME"),
+    content_type: "text/plain; charset=utf-8",
+    identity: include_bytes!(env!("KIEWER_VIEWER_NEWSTROKE")),
+    brotli: include_bytes!(env!("KIEWER_VIEWER_NEWSTROKE_BR")),
+    gzip: include_bytes!(env!("KIEWER_VIEWER_NEWSTROKE_GZ")),
+};
+
 /// The embedded assets: the viewer's two when the build found the
-/// viewer, and the page script.
+/// viewer, the page script and the glyph table.
 #[cfg(kiewer_viewer_embedded)]
 const ASSETS: &[Asset] = &[
     Asset {
@@ -123,9 +143,10 @@ const ASSETS: &[Asset] = &[
         gzip: include_bytes!(env!("KIEWER_VIEWER_WASM_GZ")),
     },
     PAGE_SCRIPT,
+    NEWSTROKE,
 ];
 #[cfg(not(kiewer_viewer_embedded))]
-const ASSETS: &[Asset] = &[PAGE_SCRIPT];
+const ASSETS: &[Asset] = &[PAGE_SCRIPT, NEWSTROKE];
 
 /// Whether this build carries the viewer. `false` on a tree where
 /// `scripts/build-viewer.sh` has not run: the page then says so and the
@@ -152,6 +173,12 @@ pub fn script_url() -> String {
 #[must_use]
 pub fn page_script_url() -> String {
     PAGE_SCRIPT.url()
+}
+
+/// The URL the page script fetches the glyph table from, always hashed.
+#[must_use]
+pub fn newstroke_url() -> String {
+    NEWSTROKE.url()
 }
 
 /// The URL the script fetches the wasm from.
@@ -407,6 +434,25 @@ mod tests {
         assert!(
             text.contains(&format!("import(\"./{name}\")")),
             "the page script imports {script}, which sits beside it"
+        );
+    }
+
+    #[test]
+    fn the_glyph_table_is_served_hashed_as_the_file_the_native_font_reads() {
+        let url = newstroke_url();
+        assert!(
+            hashed(&url, "/viewer/kiewer_viewer_newstroke.", ".txt"),
+            "{url}"
+        );
+        assert!(
+            NEWSTROKE.bytes(Encoding::Identity) == kicad_core::font::NEWSTROKE.as_bytes(),
+            "the served table is the one kicad_core includes"
+        );
+        let text = std::str::from_utf8(PAGE_SCRIPT.bytes(Encoding::Identity)).expect("UTF-8");
+        let name = url.strip_prefix("/viewer/").expect("under /viewer/");
+        assert!(
+            text.contains(&format!("new URL(\"./{name}\", import.meta.url);")),
+            "the page script fetches {url}, which sits beside it"
         );
     }
 }

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-# Dev-only: the converter that writes kicad_core/src/font/newstroke_table.rs
+# Dev-only: the converter that writes kicad_core/src/font/newstroke.txt
 # from the Newstroke sources. Never a dependency of a shipped crate.
 publish = false
 

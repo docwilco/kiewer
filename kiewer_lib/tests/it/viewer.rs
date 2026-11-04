@@ -12,7 +12,7 @@ use std::sync::Arc;
 use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::cache::Policy;
 use kiewer_lib::web::viewer::{
-    BOARD_PATH, NOT_BUILT, embedded, page_script_url, script_url, wasm_url,
+    BOARD_PATH, NOT_BUILT, embedded, newstroke_url, page_script_url, script_url, wasm_url,
 };
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use test_case::test_case;
@@ -108,6 +108,9 @@ const WASM: &str = "application/wasm";
 const SCRIPT_MARK: &[u8] = b"export class Viewer";
 const WASM_MARK: &[u8] = b"\0asm";
 const PAGE_SCRIPT_MARK: &[u8] = b"export async function start(canvas, load)";
+const TEXT: &str = "text/plain; charset=utf-8";
+/// The glyph table's first three lines: the space, `!` and `"`.
+const NEWSTROKE_MARK: &[u8] = b"JZ\nMWRYSZR[QZRYR[ RRSQGRFSGRSRF\nJZNFNJ RVFVJ\n";
 
 #[test_case(script_url, SCRIPT, SCRIPT_MARK, "gzip, deflate, br", Some("br"); "the script as brotli")]
 #[test_case(script_url, SCRIPT, SCRIPT_MARK, "gzip, deflate", Some("gzip"); "the script as gzip")]
@@ -118,6 +121,9 @@ const PAGE_SCRIPT_MARK: &[u8] = b"export async function start(canvas, load)";
 #[test_case(page_script_url, SCRIPT, PAGE_SCRIPT_MARK, "gzip, deflate, br", Some("br"); "the page script as brotli")]
 #[test_case(page_script_url, SCRIPT, PAGE_SCRIPT_MARK, "gzip, deflate", Some("gzip"); "the page script as gzip")]
 #[test_case(page_script_url, SCRIPT, PAGE_SCRIPT_MARK, "identity", None; "the page script as it is")]
+#[test_case(newstroke_url, TEXT, NEWSTROKE_MARK, "gzip, deflate, br", Some("br"); "the glyph table as brotli")]
+#[test_case(newstroke_url, TEXT, NEWSTROKE_MARK, "gzip, deflate", Some("gzip"); "the glyph table as gzip")]
+#[test_case(newstroke_url, TEXT, NEWSTROKE_MARK, "identity", None; "the glyph table as it is")]
 #[tokio::test]
 async fn an_asset_is_served_hashed_immutable_and_in_the_coding_the_request_takes(
     url: fn() -> String,
@@ -128,9 +134,9 @@ async fn an_asset_is_served_hashed_immutable_and_in_the_coding_the_request_takes
 ) {
     let (addr, _dir) = start().await;
     let path = url();
-    // The page script is the repo's, in every build; the viewer's two
-    // need scripts/build-viewer.sh.
-    if !embedded() && path != page_script_url() {
+    // The page script and the glyph table are the repo's, in every
+    // build; the viewer's two need scripts/build-viewer.sh.
+    if !embedded() && path != page_script_url() && path != newstroke_url() {
         let response = http::request(addr, "GET", &path, &[], "").await;
         assert_eq!(response.status, 503);
         assert_eq!(response.body, NOT_BUILT);

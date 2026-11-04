@@ -40,9 +40,10 @@ set req.http.X-Forwarded-Host = req.http.host;
 # Accept-Encoding before the origin sees it and keeps the browser's value
 # in Fastly-Orig-Accept-Encoding, so a browser that takes brotli is named
 # here; the server's Vary: Accept-Encoding keeps the variants apart in the
-# cache. A `br;q=0` does not match, and those two paths alone change, so a
-# page keeps Fastly's own handling.
-if (req.url.path ~ "^/viewer/kiewer_viewer[^/]*\.[0-9a-f]{16}\.(js|wasm)$" && req.http.Fastly-Orig-Accept-Encoding ~ "(^|[ ,])br *(,|$)") {
+# cache. A `br;q=0` does not match, and those paths alone change (the
+# scripts, the wasm and the Newstroke glyph table), so a page keeps
+# Fastly's own handling.
+if (req.url.path ~ "^/viewer/kiewer_viewer[^/]*\.[0-9a-f]{16}\.(js|wasm|txt)$" &&req.http.Fastly-Orig-Accept-Encoding ~ "(^|[ ,])br *(,|$)") {
   set req.http.Accept-Encoding = "br";
 }
 

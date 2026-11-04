@@ -54,6 +54,11 @@ pub enum Error {
     #[display("{backend}: the surface refused a frame")]
     #[from(ignore)]
     FrameRefused { backend: Backend },
+    /// The Newstroke glyph table the page handed `Viewer.create` is not
+    /// UTF-8, so not the file the server serves.
+    #[cfg(target_arch = "wasm32")]
+    #[display("the glyph table: {_0}")]
+    Newstroke(std::string::FromUtf8Error),
     /// A headless frame larger than the adapter's textures go.
     #[cfg(not(target_arch = "wasm32"))]
     #[display(

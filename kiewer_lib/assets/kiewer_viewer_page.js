@@ -6,8 +6,9 @@
 // (kiewer-board, kiewer-sheet) and on kiewer-frame, which this sends.
 // Served beside the viewer's script as one more hashed asset
 // (kiewer_lib/build.rs, kiewer_lib/src/web/viewer.rs); build.rs rewrites
-// the import in importViewer to the viewer script's hashed name before
-// hashing this file, so a new viewer is a new URL here too.
+// the import in importViewer to the viewer script's hashed name, and the
+// glyph table's name in fetchNewstroke to its hashed one, before hashing
+// this file, so a new viewer or a new table is a new URL here too.
 //
 // The page holds the elements this script writes by their ids: `status`
 // (the backend line), `error` (the failure box), `zoom` (the read-out)
@@ -23,7 +24,9 @@
 // before the first frame is scheduled. The outcome is the adapter's: a
 // board or sheet that fails to fetch or parse after a working adapter is
 // still "ok". A viewer script that fails to import is "failed" with
-// backend "none" and the reason `import: <message>` (importViewer). No
+// backend "none" and the reason `import: <message>` (importViewer), and
+// a glyph table that fails to fetch the same with `glyph table:
+// <message>` (fetchNewstroke). No
 // identifiers, no cookie: the body is the five fields below.
 const BEACON_PATH = "/api/beacon";
 const MAX_REASON = 1024;
@@ -103,6 +106,31 @@ async function importViewer() {
     return await import("./kiewer_viewer.js");
   } catch (e) {
     throw new Error("import: " + messageOf(e));
+  }
+}
+
+// The viewer's module, imported and its wasm instantiated: its Viewer.
+async function loadViewer() {
+  const module = await importViewer();
+  await module.default();
+  return module.Viewer;
+}
+
+// The Newstroke glyph table (kicad_core/src/font/newstroke.txt), which
+// the wasm does not carry: Viewer.create takes its bytes. Served beside
+// this script, and build.rs rewrites the name below to the table's
+// hashed one before hashing this file, as it does the viewer's import;
+// resolved against this module's URL, since a fetch resolves against the
+// page's. `start` fetches it while the viewer loads. A failure is thrown
+// on as `glyph table: <message>`, as importViewer's is.
+async function fetchNewstroke() {
+  const url = new URL("./kiewer_viewer_newstroke.txt", import.meta.url);
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(url.pathname + " answered " + response.status);
+    return new Uint8Array(await response.arrayBuffer());
+  } catch (e) {
+    throw new Error("glyph table: " + messageOf(e));
   }
 }
 
@@ -286,10 +314,10 @@ export async function start(canvas, load) {
   new ResizeObserver(resize).observe(canvas);
 
   try {
-    const { default: init, Viewer } = await importViewer();
-    await init();
+    // The glyph table's fetch overlaps the viewer's import and its wasm.
+    const [Viewer, newstroke] = await Promise.all([loadViewer(), fetchNewstroke()]);
     const [width, height] = wanted();
-    viewer = await Viewer.create(canvas, width, height);
+    viewer = await Viewer.create(canvas, width, height, newstroke);
     backendName = viewer.backend();
     vendorName = viewer.adapter_vendor();
     noteCap();

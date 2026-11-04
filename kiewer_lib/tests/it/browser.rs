@@ -12,7 +12,8 @@
 //! in its file input and either land as a revision or are denied on the
 //! page; those cases need Postgres too, as does the upload form's
 //! design dropdown (#62), which reloads the form with the branches of the
-//! design picked.
+//! design picked. The glyph table's cases (#41) read the page's resource
+//! timing for its one fetch, and the beacons of a fetch that fails.
 //!
 //! Runs when `KIEWER_BROWSER` names the browser's executable, which the
 //! browser stage of `scripts/checks.sh` sets, along with
@@ -47,7 +48,7 @@ use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::design;
 use kiewer_lib::session;
 use kiewer_lib::web::beacon::{BEACON_PATH, Backend, Beacon, Outcome};
-use kiewer_lib::web::viewer::{embedded, script_url};
+use kiewer_lib::web::viewer::{embedded, newstroke_url, script_url};
 use kiewer_test_support::db::pool_from_env;
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use serde::Deserialize;
@@ -774,6 +775,78 @@ async fn a_viewer_script_that_answers_404_shows_and_sends_its_beacon(viewed: Vie
         session.net_display().await,
         "none",
         "the net block stays hidden with no viewer (#95)"
+    );
+    session.close().await;
+}
+
+// The Newstroke glyph table (#41): the wasm leaves it out, and the page
+// script fetches it beside the viewer's load and hands it to
+// Viewer.create, once per page; a table that fails to fetch fails the
+// start as a viewer script that fails to import does.
+#[test_case(Viewed::Board; "the board page")]
+#[test_case(Viewed::Schematic; "the schematic page")]
+#[tokio::test]
+async fn a_page_fetches_the_glyph_table_once_and_starts(viewed: Viewed) {
+    let Some(executable) = executable() else {
+        return;
+    };
+    let session = Session::new(executable).await;
+    session.viewport(1000, 700, 1).await;
+    session.goto(viewed).await;
+    let sent = session.sent_within_deadline(1).await;
+    tokio::time::sleep(SETTLE).await;
+    let shown = session.shown().await;
+    assert!(
+        sent,
+        "no beacon within {DEADLINE:?}; the page shows {shown:?}"
+    );
+
+    let table = newstroke_url();
+    let fetched: Vec<String> = session
+        .read(&format!(
+            r#"performance.getEntriesByType("resource")
+                .map(entry => new URL(entry.name).pathname)
+                .filter(path => path === "{table}")"#
+        ))
+        .await;
+    assert_eq!(fetched, [table], "the table, fetched once");
+    assert_eq!(shown.error, None, "the error box stays hidden");
+    assert_eq!(outcomes(&session.beacons().await), [Outcome::Ok]);
+    session.close().await;
+}
+
+#[test_case(Viewed::Board; "the board page")]
+#[test_case(Viewed::Schematic; "the schematic page")]
+#[tokio::test]
+async fn a_glyph_table_that_answers_404_shows_and_sends_its_beacon(viewed: Viewed) {
+    let Some(executable) = executable() else {
+        return;
+    };
+    let session = Session::new(executable).await;
+    let table = newstroke_url();
+    let answered = session.answer_not_found(&table).await;
+    session.viewport(1000, 700, 1).await;
+    session.goto(viewed).await;
+    let failed = session
+        .held_within_deadline(r#"!document.getElementById("error").hidden"#)
+        .await;
+    tokio::time::sleep(SETTLE).await;
+    let shown = session.shown().await;
+    let answered = answered.load(Ordering::SeqCst);
+    assert!(
+        failed,
+        "no error within {DEADLINE:?}; the page shows {shown:?}, {answered} requests answered 404"
+    );
+
+    assert_eq!(answered, 1, "the browser answered {table} with a 404");
+    let error = shown.error.expect("the error box shows");
+    assert_eq!(error, format!("glyph table: {table} answered 404"));
+    let beacons = session.beacons().await;
+    assert_eq!(outcomes(&beacons), [Outcome::Failed], "{beacons:?}");
+    assert_eq!(beacons[0].backend, Backend::None, "no viewer: {beacons:?}");
+    assert_eq!(
+        beacons[0].reason, error,
+        "the beacon carries what the box shows"
     );
     session.close().await;
 }

@@ -282,12 +282,16 @@ impl Viewer {
     /// A viewer drawing into `canvas`, whose backing size the page asks
     /// to be `width` by `height` device pixels: the viewer sets it,
     /// capped to the device's limit ([`cap_canvas`], [`Viewer::capped`]).
+    /// `newstroke` is the bytes of the Newstroke glyph table the page
+    /// fetched (`kicad_core::font::install`), which the wasm does not
+    /// carry; the first viewer's table serves every later one.
     ///
     /// # Errors
     ///
-    /// No GPU to draw with, the message naming why: neither WebGPU nor
-    /// WebGL2 gave an adapter, WebGL2 gave no surface on the canvas or no
-    /// device, or the adapter in hand does not draw to this canvas.
+    /// A glyph table that is not UTF-8. No GPU to draw with, the message
+    /// naming why: neither WebGPU nor WebGL2 gave an adapter, WebGL2 gave
+    /// no surface on the canvas or no device, or the adapter in hand does
+    /// not draw to this canvas.
     ///
     /// # Panics
     ///
@@ -297,8 +301,10 @@ impl Viewer {
         canvas: HtmlCanvasElement,
         width: u32,
         height: u32,
+        newstroke: Vec<u8>,
     ) -> core::result::Result<Viewer, JsError> {
         console_error_panic_hook::set_once();
+        kicad_core::font::install(String::from_utf8(newstroke).map_err(Error::Newstroke)?);
         #[cfg(feature = "panic-probe")]
         let probe = canvas.has_attribute("data-panic-probe");
         let gpu = request_gpu(canvas).await?;

@@ -40,6 +40,14 @@
 // viewer is a new page script too. Without it the import stays plain
 // and fails at the 503, which the page shows in its error box and sends
 // as a failed beacon (#96).
+//
+// The Newstroke glyph table, `kicad_core/src/font/newstroke.txt` (#41),
+// is in the repo too and emitted on every build the same way, as
+// `kiewer_viewer_newstroke.<hash>.txt`: kicad_core includes it in a
+// native build and leaves it out of the wasm, and the page script
+// fetches it for the viewer. The page script names it once, as
+// `./kiewer_viewer_newstroke.txt`, which becomes the hashed name before
+// the page script is hashed, so a new table is a new page script too.
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -51,6 +59,10 @@ use sha2::{Digest, Sha256};
 /// How the page script names the viewer's script in its one import, the
 /// text the rewrite to the hashed name replaces.
 const PAGE_SCRIPT_IMPORT: &str = "\"./kiewer_viewer.js\"";
+
+/// How the page script names the glyph table in its one fetch, the text
+/// the rewrite to the hashed name replaces.
+const PAGE_SCRIPT_NEWSTROKE: &str = "\"./kiewer_viewer_newstroke.txt\"";
 
 /// How many hex characters of the hash name a file: 16 is 64 bits, far
 /// past any chance of two builds colliding, and short enough to read.
@@ -136,6 +148,28 @@ fn main() {
         println!("cargo::rerun-if-changed={}", viewer.display());
         page_text
     };
+    let newstroke = manifest
+        .join("..")
+        .join("kicad_core")
+        .join("src")
+        .join("font")
+        .join("newstroke.txt");
+    println!("cargo::rerun-if-changed={}", newstroke.display());
+    let newstroke_bytes = fs::read(&newstroke).expect("the glyph table is readable");
+    let newstroke_name = hashed_name("kiewer_viewer_newstroke", &newstroke_bytes, "txt");
+    emit(
+        "KIEWER_VIEWER_NEWSTROKE",
+        &out,
+        &newstroke_name,
+        &newstroke_bytes,
+    );
+    let table_mentions = page_text.matches(PAGE_SCRIPT_NEWSTROKE).count();
+    assert_eq!(
+        table_mentions, 1,
+        "the page script fetches the glyph table once, by {PAGE_SCRIPT_NEWSTROKE}; this one \
+         names it {table_mentions} times, so the rewrite to the hashed name needs a look"
+    );
+    let page_text = page_text.replace(PAGE_SCRIPT_NEWSTROKE, &format!("\"./{newstroke_name}\""));
     let page_name = hashed_name("kiewer_viewer_page", page_text.as_bytes(), "js");
     emit("KIEWER_VIEWER_PAGE", &out, &page_name, page_text.as_bytes());
 }
