@@ -1115,12 +1115,7 @@ fn measured_ink(ink: [f64; 4], px_per_em: f64, advance: f64, metrics: FaceMetric
             descent: descent / px_per_em,
         }
     } else {
-        Ink {
-            left: 0.0,
-            right: advance,
-            ascent: metrics.ascent,
-            descent: metrics.descent,
-        }
+        Ink::whole_cell(advance, metrics)
     }
 }
 

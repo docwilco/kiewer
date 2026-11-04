@@ -77,6 +77,18 @@ pub struct Ink {
 }
 
 impl Ink {
+    /// Ink that fills a whole cell `advance` em wide in a face of
+    /// `metrics`: from the pen to the advance, ascent to descent.
+    #[must_use]
+    pub fn whole_cell(advance: f64, metrics: FaceMetrics) -> Self {
+        Self {
+            left: 0.0,
+            right: advance,
+            ascent: metrics.ascent,
+            descent: metrics.descent,
+        }
+    }
+
     /// Whether there is no ink: no width or no height, as for a space,
     /// or a measurement that is not a number.
     fn is_empty(self) -> bool {
@@ -187,8 +199,9 @@ impl Rect {
     }
 }
 
-/// The whole of a cell, as [`Cell::crop`] gives it.
-const WHOLE: Bounds = Bounds {
+/// The whole of a cell, as [`Cell::crop`] gives it for a cell nothing
+/// crops.
+pub const WHOLE_CELL: Bounds = Bounds {
     min: Point { x: 0.0, y: 0.0 },
     max: Point { x: 1.0, y: 1.0 },
 };
@@ -277,7 +290,11 @@ pub fn layout(
         Unplaced {
             cells: glyphs
                 .iter()
-                .map(|glyph| (glyph.c, glyph.cell, WHOLE))
+                .map(|glyph| UnplacedCell {
+                    c: glyph.c,
+                    rect: glyph.cell,
+                    crop: WHOLE_CELL,
+                })
                 .collect(),
             strips: Vec::new(),
             knockout_box: None,
@@ -300,10 +317,10 @@ pub fn layout(
         cells: unplaced
             .cells
             .into_iter()
-            .map(|(c, rect, crop)| Cell {
-                c,
-                corners: rect.corners().map(place),
-                crop,
+            .map(|cell| Cell {
+                c: cell.c,
+                corners: cell.rect.corners().map(place),
+                crop: cell.crop,
             })
             .collect(),
         strips: unplaced
@@ -318,9 +335,17 @@ pub fn layout(
 /// A text's cells (each with the part of it drawn), strips and knockout
 /// box in its frame, before mirroring and turning.
 struct Unplaced {
-    cells: Vec<(char, Rect, Bounds)>,
+    cells: Vec<UnplacedCell>,
     strips: Vec<Rect>,
     knockout_box: Option<Rect>,
+}
+
+/// A cell in the text's frame: the part of it drawn and which part
+/// that is, as [`Cell::crop`] has it.
+struct UnplacedCell {
+    c: char,
+    rect: Rect,
+    crop: Bounds,
 }
 
 /// Where `measured` ink sits for a glyph whose pen is at `pen_x` on
@@ -348,38 +373,38 @@ fn knockout_parts(
     line_boxes: &[Rect],
     margin: f64,
 ) -> Option<Unplaced> {
-    let outer = glyphs
+    let knockout_box = glyphs
         .iter()
         .filter_map(|glyph| glyph.ink)
         .reduce(Rect::union)?
         .grown(margin);
     let lines: Vec<Rect> = line_boxes
         .iter()
-        .map(|line| line.crop(outer))
+        .map(|line| line.crop(knockout_box))
         .filter(|line| !line.is_empty())
         .collect();
-    let mut strips = knockout_strips(&lines, outer);
+    let mut strips = knockout_strips(&lines, knockout_box);
     strips.extend(
         blanks
             .iter()
-            .map(|blank| blank.crop(outer))
+            .map(|blank| blank.crop(knockout_box))
             .filter(|blank| !blank.is_empty()),
     );
     Some(Unplaced {
         cells: glyphs
             .iter()
-            .filter_map(|glyph| cropped(glyph, outer))
+            .filter_map(|glyph| cropped(glyph, knockout_box))
             .collect(),
         strips,
-        knockout_box: Some(outer),
+        knockout_box: Some(knockout_box),
     })
 }
 
-/// The part of `glyph`'s cell inside the knockout box `outer`, with the
+/// The part of `glyph`'s cell inside the knockout box `knockout_box`, with the
 /// fractions of the cell it is; `None` when none of it is.
-fn cropped(glyph: &PlacedGlyph, outer: Rect) -> Option<(char, Rect, Bounds)> {
+fn cropped(glyph: &PlacedGlyph, knockout_box: Rect) -> Option<UnplacedCell> {
     let cell = glyph.cell;
-    let part = cell.crop(outer);
+    let part = cell.crop(knockout_box);
     if part.is_empty() {
         return None;
     }
@@ -390,14 +415,14 @@ fn cropped(glyph: &PlacedGlyph, outer: Rect) -> Option<(char, Rect, Bounds)> {
         x: (p.x - cell.min.x) / width,
         y: (p.y - cell.min.y) / height,
     };
-    Some((
-        glyph.c,
-        part,
-        Bounds {
+    Some(UnplacedCell {
+        c: glyph.c,
+        rect: part,
+        crop: Bounds {
             min: fraction(part.min),
             max: fraction(part.max),
         },
-    ))
+    })
 }
 
 /// The cells of one line: `line_box` gives the anchor's x and the line's
@@ -466,29 +491,29 @@ fn line_cells(
     }
 }
 
-/// The knockout box `outer` less the `lines` (each already cropped to
+/// The knockout box `knockout_box` less the `lines` (each already cropped to
 /// it, top to bottom): the strips are the bands above the first line,
 /// between lines and below the last, full box width, and each line's
 /// left and right bands. A band a line swallows is left out. A line's
 /// cropped cells and blanks tile it, so the box is exactly the cells,
 /// the blanks and these strips.
-fn knockout_strips(lines: &[Rect], outer: Rect) -> Vec<Rect> {
+fn knockout_strips(lines: &[Rect], knockout_box: Rect) -> Vec<Rect> {
     let mut strips = Vec::new();
-    let mut band_top = outer.min.y;
+    let mut band_top = knockout_box.min.y;
     for line in lines {
         strips.push(Rect {
             min: Point {
-                x: outer.min.x,
+                x: knockout_box.min.x,
                 y: band_top,
             },
             max: Point {
-                x: outer.max.x,
+                x: knockout_box.max.x,
                 y: line.min.y,
             },
         });
         strips.push(Rect {
             min: Point {
-                x: outer.min.x,
+                x: knockout_box.min.x,
                 y: line.min.y,
             },
             max: Point {
@@ -502,7 +527,7 @@ fn knockout_strips(lines: &[Rect], outer: Rect) -> Vec<Rect> {
                 y: line.min.y,
             },
             max: Point {
-                x: outer.max.x,
+                x: knockout_box.max.x,
                 y: line.max.y,
             },
         });
@@ -510,10 +535,10 @@ fn knockout_strips(lines: &[Rect], outer: Rect) -> Vec<Rect> {
     }
     strips.push(Rect {
         min: Point {
-            x: outer.min.x,
+            x: knockout_box.min.x,
             y: band_top,
         },
-        max: outer.max,
+        max: knockout_box.max,
     });
     strips.retain(|strip| !strip.is_empty());
     strips
@@ -541,12 +566,7 @@ mod tests {
 
     /// Ink that fills the whole of a [`CONSOLAS`] cell.
     fn whole_cell(_: char) -> Ink {
-        Ink {
-            left: 0.0,
-            right: ADVANCE,
-            ascent: CONSOLAS.ascent,
-            descent: CONSOLAS.descent,
-        }
+        Ink::whole_cell(ADVANCE, CONSOLAS)
     }
 
     /// Ink as a capital has it: 0.05 em in from each side of the cell,
@@ -931,8 +951,44 @@ mod tests {
             capital,
             false,
         );
-        assert_eq!(cell(&laid, 0).crop, WHOLE);
+        assert_eq!(cell(&laid, 0).crop, WHOLE_CELL);
         assert_eq!(laid.knockout_box, None);
+    }
+
+    #[test]
+    fn a_mirrored_knockouts_box_is_the_plain_ones_reflected_about_the_position() {
+        let left = Justify {
+            horizontal: Horizontal::Left,
+            vertical: Vertical::Center,
+            mirror: false,
+        };
+        let mirrored = Justify {
+            mirror: true,
+            ..left
+        };
+        let plain = layout(
+            "IW",
+            &placement(left, 0.0),
+            CONSOLAS,
+            monospace,
+            capital,
+            true,
+        );
+        let flipped = layout(
+            "IW",
+            &placement(mirrored, 0.0),
+            CONSOLAS,
+            monospace,
+            capital,
+            true,
+        );
+        // Corner for corner in the text's reading order, x reflected about
+        // the position's 10 and y kept: the box's top left lands on the
+        // right, as a mirrored cell's does.
+        for (a, b) in knockout_box(&plain).iter().zip(knockout_box(&flipped)) {
+            assert_point(b, 20.0 - a.x, a.y);
+        }
+        assert!(knockout_box(&flipped)[0].x > 10.0, "{flipped:?}");
     }
 
     const BOARD_PATH: &str = concat!(

@@ -439,8 +439,7 @@ fn to_f32(value: f64) -> f32 {
 #[cfg(test)]
 mod tests {
     use kicad_core::font::Placement;
-    use kicad_core::font::outline::{Cell, FaceMetrics, Ink, layout};
-    use kicad_core::geometry::Bounds;
+    use kicad_core::font::outline::{Cell, FaceMetrics, Ink, WHOLE_CELL, layout};
     use kicad_core::model::{Justify, Size};
     use kiewer_assert::assert_is_empty;
     use test_case::test_case;
@@ -632,12 +631,7 @@ mod tests {
 
     /// Ink that fills the whole of a cell 0.5 em wide in [`METRICS`].
     fn whole_cell(_: char) -> Ink {
-        Ink {
-            left: 0.0,
-            right: 0.5,
-            ascent: 0.75,
-            descent: 0.25,
-        }
+        Ink::whole_cell(0.5, METRICS)
     }
 
     /// Two glyphs 0.5 em wide in a 256 texel atlas at 64 px per em: cells
@@ -755,10 +749,7 @@ mod tests {
             cells: vec![Cell {
                 c: 'Z',
                 corners: [Point::default(); 4],
-                crop: Bounds {
-                    min: Point { x: 0.0, y: 0.0 },
-                    max: Point { x: 1.0, y: 1.0 },
-                },
+                crop: WHOLE_CELL,
             }],
             strips: Vec::new(),
             knockout_box: None,
