@@ -105,6 +105,13 @@ impl Linked {
     pub(super) fn stays(&self) -> bool {
         self.design.is_some()
     }
+
+    /// `url`, a design page URL, asking for the design page itself: the
+    /// `design` key [`Linked::stays`] reads, after any query the URL has.
+    pub(super) fn staying(url: &str) -> String {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        format!("{url}{separator}design")
+    }
 }
 
 /// `GET /{handle}/{slug}/r/{hash}`: the viewer at one revision, when the

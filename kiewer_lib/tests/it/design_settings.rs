@@ -17,9 +17,9 @@ use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
 use sqlx::PgPool;
 
+use super::files::BARE_BOARD;
+
 const SCHEMATIC: &[u8] = b"(kicad_sch (version 20250114))";
-const BOARD: &[u8] =
-    b"(kicad_pcb (version 20241229) (generator \"settings\") (layers (0 \"F.Cu\" signal)))";
 
 /// The server over `db` with a filesystem blob store under cargo's
 /// scratch directory and no sign-in provider.
@@ -200,7 +200,7 @@ async fn a_save_on_a_design_with_a_board_goes_to_the_bare_page() {
             "/upload",
             &[
                 Part::text("name", "Boarded"),
-                Part::file("board.kicad_pcb", BOARD),
+                Part::file("board.kicad_pcb", BARE_BOARD),
                 Part::file("sheet.kicad_sch", SCHEMATIC),
             ],
         )
@@ -276,12 +276,13 @@ async fn a_moved_slug_redirects_until_a_new_design_takes_it() {
         )
         .await;
     assert_eq!(saved.status, 303, "{}", saved.body);
+    let new_design_page = format!("{new_path}?design");
     assert_eq!(
         saved.header("location"),
-        Some(format!("{new_path}?design").as_str()),
+        Some(new_design_page.as_str()),
         "the browser goes to the new slug's design page"
     );
-    let page = http::request(addr, "GET", &format!("{new_path}?design"), &[], "").await;
+    let page = http::request(addr, "GET", &new_design_page, &[], "").await;
     assert_eq!(page.status, 200, "{}", page.body);
     assert!(
         page.body.contains("<title>Mover, moved - kiewer</title>"),

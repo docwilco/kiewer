@@ -305,9 +305,8 @@ async fn show(state: &AppState, handle: &str, slug: &str, at: At<'_>) -> Result<
             label: "board",
         }
     } else {
-        let separator = if design_url.contains('?') { '&' } else { '?' };
         Back {
-            url: format!("{design_url}{separator}design"),
+            url: Linked::staying(&design_url),
             label: "design page",
         }
     };

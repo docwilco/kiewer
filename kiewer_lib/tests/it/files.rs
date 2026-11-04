@@ -26,7 +26,7 @@ const BOARD: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_
 /// The smallest board that parses. A revision without a board opens on
 /// its schematic, and the design page is what these tests read the
 /// revision's hash and the download links from, so every upload has one.
-const BARE_BOARD: &[u8] =
+pub(super) const BARE_BOARD: &[u8] =
     b"(kicad_pcb (version 20241229) (generator \"test\") (layers (0 \"F.Cu\" signal)))";
 
 /// The server over `db` with a filesystem blob store under cargo's

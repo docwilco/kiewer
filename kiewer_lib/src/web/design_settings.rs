@@ -16,6 +16,7 @@ use serde::Deserialize;
 use super::AppState;
 use super::auth::{Settled, personal};
 use super::design::{design_page, design_url};
+use super::history::Linked;
 use super::open_graph::{self, OpenGraph};
 use crate::account::Handle;
 use crate::cache;
@@ -114,8 +115,9 @@ fn refused(
 /// with `?design` when the head has no board and so opens on its
 /// schematic (#70). The right to edit is the admin role or ownership,
 /// checked by the save itself (`roles::require` inside its
-/// transaction); anyone below it is 403. A malformed value is 422 and a slug a design of the owner's has
-/// is 409, each with the page again and the reason.
+/// transaction); anyone below it is 403. A malformed value is 422 and a
+/// slug a design of the owner's has is 409, each with the page again and
+/// the reason.
 pub(super) async fn save(
     State(state): State<AppState>,
     Path((handle, slug)): Path<(String, String)>,
@@ -161,7 +163,7 @@ pub(super) async fn save(
             // keeps the design page, as the schematic page's way back does.
             let page = design_url(&handle, &slug);
             let location = if shown.opens_on_schematic() {
-                format!("{page}?design")
+                Linked::staying(&page)
             } else {
                 page
             };
