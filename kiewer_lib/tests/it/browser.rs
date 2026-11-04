@@ -10,7 +10,9 @@
 //! and after the load, and the failed import's case reads it once the
 //! viewer has failed to start. The upload page's zips (#83) are chosen
 //! in its file input and either land as a revision or are denied on the
-//! page; those cases need Postgres too.
+//! page; those cases need Postgres too, as does the upload form's
+//! design dropdown (#62), which reloads the form with the branches of the
+//! design picked.
 //!
 //! Runs when `KIEWER_BROWSER` names the browser's executable, which the
 //! browser stage of `scripts/checks.sh` sets, along with
@@ -42,6 +44,7 @@ use futures_util::StreamExt as _;
 use kiewer_assert::assert_is_empty;
 use kiewer_lib::account::Handle;
 use kiewer_lib::blob::fs::FsBlobStore;
+use kiewer_lib::design;
 use kiewer_lib::session;
 use kiewer_lib::web::beacon::{BEACON_PATH, Backend, Beacon, Outcome};
 use kiewer_lib::web::viewer::{embedded, script_url};
@@ -1117,33 +1120,57 @@ fn zip_with_skipped_folders() -> Vec<u8> {
 struct Uploader {
     session: Session,
     handle: Handle,
+    /// The session's id, the cookie's value.
+    session_id: String,
     zips: TempDir,
 }
 
 impl Uploader {
     /// The upload form, loaded for a new person with a live session.
     async fn new(executable: PathBuf, db: PgPool) -> Uploader {
+        let uploader = Uploader::signed_in(executable, db).await;
+        uploader.open("/upload").await;
+        uploader
+    }
+
+    /// A new person with a live session in the browser, on a blank tab.
+    async fn signed_in(executable: PathBuf, db: PgPool) -> Uploader {
         let session = Session::over(executable, db.clone(), RECORD_UPLOAD).await;
         let (account_id, handle) = person(&db).await;
-        let id = session::start(&db, account_id).await.expect("a session");
-        let addr = session.addr;
-        let mut cookie = CookieParam::new("kiewer_session", id.to_string());
-        cookie.url = Some(format!("http://{addr}/"));
+        let session_id = session::start(&db, account_id)
+            .await
+            .expect("a session")
+            .to_string();
+        let mut cookie = CookieParam::new("kiewer_session", session_id.clone());
+        cookie.url = Some(format!("http://{}/", session.addr));
         session
             .page
             .set_cookie(cookie)
             .await
             .expect("the session cookie");
-        session
-            .page
-            .goto(format!("http://{addr}/upload"))
-            .await
-            .expect("the form loads");
         Uploader {
             session,
             handle,
+            session_id,
             zips: scratch_dir!(),
         }
+    }
+
+    /// Loads `path` in the browser.
+    async fn open(&self, path: &str) {
+        self.session
+            .page
+            .goto(format!("http://{}{path}", self.session.addr))
+            .await
+            .expect("the page loads");
+    }
+
+    /// The same person as a plain HTTP client, for what the test sets up
+    /// before the form opens.
+    fn client(&self) -> http::Browser {
+        let mut client = http::Browser::new(self.session.addr);
+        client.set_cookie("kiewer_session", &self.session_id);
+        client
     }
 
     /// `bytes` chosen as the zip `name` in the form's file input, and the
@@ -1391,6 +1418,148 @@ async fn the_upload_page_denies_a_zip_it_will_not_expand_and_sends_nothing(
         (path.as_str(), enabled),
         ("/upload", true),
         "still on the form, ready for another try"
+    );
+    uploader.session.close().await;
+}
+
+/// A design of the uploader's named `name`, one sheet on `main`, with
+/// `branches` made from that head: its path (`handle/slug`) and the head.
+async fn design_with(
+    db: &PgPool,
+    uploader: &Uploader,
+    name: &str,
+    branches: &[&str],
+) -> (String, String) {
+    let mut client = uploader.client();
+    let sheet = format!("(kicad_sch (version 20250114) (generator \"{name}\"))");
+    let file_name = format!("{name}.kicad_sch");
+    let pushed = client
+        .post_multipart(
+            "/upload",
+            &[
+                http::Part::text("name", name),
+                http::Part::file(&file_name, sheet.as_bytes()),
+            ],
+        )
+        .await;
+    assert_eq!(pushed.status, 303, "{}", pushed.body);
+    let at = pushed.header("location").expect("where it landed");
+    let slug = at.rsplit('/').next().expect("a slug");
+    let (design, _) = design::find(db, uploader.handle.as_str(), slug)
+        .await
+        .expect("a read")
+        .expect("the design");
+    let head = design::branches(db, design.id).await.expect("a list")[0]
+        .head
+        .to_string();
+    let path = format!("{}/{}", uploader.handle, design.slug);
+    for branch in branches {
+        let made = client
+            .post_form(
+                &format!("/{path}/branches"),
+                &format!("name={branch}&from={head}"),
+            )
+            .await;
+        assert_eq!(made.status, 303, "{}", made.body);
+    }
+    (path, head)
+}
+
+/// What the upload form offers and holds: the design picked, the
+/// branches offered (the empty value is "A new branch"), the branch
+/// picked, and the revision it carries.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+struct UploadForm {
+    design: String,
+    branches: Vec<String>,
+    branch: String,
+    from: String,
+}
+
+const UPLOAD_FORM: &str = r#"(() => {
+  const form = document.querySelector("form");
+  return {
+    design: form.elements.design.value,
+    branches: [...form.elements.branch.options].map((option) => option.value),
+    branch: form.elements.branch.value,
+    from: form.elements.from.value,
+  };
+})()"#;
+
+/// The design dropdown set to `design` as a person picks it, and the
+/// form that loads for it.
+async fn pick_design(uploader: &Uploader, design: &str) -> UploadForm {
+    uploader
+        .session
+        .page
+        .evaluate(format!(
+            r#"{{
+  const picker = document.querySelector('select[name="design"]');
+  picker.value = "{design}";
+  picker.dispatchEvent(new Event("change", {{ bubbles: true }}));
+}}"#
+        ))
+        .await
+        .expect("the design picked");
+    let reloaded = uploader
+        .held_within_deadline(&format!(
+            r#"new URLSearchParams(location.search).get("design") === "{design}" && document.readyState === "complete""#
+        ))
+        .await;
+    let at: String = uploader.read("location.href").await;
+    assert!(
+        reloaded,
+        "not reloaded for {design:?} within {DEADLINE:?}; at {at}"
+    );
+    uploader.read(UPLOAD_FORM).await
+}
+
+#[tokio::test]
+async fn the_upload_forms_branches_follow_the_design_picked() {
+    let Some(executable) = executable() else {
+        return;
+    };
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let uploader = Uploader::signed_in(executable, db.clone()).await;
+    let (alpha, alpha_head) = design_with(&db, &uploader, "alpha", &["old-a", "wip"]).await;
+    let (beta, _) = design_with(&db, &uploader, "beta", &["rev-b", "wip"]).await;
+    uploader
+        .open(&format!(
+            "/upload?design={alpha}&branch=wip&from={alpha_head}"
+        ))
+        .await;
+    assert_eq!(
+        uploader.read::<UploadForm>(UPLOAD_FORM).await,
+        UploadForm {
+            design: alpha.clone(),
+            branches: vec!["main".into(), "old-a".into(), "wip".into(), String::new()],
+            branch: "wip".into(),
+            from: alpha_head,
+        },
+        "opened from alpha's wip"
+    );
+
+    assert_eq!(
+        pick_design(&uploader, &beta).await,
+        UploadForm {
+            design: beta,
+            branches: vec!["main".into(), "rev-b".into(), "wip".into(), String::new()],
+            branch: "wip".into(),
+            from: String::new(),
+        },
+        "beta's branches, the branch of the same name kept, alpha's revision left behind"
+    );
+    assert_eq!(
+        pick_design(&uploader, "").await,
+        UploadForm {
+            design: String::new(),
+            branches: vec!["main".into(), String::new()],
+            branch: "main".into(),
+            from: String::new(),
+        },
+        "a new design has main alone"
     );
     uploader.session.close().await;
 }
