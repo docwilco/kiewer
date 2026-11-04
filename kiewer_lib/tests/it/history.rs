@@ -16,6 +16,7 @@ use kiewer_test_support::db::{fresh, pool_from_env};
 use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
 use sqlx::PgPool;
+use test_case::test_case;
 
 /// The server over `db` with a filesystem blob store under cargo's
 /// scratch directory and no sign-in provider.
@@ -188,9 +189,9 @@ async fn three_uploads_to_main_make_a_chain_the_history_page_lists_as_rev_1_to_3
 
 /// Every link into the design on `body` has one of the settled shapes
 /// (docs/v1-scope.md, URLs): the page, its people and branches pages (the latter opened at
-/// a revision by `?from={hash}`), `/b/{branch}`, `/b/{branch}/history`
-/// `/r/{hash}` or `/r/{hash}/f/{path}` with at most a `?b={branch}` hint; so no ordinal is in
-/// any URL.
+/// a revision by `?from={hash}`), `/b/{branch}`, `/b/{branch}/history`,
+/// `/b/{branch}/schematic`, `/r/{hash}`, `/r/{hash}/schematic` or `/r/{hash}/f/{path}`
+/// with at most a `?b={branch}` hint; so no ordinal is in any URL.
 fn assert_design_links(body: &str, handle: &Handle, slug: &str) {
     let prefix = format!("href=\"/{handle}/{slug}");
     let is_hash = |text: &str| text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit());
@@ -202,8 +203,8 @@ fn assert_design_links(body: &str, handle: &Handle, slug: &str) {
         let segments: Vec<&str> = path.split('/').skip(1).collect();
         let settled = match segments.as_slice() {
             [] | ["schematic" | "people" | "branches"] => true,
-            ["b", name] | ["b", name, "history"] => is_name(name),
-            ["r", hash] | ["r", hash, "f", _, ..] => is_hash(hash),
+            ["b", name] | ["b", name, "history" | "schematic"] => is_name(name),
+            ["r", hash] | ["r", hash, "schematic"] | ["r", hash, "f", _, ..] => is_hash(hash),
             _ => false,
         };
         assert!(settled, "an unsettled URL shape: {path}");
@@ -556,5 +557,92 @@ async fn a_link_from_a_branch_keeps_its_context_and_the_banner_names_that_branch
         wrong_hint.body.contains("rev 1 of main"),
         "a hint naming no branch of the design is ignored: {}",
         wrong_hint.body
+    );
+}
+
+/// Which page of the design the schematic link is read from.
+#[derive(Debug, Clone, Copy)]
+enum Shown {
+    /// The head of the default branch, the bare page.
+    Head,
+    /// The head of another branch.
+    Branch,
+    /// An old revision of the default branch.
+    OldRevision,
+    /// A revision linked from another branch's page, with its hint.
+    HintedRevision,
+}
+
+/// The design page's schematic link names the branch or revision the
+/// page shows (#69), as the redirect of a revision with no board does:
+/// followed, it lands on that branch's or revision's sheets, whose way
+/// back is the page it came from.
+#[test_case(Shown::Head; "the head of the default branch")]
+#[test_case(Shown::Branch; "a branch")]
+#[test_case(Shown::OldRevision; "an old revision")]
+#[test_case(Shown::HintedRevision; "a revision in a branch's context")]
+#[tokio::test]
+async fn the_schematic_link_keeps_the_branch_or_revision_the_page_shows(shown: Shown) {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut browser, _, handle) = signed_in(&db, addr).await;
+    chain_of_three(&mut browser, &handle, "sheets").await;
+    let path = format!("/{handle}/sheets");
+    let main_history = history_page(addr, &handle, "sheets", "main").await;
+    let first = linked_revisions(&main_history.body, &handle, "sheets")[2].clone();
+    let design = format!("{handle}/sheets");
+    let fields = [
+        ("design", design.as_str()),
+        ("branch", ""),
+        ("new_branch", "side"),
+        ("from", first.as_str()),
+        ("message", "side 1"),
+    ];
+    let posted = push(&mut browser, "sheets", &fields).await;
+    assert_eq!(posted.status, 303, "{}", posted.body);
+    let side_history = history_page(addr, &handle, "sheets", "side").await;
+    let on_side = linked_revisions(&side_history.body, &handle, "sheets")[0].clone();
+
+    let (page_path, sheets, back) = match shown {
+        Shown::Head => (
+            path.clone(),
+            format!("{path}/schematic"),
+            format!("{path}?design"),
+        ),
+        Shown::Branch => (
+            format!("{path}/b/side"),
+            format!("{path}/b/side/schematic"),
+            format!("{path}/b/side?design"),
+        ),
+        Shown::OldRevision => (
+            format!("{path}/r/{first}"),
+            format!("{path}/r/{first}/schematic"),
+            format!("{path}/r/{first}?design"),
+        ),
+        Shown::HintedRevision => (
+            format!("{path}/r/{on_side}?b=side"),
+            format!("{path}/r/{on_side}/schematic?b=side"),
+            // The page escapes the `&` as askama does.
+            format!("{path}/r/{on_side}?b=side&#38;design"),
+        ),
+    };
+    let page = design_page(addr, &page_path).await;
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(
+        page.body
+            .contains(&format!(r#"<a href="{sheets}">schematic</a>"#)),
+        "{page_path} links its own sheets: {}",
+        page.body
+    );
+    let followed = http::request(addr, "GET", &sheets, &[], "").await;
+    assert_eq!(followed.status, 200, "{}", followed.body);
+    assert!(
+        followed
+            .body
+            .contains(&format!(r#"<a href="{back}">design page</a>"#)),
+        "{sheets} is the sheets of {page_path}: {}",
+        followed.body
     );
 }

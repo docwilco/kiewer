@@ -20,7 +20,7 @@ use super::open_graph::{self, OpenGraph};
 use crate::account::Handle;
 use crate::cache;
 use crate::description::{self, Description};
-use crate::design::{self, Design, DesignHead, ForkSource, Slug};
+use crate::design::{self, At, Design, DesignHead, ForkSource, Slug};
 use crate::design_settings::{self, Settings};
 use crate::error::{Error, Result};
 
@@ -97,8 +97,10 @@ fn refused(
         error: Some(reason),
         ..attempt
     };
+    // The save reads the head of the default branch, the bare page.
     let page = design_page(
         page.head,
+        At::Default,
         page.description,
         settings,
         page.forked_from,

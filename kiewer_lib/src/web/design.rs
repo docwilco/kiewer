@@ -57,24 +57,33 @@ pub(super) fn people_url(handle: &Handle, slug: &Slug) -> String {
     format!("/{handle}/{slug}/people")
 }
 
-/// The design page for `shown`: the viewer at the revision shown, in the
-/// context of its branch, with the revision's details, the design's
-/// `description`, `settings` as its settings block, `forked_from` as
-/// its forked-from line when the design is a fork, and `og` as its
-/// Open Graph tags (`web/open_graph.rs`). Rendered here for the page,
-/// the branch and revision routes (`web/history.rs`) and the settings
-/// form's refusal, which shows the page again with the reason.
+/// The design page for `shown`, the design at `at`: the viewer at the
+/// revision shown, in the context of its branch, with the revision's
+/// details, the design's `description`, `settings` as its settings
+/// block, `forked_from` as its forked-from line when the design is a
+/// fork, and `og` as its Open Graph tags (`web/open_graph.rs`). Rendered
+/// here for the page, the branch and revision routes (`web/history.rs`)
+/// and the settings form's refusal, which shows the page again with the
+/// reason.
 pub(super) fn design_page(
     shown: &DesignHead,
+    at: At<'_>,
     description: &Description,
     settings: SettingsView,
     forked_from: Option<&ForkSource>,
     og: OpenGraph,
 ) -> Result<String> {
     let board_url = shown.board().map(|entry| blob::url(&entry.blob));
-    let schematic_url = shown
-        .schematic()
-        .map(|_| schematic::url(&shown.owner, &shown.design.slug));
+    // The sheets of the same branch or revision, as the redirect for a
+    // revision with no board names them in `show`.
+    let schematic_url = shown.schematic().map(|_| {
+        schematic::url_at(
+            &shown.owner,
+            &shown.design.slug,
+            &shown.design.default_branch,
+            at,
+        )
+    });
     let at_branch = |name: &BranchName| history::branch_url(&shown.owner, &shown.design, name);
     let recent_view = |ordinal: u32, revision: &design::Revision| RecentView {
         ordinal,
@@ -255,7 +264,7 @@ pub(super) async fn show(
         .chain(forked_from.as_ref().and_then(|source| source.design_id))
         .map(Key::Design)
         .collect();
-    let page = design_page(&shown, &description, settings, forked_from.as_ref(), og)?;
+    let page = design_page(&shown, at, &description, settings, forked_from.as_ref(), og)?;
     Ok(cache::page(&keys, Html(page)))
 }
 
