@@ -9,19 +9,22 @@
 # a wasm built against another, so the mismatch is named here with the
 # install line, before the build runs.
 #
-# Usage: scripts/build-viewer.sh [release|debug] [out-dir]
+# Usage: scripts/build-viewer.sh [release|debug|probe] [out-dir]
 #   default: release into kiewer_viewer/dist. scripts/checks.sh wasm runs
 #   the debug profile into the target directory, so a check never
-#   overwrites what the server embeds.
+#   overwrites what the server embeds. probe is the debug profile with
+#   kiewer_viewer's panic-probe feature, the viewer the browser stage
+#   tests (#94); the crate refuses that feature in a release build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 profile="${1:-release}"
 out_dir="${2:-kiewer_viewer/dist}"
 case "$profile" in
-  release) profile_flag=(--release) ;;
-  debug) profile_flag=() ;;
-  *) echo "usage: $0 [release|debug] [out-dir]" >&2; exit 2 ;;
+  release) profile_flag=(--release); profile_dir=release ;;
+  debug) profile_flag=(); profile_dir=debug ;;
+  probe) profile_flag=(--features panic-probe); profile_dir=debug ;;
+  *) echo "usage: $0 [release|debug|probe] [out-dir]" >&2; exit 2 ;;
 esac
 
 rustup target list --installed | grep -qx wasm32-unknown-unknown \
@@ -45,4 +48,4 @@ mkdir -p "$out_dir"
 # --target web: an ES module with a default export that fetches the wasm
 # beside it, which the viewer page imports; no TypeScript, nothing reads it.
 wasm-bindgen --target web --no-typescript --out-dir "$out_dir" \
-  "$target_dir/wasm32-unknown-unknown/$profile/kiewer_viewer.wasm"
+  "$target_dir/wasm32-unknown-unknown/$profile_dir/kiewer_viewer.wasm"

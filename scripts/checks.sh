@@ -36,22 +36,25 @@ stage_docs()   { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps; }
 # macros. Cargo keeps check and build units apart, so the first run on a
 # target directory checks each wasm32 dependency once; after that a run
 # checks only what changed. The -p is the exception
-# scripts/build-viewer.sh documents.
+# scripts/build-viewer.sh documents. A second clippy with panic-probe,
+# so the browser tests' panic in Viewer.create is linted too.
 stage_wasm() {
   local target_dir
   target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
   scripts/build-viewer.sh debug "$target_dir/viewer-check"
   cargo clippy -p kiewer_viewer --lib --target wasm32-unknown-unknown -- -D warnings
+  cargo clippy -p kiewer_viewer --lib --target wasm32-unknown-unknown --features panic-probe -- -D warnings
 }
 
-# The board page in a real browser (kiewer_lib/tests/it/browser.rs):
-# chrome-headless-shell at the version scripts/browser.sh pins, drawing
-# WebGL2 on SwiftShader, against a server built with the viewer in it.
-# The viewer is the debug build the wasm stage writes under the target
-# directory (rebuilt here, a no-op after that stage, so the stage also
-# runs on its own), named to kiewer_lib/build.rs by KIEWER_VIEWER_DIST:
-# the snapshot and CI have no kiewer_viewer/dist, and a check never
-# writes there.
+# The board and schematic pages in a real browser
+# (kiewer_lib/tests/it/browser.rs): chrome-headless-shell at the version
+# scripts/browser.sh pins, drawing WebGL2 on SwiftShader, against a
+# server built with the viewer in it. The viewer is the debug build with
+# panic-probe on (scripts/build-viewer.sh probe), so a test can make a
+# real panic inside Viewer.create: beside the wasm stage's build in the
+# target directory, which costs one more compile of kiewer_viewer alone.
+# It is named to kiewer_lib/build.rs by KIEWER_VIEWER_DIST: the snapshot
+# and CI have no kiewer_viewer/dist, and a check never writes there.
 #
 # The variable changes kiewer_lib's build script output, so kiewer_lib
 # and what links it compile once here and once more in the next test
@@ -76,8 +79,8 @@ stage_browser() {
     return 0
   fi
   target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
-  scripts/build-viewer.sh debug "$target_dir/viewer-check"
-  KIEWER_VIEWER_DIST="$target_dir/viewer-check" KIEWER_BROWSER="$browser" \
+  scripts/build-viewer.sh probe "$target_dir/viewer-probe"
+  KIEWER_VIEWER_DIST="$target_dir/viewer-probe" KIEWER_BROWSER="$browser" \
     cargo test --workspace --test it browser::
 }
 
