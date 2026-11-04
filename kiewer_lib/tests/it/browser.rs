@@ -1115,8 +1115,8 @@ fn zip_with_skipped_folders() -> Vec<u8> {
     zip_of(&entries, Shape::default())
 }
 
-/// A signed-in person's upload form in a browser of its own, with the
-/// server and its database behind it.
+/// A signed-in person in a browser of its own, on the upload form or
+/// about to open it, with the server and its database behind it.
 struct Uploader {
     session: Session,
     handle: Handle,
@@ -1422,47 +1422,18 @@ async fn the_upload_page_denies_a_zip_it_will_not_expand_and_sends_nothing(
     uploader.session.close().await;
 }
 
-/// A design of the uploader's named `name`, one sheet on `main`, with
-/// `branches` made from that head: its path (`handle/slug`) and the head.
-async fn design_with(
-    db: &PgPool,
-    uploader: &Uploader,
-    name: &str,
-    branches: &[&str],
-) -> (String, String) {
-    let mut client = uploader.client();
-    let sheet = format!("(kicad_sch (version 20250114) (generator \"{name}\"))");
-    let file_name = format!("{name}.kicad_sch");
-    let pushed = client
-        .post_multipart(
-            "/upload",
-            &[
-                http::Part::text("name", name),
-                http::Part::file(&file_name, sheet.as_bytes()),
-            ],
-        )
-        .await;
-    assert_eq!(pushed.status, 303, "{}", pushed.body);
-    let at = pushed.header("location").expect("where it landed");
-    let slug = at.rsplit('/').next().expect("a slug");
-    let (design, _) = design::find(db, uploader.handle.as_str(), slug)
-        .await
-        .expect("a read")
-        .expect("the design");
-    let head = design::branches(db, design.id).await.expect("a list")[0]
-        .head
-        .to_string();
-    let path = format!("{}/{}", uploader.handle, design.slug);
-    for branch in branches {
-        let made = client
-            .post_form(
-                &format!("/{path}/branches"),
-                &format!("name={branch}&from={head}"),
-            )
-            .await;
-        assert_eq!(made.status, 303, "{}", made.body);
-    }
-    (path, head)
+// The upload form's design dropdown (#62). The branch selector lists the
+// branches of the design the form was rendered for, so picking another
+// design loads the form again for it. The case opens the form on one
+// design's branch at its revision, then picks a design that shares the
+// branch's name and has a branch the first lacks, then a new design, and
+// reads what the form offers after each load.
+
+/// A design the uploader pushed: its path (`handle/slug`) and the head
+/// of its `main`.
+struct PushedDesign {
+    path: String,
+    head: String,
 }
 
 /// What the upload form offers and holds: the design picked, the
@@ -1476,6 +1447,7 @@ struct UploadForm {
     from: String,
 }
 
+/// Reads the upload form as an [`UploadForm`].
 const UPLOAD_FORM: &str = r#"(() => {
   const form = document.querySelector("form");
   return {
@@ -1486,32 +1458,76 @@ const UPLOAD_FORM: &str = r#"(() => {
   };
 })()"#;
 
-/// The design dropdown set to `design` as a person picks it, and the
-/// form that loads for it.
-async fn pick_design(uploader: &Uploader, design: &str) -> UploadForm {
-    uploader
-        .session
-        .page
-        .evaluate(format!(
-            r#"{{
+impl Uploader {
+    /// A design named `name`, pushed as one sheet on `main`, with
+    /// `branches` made at that head.
+    async fn design_with_branches(
+        &self,
+        db: &PgPool,
+        name: &str,
+        branches: &[&str],
+    ) -> PushedDesign {
+        let mut client = self.client();
+        let sheet = format!("(kicad_sch (version 20250114) (generator \"{name}\"))");
+        let file_name = format!("{name}.kicad_sch");
+        let pushed = client
+            .post_multipart(
+                "/upload",
+                &[
+                    http::Part::text("name", name),
+                    http::Part::file(&file_name, sheet.as_bytes()),
+                ],
+            )
+            .await;
+        assert_eq!(pushed.status, 303, "{}", pushed.body);
+        let at = pushed.header("location").expect("where it landed");
+        let slug = at.rsplit('/').next().expect("a slug");
+        let (design, _) = design::find(db, self.handle.as_str(), slug)
+            .await
+            .expect("a read")
+            .expect("the design");
+        let head = design::branches(db, design.id).await.expect("a list")[0]
+            .head
+            .to_string();
+        let path = format!("{}/{}", self.handle, design.slug);
+        for branch in branches {
+            let made = client
+                .post_form(
+                    &format!("/{path}/branches"),
+                    &format!("name={branch}&from={head}"),
+                )
+                .await;
+            assert_eq!(made.status, 303, "{}", made.body);
+        }
+        PushedDesign { path, head }
+    }
+
+    /// The design dropdown set to `design` as a person picks it, and the
+    /// form that loads for it.
+    async fn pick_design(&self, design: &str) -> UploadForm {
+        self.session
+            .page
+            .evaluate(format!(
+                r#"{{
   const picker = document.querySelector('select[name="design"]');
   picker.value = "{design}";
   picker.dispatchEvent(new Event("change", {{ bubbles: true }}));
 }}"#
-        ))
-        .await
-        .expect("the design picked");
-    let reloaded = uploader
-        .held_within_deadline(&format!(
-            r#"new URLSearchParams(location.search).get("design") === "{design}" && document.readyState === "complete""#
-        ))
-        .await;
-    let at: String = uploader.read("location.href").await;
-    assert!(
-        reloaded,
-        "not reloaded for {design:?} within {DEADLINE:?}; at {at}"
-    );
-    uploader.read(UPLOAD_FORM).await
+            ))
+            .await
+            .expect("the design picked");
+        let reloaded = self
+            .held_within_deadline(&format!(
+                r#"new URLSearchParams(location.search).get("design") === "{design}" && document.readyState === "complete""#
+            ))
+            .await;
+        let at: String = self.read("location.href").await;
+        assert!(
+            reloaded,
+            "not reloaded for {design:?} within {DEADLINE:?}; at {at}"
+        );
+        self.read(UPLOAD_FORM).await
+    }
 }
 
 #[tokio::test]
@@ -1523,28 +1539,33 @@ async fn the_upload_forms_branches_follow_the_design_picked() {
         return;
     };
     let uploader = Uploader::signed_in(executable, db.clone()).await;
-    let (alpha, alpha_head) = design_with(&db, &uploader, "alpha", &["old-a", "wip"]).await;
-    let (beta, _) = design_with(&db, &uploader, "beta", &["rev-b", "wip"]).await;
+    let alpha = uploader
+        .design_with_branches(&db, "alpha", &["old-a", "wip"])
+        .await;
+    let beta = uploader
+        .design_with_branches(&db, "beta", &["rev-b", "wip"])
+        .await;
     uploader
         .open(&format!(
-            "/upload?design={alpha}&branch=wip&from={alpha_head}"
+            "/upload?design={}&branch=wip&from={}",
+            alpha.path, alpha.head
         ))
         .await;
     assert_eq!(
         uploader.read::<UploadForm>(UPLOAD_FORM).await,
         UploadForm {
-            design: alpha.clone(),
+            design: alpha.path,
             branches: vec!["main".into(), "old-a".into(), "wip".into(), String::new()],
             branch: "wip".into(),
-            from: alpha_head,
+            from: alpha.head,
         },
         "opened from alpha's wip"
     );
 
     assert_eq!(
-        pick_design(&uploader, &beta).await,
+        uploader.pick_design(&beta.path).await,
         UploadForm {
-            design: beta,
+            design: beta.path,
             branches: vec!["main".into(), "rev-b".into(), "wip".into(), String::new()],
             branch: "wip".into(),
             from: String::new(),
@@ -1552,7 +1573,7 @@ async fn the_upload_forms_branches_follow_the_design_picked() {
         "beta's branches, the branch of the same name kept, alpha's revision left behind"
     );
     assert_eq!(
-        pick_design(&uploader, "").await,
+        uploader.pick_design("").await,
         UploadForm {
             design: String::new(),
             branches: vec!["main".into(), String::new()],

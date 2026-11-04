@@ -392,11 +392,12 @@ form.addEventListener("submit", async (event) => {
 </script>
 <script>
 // The branch selector lists the branches of the design the page was
-// rendered for (#62), so picking another design loads the form again for
-// it: a push then names a branch that design has. A branch of the same
-// name stays picked, else the server picks the design's default. The
-// revision the form was opened at belongs to the design it was opened
-// for, and stays behind. With scripts off the form stays as it was.
+// rendered for, so picking another design loads the form again for it: a
+// push then names a branch that design has. A branch of the same name
+// stays picked; otherwise, and when "A new branch" was picked, the server
+// picks the design's default. The revision the form was opened at
+// belongs to the design it was opened for, and stays behind. With
+// scripts off the form stays as it was.
 document.querySelector('select[name="design"]').addEventListener("change", (event) => {
   const query = new URLSearchParams({ design: event.target.value });
   const branch = event.target.form.elements.branch.value;
