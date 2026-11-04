@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM slug_redirect WHERE owner_id = $1 AND slug = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2d577860906582ca8650fd7554af959e330ca4b4f1a6d09b7e4e3b37cae368bd"
+}

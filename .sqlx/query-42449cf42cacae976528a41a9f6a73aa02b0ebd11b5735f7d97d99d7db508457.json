@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO branch (design_id, name, head_hash, created_by, updated_at)\n         SELECT $1, $2, r.hash, $4, r.created_at FROM revision r WHERE r.hash = $3\n         ON CONFLICT (design_id, name) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "42449cf42cacae976528a41a9f6a73aa02b0ebd11b5735f7d97d99d7db508457"
+}

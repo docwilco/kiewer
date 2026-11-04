@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM account\nWHERE handle IS NULL AND created_at <= now() - make_interval(hours => $1)\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f1b05c7d6c7ecebc7808f52f88d20333366e4888f941c0c17bb6fb5b25b80162"
+}

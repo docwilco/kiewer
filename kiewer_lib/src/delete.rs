@@ -45,18 +45,19 @@ pub async fn design(db: &PgPool, by: AccountId, design: DesignId, typed: &str) -
     // waits and cannot change what the checks below read, and a fork or a
     // push in flight, which holds the row, finishes first.
     let mut tx = db.begin().await?;
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT d.name, d.visibility, a.handle FROM design d
+    let row = sqlx::query!(
+        r#"SELECT d.name, d.visibility, a.handle AS "owner!" FROM design d
          JOIN account a ON a.id = d.owner_id
          WHERE d.id = $1
-         FOR UPDATE OF d",
+         FOR UPDATE OF d"#,
+        design as DesignId
     )
-    .bind(design)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((name, visibility, owner)) = row else {
+    let Some(row) = row else {
         return Ok(Deleted::Gone);
     };
+    let (name, visibility, owner) = (row.name, row.visibility, row.owner);
     roles::require(&mut *tx, design, by, Role::Owner).await?;
     if typed.trim() != name {
         return Ok(Deleted::NotConfirmed);
@@ -66,8 +67,7 @@ pub async fn design(db: &PgPool, by: AccountId, design: DesignId, typed: &str) -
         &Handle::from_row(owner),
         Visibility::from_row(&visibility)?,
     );
-    sqlx::query("DELETE FROM design WHERE id = $1")
-        .bind(design)
+    sqlx::query!("DELETE FROM design WHERE id = $1", design as DesignId)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -85,13 +85,13 @@ pub async fn shared_designs(db: &PgPool, account: AccountId) -> Result<Vec<Strin
     // One read on the pool: a page's listing, part of no write. The
     // account's designs by the (owner_id, slug) index, a role row of
     // each by design_role's primary key.
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar!(
         "SELECT d.name FROM design d
          WHERE d.owner_id = $1
            AND EXISTS (SELECT 1 FROM design_role r WHERE r.design_id = d.id)
          ORDER BY d.created_at DESC, d.id DESC",
+        account as AccountId
     )
-    .bind(account)
     .fetch_all(db)
     .await?)
 }
@@ -122,22 +122,22 @@ pub async fn account(
     // are read and held before the cascade takes them, for the purge.
     let mut tx = db.begin().await?;
     account::reserve(&mut tx, handle).await?;
-    let designs: Vec<(DesignId, String)> =
-        sqlx::query_as("SELECT id, visibility FROM design WHERE owner_id = $1 FOR UPDATE")
-            .bind(account)
-            .fetch_all(&mut *tx)
-            .await?;
+    let designs = sqlx::query!(
+        r#"SELECT id AS "id: DesignId", visibility FROM design WHERE owner_id = $1 FOR UPDATE"#,
+        account as AccountId
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     let mut keys = vec![Key::Handle(handle.clone())];
     let mut public = false;
-    for (id, visibility) in designs {
-        keys.push(Key::Design(id));
-        public |= Visibility::from_row(&visibility)? == Visibility::Public;
+    for row in designs {
+        keys.push(Key::Design(row.id));
+        public |= Visibility::from_row(&row.visibility)? == Visibility::Public;
     }
     if public {
         keys.push(Key::Home);
     }
-    sqlx::query("DELETE FROM account WHERE id = $1")
-        .bind(account)
+    sqlx::query!("DELETE FROM account WHERE id = $1", account as AccountId)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;

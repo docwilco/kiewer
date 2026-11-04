@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.name, d.visibility, a.handle AS \"owner!\" FROM design d\n         JOIN account a ON a.id = d.owner_id\n         WHERE d.id = $1\n         FOR UPDATE OF d",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "visibility",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "owner!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "e6a5b21fc41ec7b40da737fb660a048ae844d437250561f992e1458fa04f2439"
+}

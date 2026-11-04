@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO design (owner_id, slug, name, default_branch, visibility,\n             forked_from_design_id, forked_from_handle, forked_from_slug,\n             forked_from_revision_hash)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id AS \"id: DesignId\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id: DesignId",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f928c1ed92013ffaabac2926c39c19b544ffa711dd058d10c042ccda10b558e9"
+}

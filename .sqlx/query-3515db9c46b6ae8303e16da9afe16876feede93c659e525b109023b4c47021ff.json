@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM tree t\n         WHERE t.claimed_at <= now() - make_interval(hours => $1)\n           AND NOT EXISTS (SELECT 1 FROM revision r WHERE r.tree_hash = t.hash)\n           AND NOT EXISTS (SELECT 1 FROM pending_revision p WHERE p.tree_hash = t.hash)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3515db9c46b6ae8303e16da9afe16876feede93c659e525b109023b4c47021ff"
+}

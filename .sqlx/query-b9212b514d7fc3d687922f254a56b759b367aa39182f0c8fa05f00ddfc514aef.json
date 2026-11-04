@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.id AS \"id: DesignId\", a.handle AS \"handle!\"\n         FROM design_revision dr\n         JOIN design d ON d.id = dr.design_id\n         JOIN account a ON a.id = d.owner_id\n         WHERE dr.revision_hash = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id: DesignId",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "handle!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "b9212b514d7fc3d687922f254a56b759b367aa39182f0c8fa05f00ddfc514aef"
+}

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE branch SET head_hash = $3, updated_at = now()\n                 WHERE design_id = $1 AND name = $2 AND head_hash = $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a988ec62d5f4247831a22637a7dbf3dd4531b2813588f87f1c53de4f580a4cd4"
+}

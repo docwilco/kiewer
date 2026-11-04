@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT te.path, te.blob_hash, b.size FROM tree_entry te\n         JOIN blob b ON b.hash = te.blob_hash\n         WHERE te.tree_hash = $1 ORDER BY te.path",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "blob_hash",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 2,
+        "name": "size",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2dfdb2f58443d95d845529eee5ade0df3b34e008d08e0d8a0123c21abfc2f6dd"
+}

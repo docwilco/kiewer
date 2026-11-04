@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.forked_from_handle AS \"kept_handle!\", d.forked_from_slug AS \"kept_slug!\",\n                s.id AS \"source_id?: DesignId\", a.handle AS \"handle?\", s.slug AS \"slug?\",\n                d.forked_from_revision_hash AS revision,\n                EXISTS (SELECT 1 FROM design_revision dr\n                        WHERE dr.design_id = s.id\n                          AND dr.revision_hash = d.forked_from_revision_hash) AS \"reachable!\"\n         FROM design d\n         LEFT JOIN design s ON s.id = d.forked_from_design_id\n         LEFT JOIN account a ON a.id = s.owner_id\n         WHERE d.id = $1 AND d.forked_from_handle IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kept_handle!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "kept_slug!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "source_id?: DesignId",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "handle?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "slug?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "revision",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 6,
+        "name": "reachable!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      true,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "4a28c063320b1d5d3d9381057550bb7292835040f3044c222edcab67b06cf15d"
+}

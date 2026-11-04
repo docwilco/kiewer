@@ -3,15 +3,38 @@
 # (.githooks/pre-commit) and CI (.github/workflows/ci.yml) both run this
 # script, so what passes locally is exactly what passes in CI.
 #
-# Usage: scripts/checks.sh [fmt|clippy|test|docs|wasm|browser|all]   (default: all)
+# Usage: scripts/checks.sh [fmt|sqlx|clippy|test|docs|wasm|browser|all]   (default: all)
 #
 # test and all need DATABASE_URL and KIEWER_GCS_EMULATOR, or their opt-outs
-# KIEWER_SKIP_DB_TESTS=1 and KIEWER_SKIP_GCS_TESTS=1 (the gates, below).
+# KIEWER_SKIP_DB_TESTS=1 and KIEWER_SKIP_GCS_TESTS=1 (the gates, below);
+# sqlx needs DATABASE_URL or KIEWER_SKIP_DB_TESTS=1.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Every build here compiles the query macros against the offline data
+# committed in .sqlx/, never against a database: DATABASE_URL is set for
+# the tests, on a database they migrate only when they run, and sqlx's
+# macros would otherwise read it (or a .env's, which they look for in
+# this directory and every one above it) and connect at compile time.
+# The sqlx stage is where the data meets a database: `cargo sqlx prepare`
+# sets SQLX_OFFLINE=false for its own build.
+export SQLX_OFFLINE=true
+
 stage_fmt() {
   cargo fmt --all --check || { echo "Run 'cargo fmt --all' to fix." >&2; return 1; }
+}
+# The offline data in .sqlx/ against the statements and against the
+# schema migrations/ makes, on a scratch database beside DATABASE_URL's
+# (scripts/sqlx-prepare.sh, whose header has the install line for
+# sqlx-cli). Stale data fails here by name, before clippy's build fails
+# on a statement with no data. Without DATABASE_URL, which the gate lets
+# through only under KIEWER_SKIP_DB_TESTS=1, a skip with a line saying so.
+stage_sqlx() {
+  if [ -z "${DATABASE_URL:-}" ]; then
+    echo "sqlx: skipped, DATABASE_URL is unset (KIEWER_SKIP_DB_TESTS=1)"
+    return 0
+  fi
+  scripts/sqlx-prepare.sh --check
 }
 stage_clippy() { cargo clippy --workspace --all-targets -- -D warnings; }
 # The workspace build first: cargo builds a package's binaries for its own
@@ -118,7 +141,7 @@ db_tests() {
   for file in kiewer_lib/tests/it/*.rs; do
     if grep -qE 'pool_from_env|pool_of_its_own' "$file"; then names+=("${file##*/}"); fi
   done
-  echo "kiewer_lib/tests/it/: ${names[*]:-none found}"
+  echo "kiewer_lib/tests/it/: ${names[*]:-none found}; and the sqlx stage"
 }
 gcs_tests() { echo kiewer_lib/tests/it/gcs_blob_store.rs; }
 gates() {
@@ -142,7 +165,8 @@ run() {
 
 case "${1:-all}" in
   test) gates; run test; report_skipped ;;
+  sqlx) gate DATABASE_URL KIEWER_SKIP_DB_TESTS Postgres db_tests || exit 1; run sqlx; report_skipped ;;
   fmt|clippy|docs|wasm|browser) run "$1" ;;
-  all) gates; for stage in fmt clippy test docs wasm browser; do run "$stage"; done; report_skipped ;;
-  *) echo "usage: $0 [fmt|clippy|test|docs|wasm|browser|all]" >&2; exit 2 ;;
+  all) gates; for stage in fmt sqlx clippy test docs wasm browser; do run "$stage"; done; report_skipped ;;
+  *) echo "usage: $0 [fmt|sqlx|clippy|test|docs|wasm|browser|all]" >&2; exit 2 ;;
 esac

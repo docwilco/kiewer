@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n             SELECT 1 FROM reserved_handle WHERE handle = $1 AND reserved_until > now()\n         ) AS \"reserved!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reserved!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "89349a970b85133e56a8b5fb1a310cc3baf5b507e13a8e0dd0f9e89ca3e4c15e"
+}

@@ -24,6 +24,7 @@ pub mod roles;
 pub mod server;
 pub mod session;
 pub mod slug;
+mod sql;
 pub mod takedown;
 pub mod thumbnail;
 pub mod upload;

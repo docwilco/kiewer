@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO slug_redirect (owner_id, slug, design_id) VALUES ($1, $2, $3)\n         ON CONFLICT (owner_id, slug) DO UPDATE SET design_id = EXCLUDED.design_id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "61651439ff86cb1393c8cf1f88a03be0f16cd1e4567bdc785c84c8805cae3c81"
+}

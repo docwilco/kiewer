@@ -157,16 +157,15 @@ pub async fn store(db: &PgPool, blobs: &dyn BlobStore, bytes: &[u8]) -> Result<P
 /// finished waiting, which the module doc's second case relies on.
 async fn claim(db: &PgPool, hash: &BlobHash, size: u64) -> Result<()> {
     let mut tx = db.begin().await?;
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO blob (hash, size) VALUES ($1, $2)
          ON CONFLICT (hash) DO UPDATE SET claimed_at = now()",
+        hash.as_bytes(),
+        i64::try_from(size).unwrap_or(i64::MAX)
     )
-    .bind(hash.as_bytes())
-    .bind(i64::try_from(size).unwrap_or(i64::MAX))
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM blob_removal WHERE hash = $1")
-        .bind(hash.as_bytes())
+    sqlx::query!("DELETE FROM blob_removal WHERE hash = $1", hash.as_bytes())
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -204,17 +203,17 @@ pub async fn run(db: &PgPool, blobs: &dyn BlobStore) -> Result<Collected> {
 }
 
 /// Step 5's statement. Steps 5 and 6 keep theirs public so that the plan
-/// test in `tests/it/collector.rs` plans the text the run executes.
-pub const EXPIRED_SESSIONS: &str = "DELETE FROM session WHERE expires_at <= now()";
+/// test in `tests/it/collector.rs` plans the text the run executes: the
+/// run reads the same file through `sqlx::query_file!`.
+pub const EXPIRED_SESSIONS: &str = include_str!("collector/expired_sessions.sql");
 
 /// Step 6's statement; `$1` is [`GRACE_HOURS`].
-pub const OLD_SIGN_UPS: &str = "DELETE FROM account
-     WHERE handle IS NULL AND created_at <= now() - make_interval(hours => $1)";
+pub const OLD_SIGN_UPS: &str = include_str!("collector/old_sign_ups.sql");
 
 /// Step 5. The per-account sweep in [`crate::session::start`] stays: it
 /// keeps an account that signs in often tidy between runs.
 async fn remove_sessions(db: &PgPool) -> Result<u64> {
-    let removed = sqlx::query(EXPIRED_SESSIONS)
+    let removed = sqlx::query_file!("src/collector/expired_sessions.sql")
         .execute(db)
         .await?
         .rows_affected();
@@ -224,8 +223,7 @@ async fn remove_sessions(db: &PgPool) -> Result<u64> {
 /// Step 6. The grace counts from the account's first sign-in, which a
 /// later sign-in does not move.
 async fn remove_sign_ups(db: &PgPool) -> Result<u64> {
-    let removed = sqlx::query(OLD_SIGN_UPS)
-        .bind(GRACE_HOURS)
+    let removed = sqlx::query_file!("src/collector/old_sign_ups.sql", GRACE_HOURS)
         .execute(db)
         .await?
         .rows_affected();
@@ -240,7 +238,7 @@ async fn remove_sign_ups(db: &PgPool) -> Result<u64> {
 /// revision by cascade, and a fork's `forked_from_revision_hash` is set
 /// null by its action.
 async fn remove_revisions(db: &PgPool) -> Result<u64> {
-    let removed = sqlx::query(
+    let removed = sqlx::query!(
         "WITH RECURSIVE kept (hash) AS (
              SELECT head_hash FROM branch
              UNION
@@ -258,8 +256,8 @@ async fn remove_revisions(db: &PgPool) -> Result<u64> {
              DELETE FROM design_revision dr USING doomed d WHERE dr.revision_hash = d.hash
          )
          DELETE FROM revision r USING doomed d WHERE r.hash = d.hash",
+        GRACE_HOURS
     )
-    .bind(GRACE_HOURS)
     .execute(db)
     .await?
     .rows_affected();
@@ -269,13 +267,13 @@ async fn remove_revisions(db: &PgPool) -> Result<u64> {
 /// Step 2. Its entries go by cascade, which is what frees the blobs for
 /// step 3.
 async fn remove_trees(db: &PgPool) -> Result<u64> {
-    let removed = sqlx::query(
+    let removed = sqlx::query!(
         "DELETE FROM tree t
          WHERE t.claimed_at <= now() - make_interval(hours => $1)
            AND NOT EXISTS (SELECT 1 FROM revision r WHERE r.tree_hash = t.hash)
            AND NOT EXISTS (SELECT 1 FROM pending_revision p WHERE p.tree_hash = t.hash)",
+        GRACE_HOURS
     )
-    .bind(GRACE_HOURS)
     .execute(db)
     .await?
     .rows_affected();
@@ -285,7 +283,7 @@ async fn remove_trees(db: &PgPool) -> Result<u64> {
 /// Step 3: the rows, and in the same statement the record that the
 /// objects are still to go, so a crash leaves neither half alone.
 async fn remove_blobs(db: &PgPool) -> Result<u64> {
-    let removed = sqlx::query(
+    let removed = sqlx::query!(
         "WITH gone AS (
              DELETE FROM blob b
              WHERE b.claimed_at <= now() - make_interval(hours => $1)
@@ -297,8 +295,8 @@ async fn remove_blobs(db: &PgPool) -> Result<u64> {
          )
          INSERT INTO blob_removal (hash) SELECT hash FROM gone
          ON CONFLICT (hash) DO NOTHING",
+        GRACE_HOURS
     )
-    .bind(GRACE_HOURS)
     .execute(db)
     .await?
     .rows_affected();
@@ -310,7 +308,7 @@ async fn remove_blobs(db: &PgPool) -> Result<u64> {
 /// store that is down costs one failed call.
 async fn remove_objects(db: &PgPool, blobs: &dyn BlobStore) -> Result<u64> {
     // A work queue that is empty between runs, read whole.
-    let queued: Vec<Vec<u8>> = sqlx::query_scalar("SELECT hash FROM blob_removal")
+    let queued: Vec<Vec<u8>> = sqlx::query_scalar!("SELECT hash FROM blob_removal")
         .fetch_all(db)
         .await?;
     let mut removed = 0;
@@ -335,11 +333,11 @@ async fn remove_object(db: &PgPool, blobs: &dyn BlobStore, hash: &BlobHash) -> R
     // `Some(false)` is a queued object whose blob stayed gone. A blob that
     // is back (`Some(true)`) keeps its object, and no row (`None`) means
     // an upload's claim took the removal back first.
-    let blob_is_back: Option<bool> = sqlx::query_scalar(
-        "DELETE FROM blob_removal r WHERE r.hash = $1
-         RETURNING EXISTS (SELECT 1 FROM blob b WHERE b.hash = r.hash)",
+    let blob_is_back: Option<bool> = sqlx::query_scalar!(
+        r#"DELETE FROM blob_removal r WHERE r.hash = $1
+         RETURNING EXISTS (SELECT 1 FROM blob b WHERE b.hash = r.hash) AS "is_back!""#,
+        hash.as_bytes()
     )
-    .bind(hash.as_bytes())
     .fetch_optional(&mut *tx)
     .await?;
     let removes = blob_is_back == Some(false);

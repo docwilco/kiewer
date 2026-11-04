@@ -26,13 +26,16 @@
 use std::fmt;
 use std::str::FromStr;
 
-use sqlx::{PgConnection, PgPool, Row as _};
+use sqlx::{PgConnection, PgPool};
 
 use crate::account::{AccountId, Handle};
-use crate::design::{self, BranchName, Design, DesignId, Lock, MetadataRow, bind_metadata};
+use crate::design::{
+    self, BranchName, Design, DesignId, Lock, MetadataColumns, design_row, metadata_row,
+};
 use crate::error::{Error, Refusal, Result};
 use crate::revision::{Metadata, RevisionHash, TreeHash};
 use crate::roles::{self, Role};
+use crate::sql::statement;
 use crate::takedown;
 use crate::upload::{self, Author, Landing, Limits};
 
@@ -74,22 +77,31 @@ pub(crate) struct Held<'a> {
 
 /// The upload is held rather than landed, within its transaction.
 pub(crate) async fn hold(tx: &mut PgConnection, held: &Held<'_>) -> Result<PendingId> {
-    let query = sqlx::query(
-        "INSERT INTO pending_revision (design_id, branch, author_id, base_hash, tree_hash,
+    let m = MetadataColumns::of(held.metadata);
+    Ok(sqlx::query_scalar!(
+        r#"INSERT INTO pending_revision (design_id, branch, author_id, base_hash, tree_hash,
              message, warnings, format_version, layer_count, copper_layer_count,
              board_width_mm, board_height_mm, fonts, net_count, footprint_count)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-         RETURNING id",
+         RETURNING id AS "id: PendingId""#,
+        held.design as DesignId,
+        held.branch.as_str(),
+        held.author as AccountId,
+        held.base.as_bytes(),
+        held.tree.as_bytes(),
+        held.message,
+        held.warnings,
+        m.format_version,
+        m.layer_count,
+        m.copper_layer_count,
+        m.board_width_mm,
+        m.board_height_mm,
+        m.fonts.as_deref(),
+        m.net_count,
+        m.footprint_count
     )
-    .bind(held.design)
-    .bind(held.branch.as_str())
-    .bind(held.author)
-    .bind(held.base.as_bytes())
-    .bind(held.tree.as_bytes())
-    .bind(held.message)
-    .bind(held.warnings);
-    let row = bind_metadata(query, held.metadata).fetch_one(tx).await?;
-    Ok(row.try_get("id")?)
+    .fetch_one(tx)
+    .await?)
 }
 
 /// A revision along the branch: one end of the gap the choice page
@@ -132,37 +144,32 @@ pub struct Pending {
 /// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
 /// holds a hash that is not 32 bytes, which the schema forbids.
 pub async fn find(db: &PgPool, id: PendingId, account: AccountId) -> Result<Option<Pending>> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        #[sqlx(flatten)]
-        design: design::DesignRow,
-        handle: String,
-        branch: String,
-        base_hash: Vec<u8>,
-        message: Option<String>,
-        warnings: Vec<String>,
-        minutes_left: i64,
-    }
     // The row by its key, its design and owner by theirs.
-    let row: Option<Row> = sqlx::query_as(&format!(
-        "SELECT {columns}, a.handle, p.branch, p.base_hash, p.message, p.warnings,
-                CEIL(EXTRACT(EPOCH FROM p.expires_at - now()) / 60)::bigint AS minutes_left
+    let row = statement!(query!(
+        [
+            "SELECT " DESIGN_COLUMNS r#", a.handle AS "handle!", p.branch, p.base_hash, p.message,
+                p.warnings,
+                CEIL(EXTRACT(EPOCH FROM p.expires_at - now()) / 60)::bigint AS "minutes_left!"
          FROM pending_revision p
          JOIN design d ON d.id = p.design_id
          JOIN account a ON a.id = d.owner_id
-         WHERE p.id = $1 AND p.author_id = $2 AND p.expires_at > now()",
-        columns = design::DESIGN_COLUMNS
+         WHERE p.id = $1 AND p.author_id = $2 AND p.expires_at > now()"#
+        ],
+        id as PendingId,
+        account as AccountId
     ))
-    .bind(id)
-    .bind(account)
     .fetch_optional(db)
     .await?;
     let Some(row) = row else {
         return Ok(None);
     };
     let branch = BranchName::from_row(row.branch);
-    let design: Design = row.design.try_into()?;
     let base = RevisionHash::from_bytes(&row.base_hash)?;
+    let owner = Handle::from_row(row.handle);
+    let message = row.message;
+    let warnings = row.warnings;
+    let minutes_left = row.minutes_left;
+    let design: Design = design_row!(row).try_into()?;
     let entries = design::history(db, design.id, &branch, None).await?;
     let point = |hash: RevisionHash| {
         entries
@@ -185,13 +192,13 @@ pub async fn find(db: &PgPool, id: PendingId, account: AccountId) -> Result<Opti
     Ok(Some(Pending {
         id,
         design,
-        owner: Handle::from_row(row.handle),
+        owner,
         branch,
         base,
         head,
-        message: row.message,
-        warnings: row.warnings,
-        minutes_left: u32::try_from(row.minutes_left).unwrap_or(1),
+        message,
+        warnings,
+        minutes_left: u32::try_from(minutes_left).unwrap_or(1),
     }))
 }
 
@@ -238,23 +245,14 @@ pub async fn decide(
     id: PendingId,
     choice: Choice,
 ) -> Result<Option<Decided>> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        branch: String,
-        base_hash: Vec<u8>,
-        tree_hash: Vec<u8>,
-        message: Option<String>,
-        #[sqlx(flatten)]
-        metadata: MetadataRow,
-    }
     // On the pool, before the transaction: it only says which design to
     // lock first, and the claim below decides.
-    let design_id: Option<DesignId> = sqlx::query_scalar(
-        "SELECT design_id FROM pending_revision
-         WHERE id = $1 AND author_id = $2 AND expires_at > now()",
+    let design_id: Option<DesignId> = sqlx::query_scalar!(
+        r#"SELECT design_id AS "design_id: DesignId" FROM pending_revision
+         WHERE id = $1 AND author_id = $2 AND expires_at > now()"#,
+        id as PendingId,
+        author.account_id as AccountId
     )
-    .bind(id)
-    .bind(author.account_id)
     .fetch_optional(db)
     .await?;
     let Some(design_id) = design_id else {
@@ -267,15 +265,15 @@ pub async fn decide(
     roles::require(&mut *tx, design.id, author.account_id, Role::Collaborator).await?;
     // The delete is the claim: of two decisions at once the second finds
     // no row. A refusal below rolls it back, so the upload stays pending.
-    let row: Option<Row> = sqlx::query_as(
+    let row = sqlx::query!(
         "DELETE FROM pending_revision
          WHERE id = $1 AND author_id = $2 AND expires_at > now()
          RETURNING branch, base_hash, tree_hash, message, format_version, layer_count,
              copper_layer_count, board_width_mm, board_height_mm, fonts, net_count,
              footprint_count",
+        id as PendingId,
+        author.account_id as AccountId
     )
-    .bind(id)
-    .bind(author.account_id)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
@@ -283,6 +281,9 @@ pub async fn decide(
     };
     let tree = TreeHash::from_bytes(&row.tree_hash)?;
     let base = RevisionHash::from_bytes(&row.base_hash)?;
+    let pending_branch = row.branch;
+    let message = row.message;
+    let metadata = metadata_row!(row).into_metadata();
     // A file taken down during the hour: the decision is the upload
     // landing, so the block list has the last word here too.
     if let Some(path) = takedown::blocked_in(&mut *tx, tree).await? {
@@ -296,7 +297,7 @@ pub async fn decide(
     upload::check_account_cap(&mut tx, limits, author.account_id, &hashes).await?;
     let (branch, parent, expected) = match choice {
         Choice::Reappend { onto } => {
-            let branch = BranchName::from_row(row.branch);
+            let branch = BranchName::from_row(pending_branch);
             // The foreign key kept the branch while the row lived, and the
             // design held keeps it now.
             let head = design::lock_head(&mut tx, design.id, branch.as_str())
@@ -325,8 +326,8 @@ pub async fn decide(
             expected,
             tree,
             author,
-            message: row.message.as_deref(),
-            metadata: row.metadata.into_metadata().as_ref(),
+            message: message.as_deref(),
+            metadata: metadata.as_ref(),
         },
     )
     .await?;
@@ -350,13 +351,13 @@ pub(crate) async fn spend(
     design: DesignId,
     branch: &BranchName,
 ) -> Result<()> {
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO upload_refusal (account_id, refused_at)
          SELECT author_id, created_at FROM pending_revision
          WHERE design_id = $1 AND branch = $2",
+        design as DesignId,
+        branch.as_str()
     )
-    .bind(design)
-    .bind(branch.as_str())
     .execute(tx)
     .await?;
     Ok(())
@@ -372,7 +373,7 @@ pub(crate) async fn spend(
 /// [`Error::Db`] when Postgres refuses.
 pub async fn expire(db: &PgPool) -> Result<u64> {
     Ok(
-        sqlx::query("DELETE FROM pending_revision WHERE expires_at <= now()")
+        sqlx::query!("DELETE FROM pending_revision WHERE expires_at <= now()")
             .execute(db)
             .await?
             .rows_affected(),

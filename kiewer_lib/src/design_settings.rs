@@ -7,7 +7,7 @@
 use sqlx::PgPool;
 
 use crate::account::AccountId;
-use crate::design::{Design, Slug};
+use crate::design::{Design, DesignId, Slug};
 use crate::error::{Error, Result};
 use crate::roles::{self, Role};
 use crate::{description, slug};
@@ -86,11 +86,13 @@ pub async fn save(
     // lock on a read that a later write would have to upgrade.
     roles::require(&mut *tx, design.id, editor, Role::Admin).await?;
     description::set(&mut tx, design.id, &settings.description).await?;
-    sqlx::query("UPDATE design SET name = $2 WHERE id = $1")
-        .bind(design.id)
-        .bind(name)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query!(
+        "UPDATE design SET name = $2 WHERE id = $1",
+        design.id as DesignId,
+        name
+    )
+    .execute(&mut *tx)
+    .await?;
     slug::change(
         &mut tx,
         design.owner_id,

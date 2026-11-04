@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH RECURSIVE chain AS (\n    SELECT b.name, b.head_hash AS hash, 0 AS behind\n    FROM branch b WHERE b.design_id = $1 AND ($2::text IS NULL OR b.name = $2)\n    UNION ALL\n    SELECT c.name, r.parent_hash, c.behind + 1\n    FROM chain c JOIN revision r ON r.hash = c.hash WHERE r.parent_hash IS NOT NULL\n)\n         INSERT INTO design_revision (design_id, revision_hash)\n         SELECT DISTINCT $1, c.hash FROM chain c\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ac11fb2c3ecddd929c15eeeda2873c421eeb707dc5158bb432680b1e111c66b0"
+}

@@ -40,8 +40,9 @@ pub async fn check<'c>(db: impl PgExecutor<'c>, account: AccountId, per_hour: u3
     // The row at offset per_hour - 1, newest first, is the oldest of the
     // last per_hour uploads in the window; it exists only when the
     // allowance is used. Its leaving time, from now, is the wait.
-    let wait: Option<(i64,)> = sqlx::query_as(
-        "SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM at + make_interval(secs => $3) - now())))::bigint
+    let wait: Option<i64> = sqlx::query_scalar!(
+        r#"SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM at + make_interval(secs => $3) - now())))::bigint
+             AS "wait!"
          FROM (
              SELECT created_at AS at FROM revision
              WHERE author_id = $1 AND created_at > now() - make_interval(secs => $3)
@@ -53,16 +54,16 @@ pub async fn check<'c>(db: impl PgExecutor<'c>, account: AccountId, per_hour: u3
              WHERE author_id = $1 AND created_at > now() - make_interval(secs => $3)
          ) uploads
          ORDER BY at DESC
-         OFFSET $2 LIMIT 1",
+         OFFSET $2 LIMIT 1"#,
+        account as AccountId,
+        i64::from(per_hour) - 1,
+        WINDOW.as_secs_f64()
     )
-    .bind(account)
-    .bind(i64::from(per_hour) - 1)
-    .bind(WINDOW.as_secs_f64())
     .fetch_optional(db)
     .await?;
     match wait {
         None => Ok(()),
-        Some((seconds,)) => Err(Refusal::RateLimited {
+        Some(seconds) => Err(Refusal::RateLimited {
             limit: per_hour,
             retry_after_secs: u64::try_from(seconds).unwrap_or(1),
         }
@@ -80,15 +81,15 @@ pub async fn check<'c>(db: impl PgExecutor<'c>, account: AccountId, per_hour: u3
 ///
 /// [`Error::Db`](crate::Error::Db) when Postgres refuses.
 pub async fn record_refusal<'c>(db: impl PgExecutor<'c>, account: AccountId) -> Result<()> {
-    sqlx::query(
+    sqlx::query!(
         "WITH expired AS (
              DELETE FROM upload_refusal
              WHERE account_id = $1 AND refused_at <= now() - make_interval(secs => $2)
          )
          INSERT INTO upload_refusal (account_id) VALUES ($1)",
+        account as AccountId,
+        WINDOW.as_secs_f64()
     )
-    .bind(account)
-    .bind(WINDOW.as_secs_f64())
     .execute(db)
     .await?;
     Ok(())

@@ -98,14 +98,14 @@ impl FromStr for Slug {
 pub async fn redirect(db: &PgPool, handle: &str, slug: &str) -> Result<Option<Slug>> {
     // One read on the pool: a page's lookup after its own found nothing,
     // part of no write.
-    let current: Option<String> = sqlx::query_scalar(
+    let current: Option<String> = sqlx::query_scalar!(
         "SELECT d.slug FROM slug_redirect sr
          JOIN account a ON a.id = sr.owner_id
          JOIN design d ON d.id = sr.design_id
          WHERE a.handle = $1 AND sr.slug = $2",
+        handle,
+        slug
     )
-    .bind(handle)
-    .bind(slug)
     .fetch_optional(db)
     .await?;
     Ok(current.map(Slug::from_row))
@@ -119,11 +119,13 @@ pub async fn redirect(db: &PgPool, handle: &str, slug: &str) -> Result<Option<Sl
 ///
 /// [`Error::Db`] when Postgres refuses.
 pub(crate) async fn release(tx: &mut PgConnection, owner: AccountId, slug: &Slug) -> Result<()> {
-    sqlx::query("DELETE FROM slug_redirect WHERE owner_id = $1 AND slug = $2")
-        .bind(owner)
-        .bind(slug.as_str())
-        .execute(tx)
-        .await?;
+    sqlx::query!(
+        "DELETE FROM slug_redirect WHERE owner_id = $1 AND slug = $2",
+        owner as AccountId,
+        slug.as_str()
+    )
+    .execute(tx)
+    .await?;
     Ok(())
 }
 
@@ -149,12 +151,14 @@ pub async fn change(
         return Ok(());
     }
     release(tx, owner, new).await?;
-    let moved = sqlx::query("UPDATE design SET slug = $3 WHERE id = $1 AND slug = $2")
-        .bind(design)
-        .bind(old.as_str())
-        .bind(new.as_str())
-        .execute(&mut *tx)
-        .await;
+    let moved = sqlx::query!(
+        "UPDATE design SET slug = $3 WHERE id = $1 AND slug = $2",
+        design as DesignId,
+        old.as_str(),
+        new.as_str()
+    )
+    .execute(&mut *tx)
+    .await;
     match moved {
         Ok(done) if done.rows_affected() == 1 => {}
         Ok(_) => {
@@ -172,13 +176,13 @@ pub async fn change(
     // The old slug cannot be a redirect already (a slug is a design's or
     // a redirect, never both, since every take of one releases it), so
     // the conflict arm is for a row the invariant should never leave.
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO slug_redirect (owner_id, slug, design_id) VALUES ($1, $2, $3)
          ON CONFLICT (owner_id, slug) DO UPDATE SET design_id = EXCLUDED.design_id",
+        owner as AccountId,
+        old.as_str(),
+        design as DesignId
     )
-    .bind(owner)
-    .bind(old.as_str())
-    .bind(design)
     .execute(tx)
     .await?;
     Ok(())

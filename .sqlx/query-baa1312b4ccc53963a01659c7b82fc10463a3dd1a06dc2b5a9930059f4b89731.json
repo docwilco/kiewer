@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO reserved_handle (handle, reserved_until)\n         VALUES ($1, now() + make_interval(days => $2))\n         ON CONFLICT (handle) DO UPDATE SET reserved_until = EXCLUDED.reserved_until",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "baa1312b4ccc53963a01659c7b82fc10463a3dd1a06dc2b5a9930059f4b89731"
+}

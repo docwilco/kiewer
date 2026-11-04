@@ -49,6 +49,7 @@ use sqlx::PgPool;
 use crate::blob::{BlobHash, BlobStore, blocking};
 use crate::error::{Error, Result};
 use crate::revision::{RevisionHash, TreeEntry};
+use crate::sql::statement;
 use crate::{collector, design};
 
 /// The render budget: how long the upload request waits for the
@@ -143,24 +144,8 @@ impl Thumbnail {
     }
 }
 
-/// When a `thumbnail t` row may be shown: neither of its PNGs is a
-/// blocked blob, nor is any file of its revision. Over the whole tree
-/// rather than the one file drawn, which the row does not record: a
-/// takedown shows the placeholder, and the file a thumbnail drew is
-/// among those. Every read of the row carries this, so the route and the
-/// pages agree; one probe of `blocked_blob` per entry, by primary key.
-pub const SHOWABLE: &str = "NOT EXISTS (
-        SELECT 1 FROM blocked_blob bb WHERE bb.hash IN (t.large_hash, t.small_hash)
-    )
-    AND NOT EXISTS (
-        SELECT 1 FROM revision r
-        JOIN tree_entry te ON te.tree_hash = r.tree_hash
-        JOIN blocked_blob bb ON bb.hash = te.blob_hash
-        WHERE r.hash = t.revision_hash
-    )";
-
 /// The thumbnail of `revision`, or `None` while it is not rendered or
-/// is not [`SHOWABLE`].
+/// may not be shown (the `SHOWABLE` fragment, `crate::sql`).
 ///
 /// # Errors
 ///
@@ -169,24 +154,27 @@ pub const SHOWABLE: &str = "NOT EXISTS (
 pub async fn of(db: &PgPool, revision: RevisionHash) -> Result<Option<Thumbnail>> {
     // One read on the pool: a page's or the thumbnail route's lookup,
     // part of no write; by primary key.
-    let row: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(&format!(
-        "SELECT t.large_hash, t.small_hash FROM thumbnail t
-         WHERE t.revision_hash = $1 AND {SHOWABLE}"
+    let row = statement!(query!(
+        [
+            "SELECT t.large_hash, t.small_hash FROM thumbnail t
+         WHERE t.revision_hash = $1 AND " SHOWABLE
+        ],
+        revision.as_bytes()
     ))
-    .bind(revision.as_bytes())
     .fetch_optional(db)
     .await?;
-    row.map(|(large, small)| {
+    row.map(|row| {
         Ok(Thumbnail {
-            large: BlobHash::from_bytes(&large)?,
-            small: BlobHash::from_bytes(&small)?,
+            large: BlobHash::from_bytes(&row.large_hash)?,
+            small: BlobHash::from_bytes(&row.small_hash)?,
         })
     })
     .transpose()
 }
 
-/// Which of `revisions` have a [`SHOWABLE`] thumbnail: what a listing
-/// page asks once for every row it shows.
+/// Which of `revisions` have a thumbnail that may be shown (the
+/// `SHOWABLE` fragment, `crate::sql`): what a listing page asks once for
+/// every row it shows.
 ///
 /// # Errors
 ///
@@ -199,11 +187,13 @@ pub async fn rendered(db: &PgPool, revisions: &[RevisionHash]) -> Result<HashSet
         .iter()
         .map(|hash| hash.as_bytes().to_vec())
         .collect();
-    let rows: Vec<Vec<u8>> = sqlx::query_scalar(&format!(
-        "SELECT t.revision_hash FROM thumbnail t
-         WHERE t.revision_hash = ANY($1) AND {SHOWABLE}"
+    let rows: Vec<Vec<u8>> = statement!(query_scalar!(
+        [
+            "SELECT t.revision_hash FROM thumbnail t
+         WHERE t.revision_hash = ANY($1) AND " SHOWABLE
+        ],
+        &hashes
     ))
-    .bind(&hashes)
     .fetch_all(db)
     .await?;
     rows.iter()
@@ -692,7 +682,7 @@ impl Thumbnails {
     /// the retry path does, and what [`Thumbnails::after_push`] does
     /// within the budget. Draws the revision's board (the one the design
     /// page shows), else its root sheet; a revision with neither, with
-    /// a blocked file ([`SHOWABLE`] would hide the result), or whose file
+    /// a blocked file (the `SHOWABLE` fragment would hide the result), or whose file
     /// has nothing on it gets none.
     ///
     /// # Errors
@@ -765,13 +755,13 @@ async fn store(
     // there (two retries racing) is left as it is.
     let large = collector::store(db, blobs, &pngs.large).await?.hash;
     let small = collector::store(db, blobs, &pngs.small).await?.hash;
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO thumbnail (revision_hash, large_hash, small_hash) VALUES ($1, $2, $3)
          ON CONFLICT (revision_hash) DO NOTHING",
+        revision.as_bytes(),
+        large.as_bytes(),
+        small.as_bytes()
     )
-    .bind(revision.as_bytes())
-    .bind(large.as_bytes())
-    .bind(small.as_bytes())
     .execute(db)
     .await?;
     Ok(())

@@ -52,6 +52,43 @@ jobs:
         with:
           run: ./scripts/checks.sh clippy
 
+  # The offline data in .sqlx/ that every other job's build compiles the
+  # query macros against (scripts/checks.sh exports SQLX_OFFLINE=true),
+  # checked against the statements and against the schema migrations/
+  # makes, on a scratch database beside the service's
+  # (scripts/sqlx-prepare.sh). Postgres as in the test job. sqlx-cli is
+  # installed at the version Cargo.lock names for the sqlx crate
+  # (scripts/sqlx-version.sh), inside the cached step, as the wasm job
+  # installs wasm-bindgen-cli; README, Development installs the same way.
+  # A program only the checks run, so the Dockerfile does not gain it.
+  sqlx:
+    name: Query cache
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: kiewer
+          POSTGRES_PASSWORD: kiewer
+          POSTGRES_DB: kiewer
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kiewer -d kiewer"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://kiewer:kiewer@127.0.0.1:5432/kiewer
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/cargo-cached
+        with:
+          run: |
+            cargo install sqlx-cli --version "$(scripts/sqlx-version.sh)" --locked --no-default-features --features postgres,rustls
+            ./scripts/checks.sh sqlx
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -344,7 +381,7 @@ jobs:
   release:
     name: Release
     # Every other job of this workflow: a job added above joins this list.
-    needs: [fmt, clippy, test, docs, wasm, msrv, release-build, image]
+    needs: [fmt, clippy, sqlx, test, docs, wasm, msrv, release-build, image]
     # The GCP variables as in the image job: until they exist nothing was
     # pushed, so there is nothing to name and no Release to record.
     if: github.event_name == 'push' && vars.GCP_PROJECT_ID != ''

@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT a.handle AS \"handle!\", d.slug, d.name,\n    to_char(b.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS \"updated_at!\",\n    encode(b.head_hash, 'hex') AS \"head!\",\n    EXISTS (\n        SELECT 1 FROM thumbnail t WHERE t.revision_hash = b.head_hash AND NOT EXISTS (\n        SELECT 1 FROM blocked_blob bb WHERE bb.hash IN (t.large_hash, t.small_hash)\n    )\n    AND NOT EXISTS (\n        SELECT 1 FROM revision r\n        JOIN tree_entry te ON te.tree_hash = r.tree_hash\n        JOIN blocked_blob bb ON bb.hash = te.blob_hash\n        WHERE r.hash = t.revision_hash\n    )\n    ) AS \"thumbnail!\"\n         FROM branch b\n         JOIN design d ON d.id = b.design_id AND d.default_branch = b.name\n         JOIN account a ON a.id = d.owner_id\n         WHERE d.visibility = 'public'\n         ORDER BY b.updated_at DESC, d.id DESC\n         LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "handle!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "updated_at!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "head!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "thumbnail!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "19b03aafda7a00a8e2d9c820fd04e4e2e8a0ae57fddcf79c31878430bd40c449"
+}

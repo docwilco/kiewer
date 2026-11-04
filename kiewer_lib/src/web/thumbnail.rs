@@ -46,7 +46,7 @@ fn not_found(what: &str) -> Response {
 /// `GET /{handle}/{slug}/r/{hash}/thumbnail/{file}`: the PNG of that
 /// size, or 404 for a segment that is none of those, a size nobody
 /// renders, a revision the design does not reach, or one with no
-/// thumbnail to show (`thumbnail::SHOWABLE`).
+/// thumbnail to show (the `SHOWABLE` fragment, `crate::sql`).
 async fn serve(
     State(state): State<AppState>,
     Path((handle, slug, hash, file)): Path<(String, String, String, String)>,

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE account SET handle = $2 WHERE id = $1 AND handle IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4122ee989c23147dcd73870fd1c13a688b94f1d1d7c1ba5b948968f4803b646e"
+}

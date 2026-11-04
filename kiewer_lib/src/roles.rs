@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgPool};
 
 use crate::account::{AccountId, Handle};
-use crate::design::{self, Design, DesignId};
+use crate::design::{Design, DesignId, design_row};
 use crate::error::{Error, Result};
+use crate::sql::statement;
 
 /// What a person may do on a design, in rising order: a collaborator
 /// pushes revisions and manages their own branches; an admin does that
@@ -126,14 +127,14 @@ pub async fn role_of<'c>(
     // One read: the design by its key, its role row for this account by
     // the primary key. Part of a write's transaction when the caller's
     // connection is one.
-    let row: Option<Option<String>> = sqlx::query_scalar(
-        "SELECT CASE WHEN d.owner_id = $2 THEN 'owner' ELSE r.role END
+    let row: Option<Option<String>> = sqlx::query_scalar!(
+        r#"SELECT CASE WHEN d.owner_id = $2 THEN 'owner' ELSE r.role END AS "role?"
          FROM design d
          LEFT JOIN design_role r ON r.design_id = d.id AND r.account_id = $2
-         WHERE d.id = $1",
+         WHERE d.id = $1"#,
+        design as DesignId,
+        account as AccountId
     )
-    .bind(design)
-    .bind(account)
     .fetch_optional(db)
     .await?;
     row.flatten().as_deref().map(str::parse).transpose()
@@ -189,35 +190,38 @@ pub async fn designs_of(db: &PgPool, account: AccountId) -> Result<Vec<Membershi
     // One read on the pool: a form's listing, part of no write. Two index
     // probes (design by owner, design_role by account) joined, not one
     // OR across both, which would scan design.
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        #[sqlx(flatten)]
-        design: design::DesignRow,
-        handle: String,
-        role: String,
-    }
-    let rows: Vec<Row> = sqlx::query_as(&format!(
-        "SELECT {columns}, a.handle, 'owner' AS role, d.created_at
+    //
+    // The creation time is selected as fixed-width UTC text, which sorts
+    // as the time does: the crate decodes no timestamps. The ordering
+    // names the id by position, since the column's name carries its type
+    // (`crate::sql`).
+    let rows = statement!(query!(
+        [
+            "SELECT " DESIGN_COLUMNS r#", a.handle AS "handle!", 'owner' AS "role!",
+                to_char(d.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') AS created_at
          FROM design d JOIN account a ON a.id = d.owner_id
          WHERE d.owner_id = $1
          UNION ALL
-         SELECT {columns}, a.handle, r.role, d.created_at
+         SELECT "# DESIGN_COLUMNS r#", a.handle, r.role,
+                to_char(d.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US')
          FROM design_role r
          JOIN design d ON d.id = r.design_id
          JOIN account a ON a.id = d.owner_id
          WHERE r.account_id = $1
-         ORDER BY created_at DESC, id DESC",
-        columns = design::DESIGN_COLUMNS
+         ORDER BY created_at DESC, 1 DESC"#
+        ],
+        account as AccountId
     ))
-    .bind(account)
     .fetch_all(db)
     .await?;
     rows.into_iter()
         .map(|row| {
+            let owner = Handle::from_row(row.handle);
+            let role = row.role.parse()?;
             Ok(Membership {
-                design: row.design.try_into()?,
-                owner: Handle::from_row(row.handle),
-                role: row.role.parse()?,
+                design: design_row!(row).try_into()?,
+                owner,
+                role,
             })
         })
         .collect()
@@ -255,25 +259,26 @@ pub struct Person {
 /// that grant a role forbid.
 pub async fn people(db: &PgPool, design: DesignId) -> Result<Vec<Person>> {
     // One read on the pool: a page's listing, part of no write.
-    let rows: Vec<(AccountId, Option<String>, String)> = sqlx::query_as(
-        "SELECT a.id, a.handle, 'owner'
+    let rows = sqlx::query!(
+        r#"SELECT a.id AS "account_id!: AccountId", a.handle AS "handle?", 'owner' AS "role!"
          FROM design d JOIN account a ON a.id = d.owner_id WHERE d.id = $1
          UNION ALL
          SELECT a.id, a.handle, r.role
-         FROM design_role r JOIN account a ON a.id = r.account_id WHERE r.design_id = $1",
+         FROM design_role r JOIN account a ON a.id = r.account_id WHERE r.design_id = $1"#,
+        design as DesignId
     )
-    .bind(design)
     .fetch_all(db)
     .await?;
     let mut people = rows
         .into_iter()
-        .map(|(account_id, handle, role)| {
-            let handle = handle
+        .map(|row| {
+            let handle = row
+                .handle
                 .ok_or_else(|| Error::Malformed("an account without a handle has a role".into()))?;
             Ok(Person {
-                account_id,
+                account_id: row.account_id,
                 handle: Handle::from_row(handle),
-                role: role.parse()?,
+                role: row.role.parse()?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -307,16 +312,16 @@ pub async fn set_role(
     // FOR SHARE on the design row: a transfer in flight holds it, so this
     // waits and then sees the new owner, rather than giving the owner a
     // row beside the column.
-    let written = sqlx::query(
+    let written = sqlx::query!(
         "INSERT INTO design_role (design_id, account_id, role)
          SELECT d.id, a.id, $3 FROM design d, account a
          WHERE d.id = $1 AND a.handle = $2 AND d.owner_id <> a.id
          FOR SHARE OF d
          ON CONFLICT (design_id, account_id) DO UPDATE SET role = EXCLUDED.role",
+        design as DesignId,
+        handle.as_str(),
+        role.as_str()
     )
-    .bind(design)
-    .bind(handle.as_str())
-    .bind(role.as_str())
     .execute(db)
     .await?
     .rows_affected();
@@ -335,12 +340,12 @@ pub async fn set_role(
 pub async fn remove_role(db: &PgPool, design: DesignId, handle: &Handle) -> Result<Changed> {
     // One statement: the removal is the whole outcome; the read after
     // only names why nothing went.
-    let removed = sqlx::query(
+    let removed = sqlx::query!(
         "DELETE FROM design_role r USING account a
          WHERE r.design_id = $1 AND r.account_id = a.id AND a.handle = $2",
+        design as DesignId,
+        handle.as_str()
     )
-    .bind(design)
-    .bind(handle.as_str())
     .execute(db)
     .await?
     .rows_affected();
@@ -357,11 +362,11 @@ pub async fn remove_role(db: &PgPool, design: DesignId, handle: &Handle) -> Resu
 /// Why a change to `handle` on `design` wrote nothing: no such account,
 /// or it is the owner. `Done` when neither, which a race can leave.
 async fn why_not(db: &PgPool, design: DesignId, handle: &Handle) -> Result<Changed> {
-    let is_owner: Option<bool> = sqlx::query_scalar(
-        "SELECT d.owner_id = a.id FROM account a, design d WHERE a.handle = $2 AND d.id = $1",
+    let is_owner: Option<bool> = sqlx::query_scalar!(
+        r#"SELECT d.owner_id = a.id AS "is_owner!" FROM account a, design d WHERE a.handle = $2 AND d.id = $1"#,
+        design as DesignId,
+        handle.as_str()
     )
-    .bind(design)
-    .bind(handle.as_str())
     .fetch_optional(db)
     .await?;
     Ok(match is_owner {
@@ -385,18 +390,18 @@ pub async fn transfer(db: &PgPool, design: DesignId, handle: &Handle) -> Result<
     // 16 has no RETURNING OLD). The unique (owner_id, slug) refuses a slug
     // the new owner has.
     let mut tx = db.begin().await?;
-    let moved: std::result::Result<Option<(AccountId, AccountId)>, sqlx::Error> = sqlx::query_as(
-        "UPDATE design d SET owner_id = a.id
+    let moved = sqlx::query!(
+        r#"UPDATE design d SET owner_id = a.id
          FROM design old, account a
          WHERE old.id = d.id AND d.id = $1 AND a.handle = $2 AND d.owner_id <> a.id
-         RETURNING old.owner_id, a.id",
+         RETURNING old.owner_id AS "previous: AccountId", a.id AS "new: AccountId""#,
+        design as DesignId,
+        handle.as_str()
     )
-    .bind(design)
-    .bind(handle.as_str())
     .fetch_optional(&mut *tx)
     .await;
     let (previous, new) = match moved {
-        Ok(Some(pair)) => pair,
+        Ok(Some(row)) => (row.previous, row.new),
         Ok(None) => {
             drop(tx);
             return why_not(db, design, handle).await;
@@ -406,17 +411,19 @@ pub async fn transfer(db: &PgPool, design: DesignId, handle: &Handle) -> Result<
         }
         Err(error) => return Err(error.into()),
     };
-    sqlx::query("DELETE FROM design_role WHERE design_id = $1 AND account_id = $2")
-        .bind(design)
-        .bind(new)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
+    sqlx::query!(
+        "DELETE FROM design_role WHERE design_id = $1 AND account_id = $2",
+        design as DesignId,
+        new as AccountId
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
         "INSERT INTO design_role (design_id, account_id, role) VALUES ($1, $2, 'admin')
          ON CONFLICT (design_id, account_id) DO UPDATE SET role = 'admin'",
+        design as DesignId,
+        previous as AccountId
     )
-    .bind(design)
-    .bind(previous)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -430,11 +437,13 @@ pub async fn transfer(db: &PgPool, design: DesignId, handle: &Handle) -> Result<
 /// [`Error::Db`] when Postgres refuses.
 pub async fn set_visibility(db: &PgPool, design: DesignId, visibility: Visibility) -> Result<()> {
     // One statement on the pool: the change is the whole outcome.
-    sqlx::query("UPDATE design SET visibility = $2 WHERE id = $1")
-        .bind(design)
-        .bind(visibility.as_str())
-        .execute(db)
-        .await?;
+    sqlx::query!(
+        "UPDATE design SET visibility = $2 WHERE id = $1",
+        design as DesignId,
+        visibility.as_str()
+    )
+    .execute(db)
+    .await?;
     Ok(())
 }
 

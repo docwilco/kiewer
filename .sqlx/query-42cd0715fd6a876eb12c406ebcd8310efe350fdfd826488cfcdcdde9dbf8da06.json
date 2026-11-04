@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO design (owner_id, slug, name) VALUES ($1, $2, $3) RETURNING id AS \"id: DesignId\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id: DesignId",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "42cd0715fd6a876eb12c406ebcd8310efe350fdfd826488cfcdcdde9dbf8da06"
+}

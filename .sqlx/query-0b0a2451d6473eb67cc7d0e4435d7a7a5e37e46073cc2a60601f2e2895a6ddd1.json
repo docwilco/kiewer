@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH gone AS (\n             DELETE FROM blob b\n             WHERE b.claimed_at <= now() - make_interval(hours => $1)\n               AND NOT EXISTS (SELECT 1 FROM tree_entry te WHERE te.blob_hash = b.hash)\n               AND NOT EXISTS (\n                   SELECT 1 FROM thumbnail t WHERE b.hash IN (t.large_hash, t.small_hash)\n               )\n             RETURNING b.hash\n         )\n         INSERT INTO blob_removal (hash) SELECT hash FROM gone\n         ON CONFLICT (hash) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0b0a2451d6473eb67cc7d0e4435d7a7a5e37e46073cc2a60601f2e2895a6ddd1"
+}

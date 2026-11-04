@@ -186,36 +186,39 @@ pub async fn sign_in(db: &PgPool, provider: Provider, user: &ProviderUser) -> Re
     // conflict path locks the identity's row, so two first sign-ins of one
     // person serialise and the second finds the first's account.
     let mut tx = db.begin().await?;
-    let fresh: AccountId = sqlx::query_scalar("INSERT INTO account DEFAULT VALUES RETURNING id")
-        .fetch_one(&mut *tx)
-        .await?;
-    let account_id: AccountId = sqlx::query_scalar(
-        "INSERT INTO identity (provider, provider_user_id, account_id, provider_login, email)
+    let fresh: AccountId = sqlx::query_scalar!(
+        r#"INSERT INTO account DEFAULT VALUES RETURNING id AS "id: AccountId""#
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let account_id: AccountId = sqlx::query_scalar!(
+        r#"INSERT INTO identity (provider, provider_user_id, account_id, provider_login, email)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (provider, provider_user_id)
          DO UPDATE SET provider_login = EXCLUDED.provider_login, email = EXCLUDED.email
-         RETURNING account_id",
+         RETURNING account_id AS "account_id: AccountId""#,
+        provider.as_str(),
+        &user.id,
+        fresh as AccountId,
+        &user.login,
+        user.email.as_deref()
     )
-    .bind(provider.as_str())
-    .bind(&user.id)
-    .bind(fresh)
-    .bind(&user.login)
-    .bind(&user.email)
     .fetch_one(&mut *tx)
     .await?;
     let is_new = account_id == fresh;
     let handle = if is_new {
         None
     } else {
-        sqlx::query("DELETE FROM account WHERE id = $1")
-            .bind(fresh)
+        sqlx::query!("DELETE FROM account WHERE id = $1", fresh as AccountId)
             .execute(&mut *tx)
             .await?;
-        sqlx::query_scalar::<_, Option<String>>("SELECT handle FROM account WHERE id = $1")
-            .bind(account_id)
-            .fetch_one(&mut *tx)
-            .await?
-            .map(Handle::from_row)
+        sqlx::query_scalar!(
+            "SELECT handle FROM account WHERE id = $1",
+            account_id as AccountId
+        )
+        .fetch_one(&mut *tx)
+        .await?
+        .map(Handle::from_row)
     };
     tx.commit().await?;
     Ok(SignedIn {
@@ -255,24 +258,24 @@ pub async fn link(
     // condition. The conflict arm updates only a row that is already this
     // account's, so another account's row is untouched and the statement
     // returns nothing; xmax tells an insert from an update.
-    let row: Option<(bool,)> = sqlx::query_as(
-        "INSERT INTO identity (provider, provider_user_id, account_id, provider_login, email)
+    let inserted: Option<bool> = sqlx::query_scalar!(
+        r#"INSERT INTO identity (provider, provider_user_id, account_id, provider_login, email)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (provider, provider_user_id)
          DO UPDATE SET provider_login = EXCLUDED.provider_login, email = EXCLUDED.email
          WHERE identity.account_id = EXCLUDED.account_id
-         RETURNING (xmax = 0) AS inserted",
+         RETURNING (xmax = 0) AS "inserted!""#,
+        provider.as_str(),
+        &user.id,
+        account as AccountId,
+        &user.login,
+        user.email.as_deref()
     )
-    .bind(provider.as_str())
-    .bind(&user.id)
-    .bind(account)
-    .bind(&user.login)
-    .bind(&user.email)
     .fetch_optional(db)
     .await?;
-    Ok(match row {
-        Some((true,)) => Linked::Added,
-        Some((false,)) => Linked::Already,
+    Ok(match inserted {
+        Some(true) => Linked::Added,
+        Some(false) => Linked::Already,
         None => Linked::ToAnotherAccount,
     })
 }
@@ -295,19 +298,19 @@ pub struct Identity {
 /// names a provider the code no longer knows.
 pub async fn identities(db: &PgPool, account: AccountId) -> Result<Vec<Identity>> {
     // One read on the pool: a page's listing, part of no write.
-    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+    let rows = sqlx::query!(
         "SELECT provider, provider_login, email FROM identity
          WHERE account_id = $1 ORDER BY created_at, provider",
+        account as AccountId
     )
-    .bind(account)
     .fetch_all(db)
     .await?;
     rows.into_iter()
-        .map(|(provider, login, email)| {
+        .map(|row| {
             Ok(Identity {
-                provider: provider.parse()?,
-                login,
-                email,
+                provider: row.provider.parse()?,
+                login: row.provider_login,
+                email: row.email,
             })
         })
         .collect()
@@ -321,11 +324,11 @@ pub async fn identities(db: &PgPool, account: AccountId) -> Result<Vec<Identity>
 ///
 /// [`Error::Db`] when Postgres refuses.
 pub async fn suggested_handle(db: &PgPool, account: AccountId) -> Result<Option<Handle>> {
-    let login: Option<String> = sqlx::query_scalar(
+    let login: Option<String> = sqlx::query_scalar!(
         "SELECT provider_login FROM identity WHERE account_id = $1
          ORDER BY created_at DESC LIMIT 1",
+        account as AccountId
     )
-    .bind(account)
     .fetch_optional(db)
     .await?;
     Ok(login.as_deref().and_then(Handle::suggest))
@@ -344,13 +347,13 @@ pub const RESERVED_DAYS: i32 = 90;
 ///
 /// [`Error::Db`] when Postgres refuses.
 pub(crate) async fn reserve(tx: &mut PgConnection, handle: &Handle) -> Result<()> {
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO reserved_handle (handle, reserved_until)
          VALUES ($1, now() + make_interval(days => $2))
          ON CONFLICT (handle) DO UPDATE SET reserved_until = EXCLUDED.reserved_until",
+        handle.as_str(),
+        RESERVED_DAYS
     )
-    .bind(handle.as_str())
-    .bind(RESERVED_DAYS)
     .execute(tx)
     .await?;
     Ok(())
@@ -374,11 +377,13 @@ pub async fn choose_handle(db: &PgPool, account: AccountId, handle: &Handle) -> 
     // and only a read that starts after that wait sees the reservation
     // that delete committed. Refused, the transaction rolls back.
     let mut tx = db.begin().await?;
-    let result = sqlx::query("UPDATE account SET handle = $2 WHERE id = $1 AND handle IS NULL")
-        .bind(account)
-        .bind(handle.as_str())
-        .execute(&mut *tx)
-        .await;
+    let result = sqlx::query!(
+        "UPDATE account SET handle = $2 WHERE id = $1 AND handle IS NULL",
+        account as AccountId,
+        handle.as_str()
+    )
+    .execute(&mut *tx)
+    .await;
     match result {
         Ok(done) if done.rows_affected() == 1 => {}
         Ok(_) => {
@@ -391,12 +396,12 @@ pub async fn choose_handle(db: &PgPool, account: AccountId, handle: &Handle) -> 
         }
         Err(error) => return Err(error.into()),
     }
-    let reserved: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
+    let reserved: bool = sqlx::query_scalar!(
+        r#"SELECT EXISTS (
              SELECT 1 FROM reserved_handle WHERE handle = $1 AND reserved_until > now()
-         )",
+         ) AS "reserved!""#,
+        handle.as_str()
     )
-    .bind(handle.as_str())
     .fetch_one(&mut *tx)
     .await?;
     if reserved {

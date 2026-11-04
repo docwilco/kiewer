@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH expired AS (\n             DELETE FROM upload_refusal\n             WHERE account_id = $1 AND refused_at <= now() - make_interval(secs => $2)\n         )\n         INSERT INTO upload_refusal (account_id) VALUES ($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8c481e9655d147fe20627b97f67eebdda9fc4011ef9f475957525e7e18021f2e"
+}

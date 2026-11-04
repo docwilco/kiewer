@@ -123,18 +123,21 @@ pub async fn start(db: &PgPool, account: AccountId) -> Result<SessionId> {
     // Not in the insert's transaction: the sweep of the account's dead
     // rows is independent of the new session and idempotent, and a crash
     // between the two leaves nothing a later sign-in does not finish.
-    sqlx::query("DELETE FROM session WHERE account_id = $1 AND expires_at <= now()")
-        .bind(account)
-        .execute(db)
-        .await?;
+    sqlx::query!(
+        "DELETE FROM session WHERE account_id = $1 AND expires_at <= now()",
+        account as AccountId
+    )
+    .execute(db)
+    .await?;
     let id = SessionId::random();
-    sqlx::query(
+    let key = id.key();
+    sqlx::query!(
         "INSERT INTO session (id_hash, account_id, expires_at)
          VALUES ($1, $2, now() + make_interval(days => $3))",
+        key.as_bytes(),
+        account as AccountId,
+        LIFETIME_DAYS
     )
-    .bind(id.key().as_bytes())
-    .bind(account)
-    .bind(LIFETIME_DAYS)
     .execute(db)
     .await?;
     Ok(id)
@@ -154,36 +157,40 @@ pub async fn find(db: &PgPool, id: &SessionId) -> Result<Option<Session>> {
     // row. The self-join on `old` is how an UPDATE's RETURNING sees the
     // value before the SET (Postgres 16 has no RETURNING OLD), which says
     // whether the expiry moved and so whether the cookie is set again.
-    let row: Option<(AccountId, Option<String>, bool)> = sqlx::query_as(
-        "WITH touched AS (
+    // `$2 - $3` names its operands' type: Postgres plans the statement
+    // before any value is bound, and `unknown - unknown` has no one
+    // operator.
+    let key = id.key();
+    let row = sqlx::query!(
+        r#"WITH touched AS (
              UPDATE session s
              SET expires_at = CASE
-                     WHEN s.expires_at < now() + make_interval(days => $2 - $3)
+                     WHEN s.expires_at < now() + make_interval(days => $2::integer - $3::integer)
                      THEN now() + make_interval(days => $2)
                      ELSE s.expires_at END,
                  last_seen_at = now()
              FROM session old
              WHERE old.id_hash = s.id_hash
                AND s.id_hash = $1 AND s.expires_at > now()
-               AND (s.expires_at < now() + make_interval(days => $2 - $3)
+               AND (s.expires_at < now() + make_interval(days => $2::integer - $3::integer)
                     OR s.last_seen_at < now() - make_interval(mins => $4))
-             RETURNING (old.expires_at < now() + make_interval(days => $2 - $3)) AS refreshed
+             RETURNING (old.expires_at < now() + make_interval(days => $2::integer - $3::integer)) AS refreshed
          )
-         SELECT s.account_id, a.handle,
-                COALESCE((SELECT refreshed FROM touched), false)
+         SELECT s.account_id AS "account_id: AccountId", a.handle,
+                COALESCE((SELECT refreshed FROM touched), false) AS "refreshed!"
          FROM session s JOIN account a ON a.id = s.account_id
-         WHERE s.id_hash = $1 AND s.expires_at > now()",
+         WHERE s.id_hash = $1 AND s.expires_at > now()"#,
+        key.as_bytes(),
+        LIFETIME_DAYS,
+        REFRESH_AFTER_DAYS,
+        SEEN_EVERY_MINUTES
     )
-    .bind(id.key().as_bytes())
-    .bind(LIFETIME_DAYS)
-    .bind(REFRESH_AFTER_DAYS)
-    .bind(SEEN_EVERY_MINUTES)
     .fetch_optional(db)
     .await?;
-    Ok(row.map(|(account_id, handle, refreshed)| Session {
-        account_id,
-        handle: handle.map(Handle::from_row),
-        refreshed,
+    Ok(row.map(|row| Session {
+        account_id: row.account_id,
+        handle: row.handle.map(Handle::from_row),
+        refreshed: row.refreshed,
     }))
 }
 
@@ -194,8 +201,8 @@ pub async fn find(db: &PgPool, id: &SessionId) -> Result<Option<Session>> {
 ///
 /// [`Error::Db`] when Postgres refuses.
 pub async fn end(db: &PgPool, id: &SessionId) -> Result<()> {
-    sqlx::query("DELETE FROM session WHERE id_hash = $1")
-        .bind(id.key().as_bytes())
+    let key = id.key();
+    sqlx::query!("DELETE FROM session WHERE id_hash = $1", key.as_bytes())
         .execute(db)
         .await?;
     Ok(())
@@ -229,28 +236,29 @@ pub async fn list(
     // are formatted here, UTC and ISO 8601 to the second, so the code
     // carries no time library; a literal statement, so a plan check can
     // read it.
-    let rows: Vec<(Vec<u8>, String, String)> = sqlx::query_as(
+    let rows = sqlx::query!(
         r#"SELECT id_hash,
-                  to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-                  to_char(last_seen_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+                  to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "created_at!",
+                  to_char(last_seen_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "last_seen_at!"
            FROM session
            WHERE account_id = $1 AND expires_at > now()
            ORDER BY last_seen_at DESC, created_at DESC"#,
+        account as AccountId
     )
-    .bind(account)
     .fetch_all(db)
     .await?;
     let current = current.key();
     rows.into_iter()
-        .map(|(hash, created_at, last_seen_at)| {
+        .map(|row| {
             let key = SessionKey(
-                hash.try_into()
+                row.id_hash
+                    .try_into()
                     .map_err(|_| Error::Malformed("a session hash is not 32 bytes".to_owned()))?,
             );
             Ok(ListedSession {
                 key,
-                created_at,
-                last_seen_at,
+                created_at: row.created_at,
+                last_seen_at: row.last_seen_at,
                 current: key == current,
             })
         })
@@ -265,11 +273,13 @@ pub async fn list(
 /// [`Error::Db`] when Postgres refuses.
 pub async fn revoke(db: &PgPool, account: AccountId, key: &SessionKey) -> Result<()> {
     // One statement on the pool: the revoke is the whole outcome.
-    sqlx::query("DELETE FROM session WHERE id_hash = $1 AND account_id = $2")
-        .bind(key.as_bytes())
-        .bind(account)
-        .execute(db)
-        .await?;
+    sqlx::query!(
+        "DELETE FROM session WHERE id_hash = $1 AND account_id = $2",
+        key.as_bytes(),
+        account as AccountId
+    )
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -280,11 +290,14 @@ pub async fn revoke(db: &PgPool, account: AccountId, key: &SessionKey) -> Result
 /// [`Error::Db`] when Postgres refuses.
 pub async fn revoke_others(db: &PgPool, account: AccountId, current: &SessionId) -> Result<()> {
     // One statement on the pool: the revoke is the whole outcome.
-    sqlx::query("DELETE FROM session WHERE account_id = $1 AND id_hash <> $2")
-        .bind(account)
-        .bind(current.key().as_bytes())
-        .execute(db)
-        .await?;
+    let current = current.key();
+    sqlx::query!(
+        "DELETE FROM session WHERE account_id = $1 AND id_hash <> $2",
+        account as AccountId,
+        current.as_bytes()
+    )
+    .execute(db)
+    .await?;
     Ok(())
 }
 

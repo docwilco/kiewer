@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH RECURSIVE kept (hash) AS (\n             SELECT head_hash FROM branch\n             UNION\n             SELECT hash FROM revision WHERE created_at > now() - make_interval(hours => $1)\n             UNION\n             SELECT r.parent_hash FROM kept k\n             JOIN revision r ON r.hash = k.hash\n             WHERE r.parent_hash IS NOT NULL\n         ),\n         doomed AS (\n             SELECT r.hash FROM revision r\n             WHERE NOT EXISTS (SELECT 1 FROM kept k WHERE k.hash = r.hash)\n         ),\n         unlisted AS (\n             DELETE FROM design_revision dr USING doomed d WHERE dr.revision_hash = d.hash\n         )\n         DELETE FROM revision r USING doomed d WHERE r.hash = d.hash",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0cd42dc3542042b98cc35eb2483f6e4db2a2f1ce6a4997b0927bf66f71133eb2"
+}

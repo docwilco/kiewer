@@ -24,6 +24,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export KIEWER_BUILD="${KIEWER_BUILD:-$(git rev-parse --short HEAD)}"
+# The query macros compile against the offline data committed in .sqlx/,
+# so the build needs no database, and a DATABASE_URL in the shell or in a
+# .env (which the macros look for here and in every directory above)
+# changes nothing: the image's binary is checked against the schema
+# migrations/ makes, as the sqlx stage of scripts/checks.sh proves the
+# data is.
+export SQLX_OFFLINE=true
 
 echo "release-build: KIEWER_BUILD=$KIEWER_BUILD"
 scripts/build-viewer.sh release

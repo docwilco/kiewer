@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.id AS \"id!: crate::design::DesignId\",\n    d.owner_id AS \"owner_id!: crate::account::AccountId\",\n    d.slug AS \"slug!\", d.name AS \"name!\", d.default_branch AS \"default_branch!\",\n    d.visibility AS \"visibility!\", a.handle AS \"handle!\"\n         FROM design d JOIN account a ON a.id = d.owner_id\n         WHERE a.handle = $1 AND d.slug = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: crate::design::DesignId",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "owner_id!: crate::account::AccountId",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "slug!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "default_branch!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "visibility!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "handle!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "a901c62a4d3f361d6464912217efb15b03d42e960a155a26e6eee334e9f3045c"
+}

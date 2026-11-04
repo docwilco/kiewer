@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE design d SET owner_id = a.id\n         FROM design old, account a\n         WHERE old.id = d.id AND d.id = $1 AND a.handle = $2 AND d.owner_id <> a.id\n         RETURNING old.owner_id AS \"previous: AccountId\", a.id AS \"new: AccountId\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "previous: AccountId",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "new: AccountId",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "370e645d929eb26fd35017efcef026d8a09968b25bc3fc569f28d8bb9fddc589"
+}

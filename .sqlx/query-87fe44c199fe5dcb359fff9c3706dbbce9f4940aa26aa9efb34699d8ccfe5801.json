@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO blob (hash, size) VALUES ($1, $2) ON CONFLICT (hash) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "87fe44c199fe5dcb359fff9c3706dbbce9f4940aa26aa9efb34699d8ccfe5801"
+}

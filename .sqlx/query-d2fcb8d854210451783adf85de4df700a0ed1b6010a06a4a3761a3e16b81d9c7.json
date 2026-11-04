@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO branch (design_id, name, head_hash, updated_at)\n         SELECT $2, b.name, b.head_hash, b.updated_at FROM branch b\n         WHERE b.design_id = $1 AND b.name = ANY($3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d2fcb8d854210451783adf85de4df700a0ed1b6010a06a4a3761a3e16b81d9c7"
+}

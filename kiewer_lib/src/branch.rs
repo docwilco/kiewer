@@ -25,11 +25,12 @@ use serde::Serialize;
 use sqlx::{PgConnection, PgPool};
 
 use crate::account::AccountId;
-use crate::design::{self, BranchName, CHAIN, DesignId, Lock};
+use crate::design::{self, BranchName, DesignId, Lock};
 use crate::error::{Error, Refusal, Result};
 use crate::pending;
 use crate::revision::RevisionHash;
 use crate::roles::{self, Role};
+use crate::sql::statement;
 
 /// One branch as the branches page lists it: head, ordinal, age, author.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,29 +88,24 @@ impl Allowed {
 /// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
 /// holds a hash that is not 32 bytes, which the schema forbids.
 pub async fn list(db: &PgPool, design: DesignId) -> Result<Vec<Listed>> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        name: String,
-        head_hash: Vec<u8>,
-        length: i64,
-        pushed_at: String,
-        author_handle: String,
-        created_by: Option<AccountId>,
-    }
-    // One walk over the design's chains, whose cost is their length
-    // (`design::CHAIN`); the heads join revision by its key.
-    let rows: Vec<Row> = sqlx::query_as(&format!(
-        r#"WITH RECURSIVE {CHAIN}
-         SELECT b.name, b.head_hash, l.length, r.author_handle, b.created_by,
-                to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS pushed_at
+    // One walk over the design's chains, whose cost is their length (the
+    // `CHAIN` fragment, `crate::sql`); the heads join revision by its key.
+    let rows = statement!(query!(
+        [
+            "WITH RECURSIVE " CHAIN
+            r#"
+         SELECT b.name, b.head_hash, l.length AS "length!", r.author_handle,
+                b.created_by AS "created_by: AccountId",
+                to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "pushed_at!"
          FROM branch b
          JOIN revision r ON r.hash = b.head_hash
          JOIN (SELECT name, count(*) AS length FROM chain GROUP BY name) l ON l.name = b.name
          WHERE b.design_id = $1
          ORDER BY b.name"#
+        ],
+        design as DesignId,
+        None::<&str>
     ))
-    .bind(design)
-    .bind(None::<&str>)
     .fetch_all(db)
     .await?;
     rows.into_iter()
@@ -150,11 +146,12 @@ async fn find(
         .await?
         .ok_or_else(no_branch)?;
     let role = roles::require(&mut *tx, design.id, account, Role::Collaborator).await?;
-    let creator: Option<Option<AccountId>> = sqlx::query_scalar(
-        "SELECT created_by FROM branch WHERE design_id = $1 AND name = $2 FOR UPDATE",
+    let creator: Option<Option<AccountId>> = sqlx::query_scalar!(
+        r#"SELECT created_by AS "created_by: AccountId" FROM branch
+         WHERE design_id = $1 AND name = $2 FOR UPDATE"#,
+        design.id as DesignId,
+        name.as_str()
     )
-    .bind(design.id)
-    .bind(name.as_str())
     .fetch_optional(&mut *tx)
     .await?;
     let creator = creator.ok_or_else(no_branch)?;
@@ -198,12 +195,14 @@ pub async fn rename(
     if from == to {
         return Ok(());
     }
-    let renamed = sqlx::query("UPDATE branch SET name = $3 WHERE design_id = $1 AND name = $2")
-        .bind(design)
-        .bind(from.as_str())
-        .bind(to.as_str())
-        .execute(&mut *tx)
-        .await;
+    let renamed = sqlx::query!(
+        "UPDATE branch SET name = $3 WHERE design_id = $1 AND name = $2",
+        design as DesignId,
+        from.as_str(),
+        to.as_str()
+    )
+    .execute(&mut *tx)
+    .await;
     match renamed {
         Ok(_) => {}
         Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
@@ -223,11 +222,13 @@ pub async fn rename(
 
 /// `design`'s row says `name` is its default branch.
 async fn write_default(tx: &mut PgConnection, design: DesignId, name: &BranchName) -> Result<()> {
-    sqlx::query("UPDATE design SET default_branch = $2 WHERE id = $1")
-        .bind(design)
-        .bind(name.as_str())
-        .execute(tx)
-        .await?;
+    sqlx::query!(
+        "UPDATE design SET default_branch = $2 WHERE id = $1",
+        design as DesignId,
+        name.as_str()
+    )
+    .execute(tx)
+    .await?;
     Ok(())
 }
 
@@ -261,21 +262,25 @@ pub async fn delete(
         return Err(forbidden());
     }
     pending::spend(&mut tx, design, name).await?;
-    sqlx::query("DELETE FROM branch WHERE design_id = $1 AND name = $2")
-        .bind(design)
-        .bind(name.as_str())
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query!(
+        "DELETE FROM branch WHERE design_id = $1 AND name = $2",
+        design as DesignId,
+        name.as_str()
+    )
+    .execute(&mut *tx)
+    .await?;
     // Bounded by the design's own index rows and its chains: the primary
-    // key's prefix, and `design::CHAIN`'s walk.
-    sqlx::query(&format!(
-        "WITH RECURSIVE {CHAIN}
+    // key's prefix, and the `CHAIN` fragment's walk (`crate::sql`).
+    statement!(query!(
+        [
+            "WITH RECURSIVE " CHAIN "
          DELETE FROM design_revision dr
          WHERE dr.design_id = $1
            AND NOT EXISTS (SELECT 1 FROM chain c WHERE c.hash = dr.revision_hash)"
+        ],
+        design as DesignId,
+        None::<&str>
     ))
-    .bind(design)
-    .bind(None::<&str>)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -332,15 +337,15 @@ pub async fn create_at(
         }
         .into());
     }
-    let made = sqlx::query(
+    let made = sqlx::query!(
         "INSERT INTO branch (design_id, name, head_hash, created_by, updated_at)
          SELECT $1, $2, r.hash, $4, r.created_at FROM revision r WHERE r.hash = $3
          ON CONFLICT (design_id, name) DO NOTHING",
+        design as DesignId,
+        name.as_str(),
+        at.as_bytes(),
+        account as AccountId
     )
-    .bind(design)
-    .bind(name.as_str())
-    .bind(at.as_bytes())
-    .bind(account)
     .execute(&mut *tx)
     .await?
     .rows_affected();

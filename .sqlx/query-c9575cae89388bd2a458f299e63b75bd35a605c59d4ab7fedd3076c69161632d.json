@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH reachable AS (\n             SELECT DISTINCT te.blob_hash\n             FROM design d\n             JOIN design_revision dr ON dr.design_id = d.id\n             JOIN revision r ON r.hash = dr.revision_hash\n             JOIN tree_entry te ON te.tree_hash = r.tree_hash\n             WHERE d.owner_id = $1\n         ),\n         used AS (\n             SELECT COALESCE(SUM(b.size), 0)::bigint AS bytes\n             FROM reachable x JOIN blob b ON b.hash = x.blob_hash\n         ),\n         added AS (\n             SELECT COALESCE(SUM(b.size), 0)::bigint AS bytes\n             FROM blob b\n             WHERE b.hash = ANY($2)\n               AND NOT EXISTS (SELECT 1 FROM reachable x WHERE x.blob_hash = b.hash)\n         )\n         SELECT used.bytes AS \"used!\", added.bytes AS \"added!\" FROM used, added",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "used!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "added!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "ByteaArray"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "c9575cae89388bd2a458f299e63b75bd35a605c59d4ab7fedd3076c69161632d"
+}

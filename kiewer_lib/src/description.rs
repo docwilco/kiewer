@@ -158,12 +158,16 @@ pub async fn of(db: &PgPool, design: DesignId) -> Result<Description> {
     // own statement rather than two more columns on every read of a design
     // row, since only the design page shows the description and only its
     // form writes it.
-    let (markdown, html): (String, String) =
-        sqlx::query_as("SELECT description, description_html FROM design WHERE id = $1")
-            .bind(design)
-            .fetch_one(db)
-            .await?;
-    Ok(Description { markdown, html })
+    let row = sqlx::query!(
+        "SELECT description, description_html FROM design WHERE id = $1",
+        design as DesignId
+    )
+    .fetch_one(db)
+    .await?;
+    Ok(Description {
+        markdown: row.description,
+        html: row.description_html,
+    })
 }
 
 /// `markdown` becomes the description of `design`, rendered now, within
@@ -173,12 +177,14 @@ pub async fn of(db: &PgPool, design: DesignId) -> Result<Description> {
 ///
 /// [`Error::Db`](crate::Error::Db) when Postgres refuses.
 pub async fn set(tx: &mut PgConnection, design: DesignId, markdown: &str) -> Result<()> {
-    sqlx::query("UPDATE design SET description = $2, description_html = $3 WHERE id = $1")
-        .bind(design)
-        .bind(markdown)
-        .bind(render(markdown))
-        .execute(tx)
-        .await?;
+    sqlx::query!(
+        "UPDATE design SET description = $2, description_html = $3 WHERE id = $1",
+        design as DesignId,
+        markdown,
+        render(markdown)
+    )
+    .execute(tx)
+    .await?;
     Ok(())
 }
 

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO upload_refusal (account_id, refused_at)\n         SELECT author_id, created_at FROM pending_revision\n         WHERE design_id = $1 AND branch = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a2535e1112d90cd2506c64eebaaf3ec3ca81a07b0e0859be796530f714f01ada"
+}

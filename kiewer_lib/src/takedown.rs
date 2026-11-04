@@ -20,13 +20,13 @@ use crate::revision::{TreeHash, TreePath};
 /// holds a path that is not one, which the upload forbids.
 pub async fn blocked_in<'c>(db: impl PgExecutor<'c>, tree: TreeHash) -> Result<Option<TreePath>> {
     // The tree's entries by primary key, one probe of blocked_blob each.
-    let path: Option<String> = sqlx::query_scalar(
+    let path: Option<String> = sqlx::query_scalar!(
         "SELECT te.path FROM tree_entry te
          JOIN blocked_blob b ON b.hash = te.blob_hash
          WHERE te.tree_hash = $1
          ORDER BY te.path LIMIT 1",
+        tree.as_bytes()
     )
-    .bind(tree.as_bytes())
     .fetch_optional(db)
     .await?;
     path.map(|path| {

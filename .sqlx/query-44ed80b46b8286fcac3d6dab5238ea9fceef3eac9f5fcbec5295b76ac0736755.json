@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO thumbnail (revision_hash, large_hash, small_hash) VALUES ($1, $2, $3)\n         ON CONFLICT (revision_hash) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "44ed80b46b8286fcac3d6dab5238ea9fceef3eac9f5fcbec5295b76ac0736755"
+}

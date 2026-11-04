@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT CASE WHEN d.owner_id = $2 THEN 'owner' ELSE r.role END AS \"role?\"\n         FROM design d\n         LEFT JOIN design_role r ON r.design_id = d.id AND r.account_id = $2\n         WHERE d.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a0caa3956c5e137d1dcbc97813227e14bd449dbe5fb77765f4ab32ece2e36f71"
+}

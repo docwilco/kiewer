@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO tree (hash) VALUES ($1)\n         ON CONFLICT (hash) DO UPDATE SET claimed_at = now()\n         RETURNING (xmax = 0) AS \"inserted!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "inserted!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9ae028c416603db0e328dd34f169adfd84d2e892910afb6dc02f940dbc6d6d6a"
+}

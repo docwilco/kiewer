@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM design_role r USING account a\n         WHERE r.design_id = $1 AND r.account_id = a.id AND a.handle = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4de36d5c646a2fe13d9af8ca9e84adcecf5fd2666b1c7d772d99fc3bd45d4d92"
+}

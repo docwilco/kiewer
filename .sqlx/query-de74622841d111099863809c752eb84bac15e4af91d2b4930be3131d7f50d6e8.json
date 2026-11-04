@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.hash, r.tree_hash, r.parent_hash, r.author_handle,\n    to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS \"created_at!\",\n    r.message, r.format_version, r.layer_count, r.copper_layer_count,\n    r.board_width_mm, r.board_height_mm, r.fonts, r.net_count, r.footprint_count FROM revision r WHERE r.hash = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "hash",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 1,
+        "name": "tree_hash",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 2,
+        "name": "parent_hash",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 3,
+        "name": "author_handle",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "format_version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "layer_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "copper_layer_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "board_width_mm",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 10,
+        "name": "board_height_mm",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 11,
+        "name": "fonts",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 12,
+        "name": "net_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 13,
+        "name": "footprint_count",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      null,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "de74622841d111099863809c752eb84bac15e4af91d2b4930be3131d7f50d6e8"
+}

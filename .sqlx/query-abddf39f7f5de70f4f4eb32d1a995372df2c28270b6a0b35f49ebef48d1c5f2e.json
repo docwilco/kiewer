@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH RECURSIVE chain AS (\n    SELECT b.name, b.head_hash AS hash, 0 AS behind\n    FROM branch b WHERE b.design_id = $1 AND ($2::text IS NULL OR b.name = $2)\n    UNION ALL\n    SELECT c.name, r.parent_hash, c.behind + 1\n    FROM chain c JOIN revision r ON r.hash = c.hash WHERE r.parent_hash IS NOT NULL\n) SELECT EXISTS (SELECT 1 FROM chain WHERE hash = $3) AS \"on_branch!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "on_branch!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "abddf39f7f5de70f4f4eb32d1a995372df2c28270b6a0b35f49ebef48d1c5f2e"
+}

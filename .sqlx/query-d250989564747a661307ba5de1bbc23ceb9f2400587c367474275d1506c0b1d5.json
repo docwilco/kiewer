@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO revision (hash, tree_hash, parent_hash, author_id, author_handle,\n             created_at, message, format_version, layer_count, copper_layer_count,\n             board_width_mm, board_height_mm, fonts, net_count, footprint_count)\n         VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz, $7, $8, $9, $10, $11, $12, $13, $14, $15)\n         ON CONFLICT (hash) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Bytea",
+        "Bytea",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Float8",
+        "Float8",
+        "TextArray",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d250989564747a661307ba5de1bbc23ceb9f2400587c367474275d1506c0b1d5"
+}

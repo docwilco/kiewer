@@ -249,7 +249,7 @@ fn unreachable_database() -> Response {
 /// `ok` when the database answers; 503 when it does not, so a deploy's
 /// health check and a dev box's first run both say which half is up.
 async fn healthz(State(state): State<AppState>) -> Response {
-    let ping = sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.db);
+    let ping = sqlx::query_scalar!(r#"SELECT 1 AS "one!""#).fetch_one(&state.db);
     match tokio::time::timeout(HEALTH_TIMEOUT, ping).await {
         Ok(Ok(_)) => (StatusCode::OK, [Policy::Personal.header()], "ok\n").into_response(),
         Ok(Err(error)) => {

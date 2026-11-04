@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT te.path FROM tree_entry te\n         JOIN blocked_blob b ON b.hash = te.blob_hash\n         WHERE te.tree_hash = $1\n         ORDER BY te.path LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "path",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d6921cfbbd093a77df4032eba22781981f437b141094d1252595c864c5cb63ba"
+}

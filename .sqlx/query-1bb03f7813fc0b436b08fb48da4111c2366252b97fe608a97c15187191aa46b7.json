@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM blob_removal r WHERE r.hash = $1\n         RETURNING EXISTS (SELECT 1 FROM blob b WHERE b.hash = r.hash) AS \"is_back!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_back!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "1bb03f7813fc0b436b08fb48da4111c2366252b97fe608a97c15187191aa46b7"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT created_by AS \"created_by: AccountId\" FROM branch\n         WHERE design_id = $1 AND name = $2 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "created_by: AccountId",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "d58335e837825f34dba7433d6fb83ea52dce1ef44effe254a5ab9e9e6128fb30"
+}

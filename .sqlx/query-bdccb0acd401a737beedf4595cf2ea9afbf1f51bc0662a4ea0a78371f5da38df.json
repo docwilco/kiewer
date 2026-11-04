@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO identity (provider, provider_user_id, account_id, provider_login, email)\n         VALUES ($1, $2, $3, $4, $5)\n         ON CONFLICT (provider, provider_user_id)\n         DO UPDATE SET provider_login = EXCLUDED.provider_login, email = EXCLUDED.email\n         RETURNING account_id AS \"account_id: AccountId\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "account_id: AccountId",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bdccb0acd401a737beedf4595cf2ea9afbf1f51bc0662a4ea0a78371f5da38df"
+}

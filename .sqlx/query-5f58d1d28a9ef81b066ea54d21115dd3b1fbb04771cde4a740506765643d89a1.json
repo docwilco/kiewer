@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.name FROM design d\n         WHERE d.owner_id = $1\n           AND EXISTS (SELECT 1 FROM design_role r WHERE r.design_id = d.id)\n         ORDER BY d.created_at DESC, d.id DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5f58d1d28a9ef81b066ea54d21115dd3b1fbb04771cde4a740506765643d89a1"
+}

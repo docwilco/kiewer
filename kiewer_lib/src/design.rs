@@ -8,8 +8,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use sqlx::postgres::PgArguments;
-use sqlx::{PgConnection, PgExecutor, PgPool, Postgres};
+use sqlx::{PgConnection, PgExecutor, PgPool};
 
 use crate::account::{AccountId, Handle};
 use crate::blob::BlobHash;
@@ -18,6 +17,7 @@ use crate::revision::{
     Metadata, RevisionDraft, RevisionHash, TreeEntry, TreeHash, TreePath, revision_hash, tree_hash,
 };
 use crate::roles::Visibility;
+use crate::sql::statement;
 
 /// The slug type, where the upload and the pages have always found it;
 /// its rules and its redirects are `crate::slug`.
@@ -128,22 +128,34 @@ pub struct Design {
     pub visibility: Visibility,
 }
 
-/// A design's row, read by column name so the columns can sit inside a
-/// wider row (a page's, a listing's) unchanged.
-#[derive(sqlx::FromRow)]
+/// A design's row, as the `DESIGN_COLUMNS` fragment (`crate::sql`)
+/// selects it; [`design_row!`] takes it out of a wider row (a page's, a
+/// listing's).
 pub(crate) struct DesignRow {
-    id: DesignId,
-    owner_id: AccountId,
-    slug: String,
-    name: String,
-    default_branch: String,
-    visibility: String,
+    pub(crate) id: DesignId,
+    pub(crate) owner_id: AccountId,
+    pub(crate) slug: String,
+    pub(crate) name: String,
+    pub(crate) default_branch: String,
+    pub(crate) visibility: String,
 }
 
-/// The columns every read of a design selects, under [`DesignRow`]'s
-/// names, from a `design` aliased `d`.
-pub(crate) const DESIGN_COLUMNS: &str =
-    "d.id, d.owner_id, d.slug, d.name, d.default_branch, d.visibility";
+/// The [`DesignRow`] in `$row`, a record of a query that selected the
+/// `DESIGN_COLUMNS` fragment among others.
+macro_rules! design_row {
+    ($row:ident) => {
+        $crate::design::DesignRow {
+            id: $row.id,
+            owner_id: $row.owner_id,
+            slug: $row.slug,
+            name: $row.name,
+            default_branch: $row.default_branch,
+            visibility: $row.visibility,
+        }
+    };
+}
+
+pub(crate) use design_row;
 
 impl TryFrom<DesignRow> for Design {
     type Error = Error;
@@ -168,11 +180,14 @@ impl TryFrom<DesignRow> for Design {
 /// visibility is not one, which the schema forbids.
 pub async fn by_owner(db: &PgPool, owner: AccountId) -> Result<Vec<Design>> {
     // One read on the pool: a listing, part of no write.
-    let rows: Vec<DesignRow> = sqlx::query_as(&format!(
-        "SELECT {DESIGN_COLUMNS} FROM design d
+    let rows: Vec<DesignRow> = statement!(query_as!(
+        DesignRow,
+        [
+            "SELECT " DESIGN_COLUMNS " FROM design d
          WHERE d.owner_id = $1 ORDER BY d.created_at DESC, d.id DESC"
+        ],
+        owner as AccountId
     ))
-    .bind(owner)
     .fetch_all(db)
     .await?;
     rows.into_iter().map(Design::try_from).collect()
@@ -191,11 +206,12 @@ pub async fn find_owned(
     owner: AccountId,
     slug: &Slug,
 ) -> Result<Option<Design>> {
-    let row: Option<DesignRow> = sqlx::query_as(&format!(
-        "SELECT {DESIGN_COLUMNS} FROM design d WHERE d.owner_id = $1 AND d.slug = $2"
+    let row: Option<DesignRow> = statement!(query_as!(
+        DesignRow,
+        ["SELECT " DESIGN_COLUMNS " FROM design d WHERE d.owner_id = $1 AND d.slug = $2"],
+        owner as AccountId,
+        slug.as_str()
     ))
-    .bind(owner)
-    .bind(slug.as_str())
     .fetch_optional(tx)
     .await?;
     row.map(Design::try_from).transpose()
@@ -215,13 +231,16 @@ pub async fn find_at<'c>(
     owner: &Handle,
     slug: &Slug,
 ) -> Result<Option<Design>> {
-    let row: Option<DesignRow> = sqlx::query_as(&format!(
-        "SELECT {DESIGN_COLUMNS} FROM design d
+    let row: Option<DesignRow> = statement!(query_as!(
+        DesignRow,
+        [
+            "SELECT " DESIGN_COLUMNS " FROM design d
          JOIN account a ON a.id = d.owner_id
          WHERE a.handle = $1 AND d.slug = $2"
+        ],
+        owner.as_str(),
+        slug.as_str()
     ))
-    .bind(owner.as_str())
-    .bind(slug.as_str())
     .fetch_optional(db)
     .await?;
     row.map(Design::try_from).transpose()
@@ -242,12 +261,12 @@ pub async fn create(
     name: &str,
 ) -> Result<Design> {
     crate::slug::release(&mut *tx, owner, slug).await?;
-    let inserted: std::result::Result<DesignId, sqlx::Error> = sqlx::query_scalar(
-        "INSERT INTO design (owner_id, slug, name) VALUES ($1, $2, $3) RETURNING id",
+    let inserted: std::result::Result<DesignId, sqlx::Error> = sqlx::query_scalar!(
+        r#"INSERT INTO design (owner_id, slug, name) VALUES ($1, $2, $3) RETURNING id AS "id: DesignId""#,
+        owner as AccountId,
+        slug.as_str(),
+        name
     )
-    .bind(owner)
-    .bind(slug.as_str())
-    .bind(name)
     .fetch_one(tx)
     .await;
     match inserted {
@@ -276,8 +295,8 @@ pub async fn create(
 ///
 /// [`Error::Db`] when Postgres refuses.
 pub async fn now_text(tx: &mut PgConnection) -> Result<String> {
-    Ok(sqlx::query_scalar(
-        r#"SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')"#,
+    Ok(sqlx::query_scalar!(
+        r#"SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "now!""#
     )
     .fetch_one(tx)
     .await?)
@@ -291,11 +310,13 @@ pub async fn now_text(tx: &mut PgConnection) -> Result<String> {
 ///
 /// [`Error::Db`] when Postgres refuses.
 pub async fn record_blob(tx: &mut PgConnection, hash: &BlobHash, size: u64) -> Result<()> {
-    sqlx::query("INSERT INTO blob (hash, size) VALUES ($1, $2) ON CONFLICT (hash) DO NOTHING")
-        .bind(hash.as_bytes())
-        .bind(i64::try_from(size).unwrap_or(i64::MAX))
-        .execute(tx)
-        .await?;
+    sqlx::query!(
+        "INSERT INTO blob (hash, size) VALUES ($1, $2) ON CONFLICT (hash) DO NOTHING",
+        hash.as_bytes(),
+        i64::try_from(size).unwrap_or(i64::MAX)
+    )
+    .execute(tx)
+    .await?;
     Ok(())
 }
 
@@ -311,22 +332,24 @@ pub async fn record_blob(tx: &mut PgConnection, hash: &BlobHash, size: u64) -> R
 pub async fn record_tree(tx: &mut PgConnection, entries: &[TreeEntry]) -> Result<TreeHash> {
     let hash = tree_hash(entries)?;
     // xmax tells an insert from the conflict arm's update.
-    let inserted: bool = sqlx::query_scalar(
-        "INSERT INTO tree (hash) VALUES ($1)
+    let inserted: bool = sqlx::query_scalar!(
+        r#"INSERT INTO tree (hash) VALUES ($1)
          ON CONFLICT (hash) DO UPDATE SET claimed_at = now()
-         RETURNING (xmax = 0)",
+         RETURNING (xmax = 0) AS "inserted!""#,
+        hash.as_bytes()
     )
-    .bind(hash.as_bytes())
     .fetch_one(&mut *tx)
     .await?;
     if inserted {
         for entry in entries {
-            sqlx::query("INSERT INTO tree_entry (tree_hash, path, blob_hash) VALUES ($1, $2, $3)")
-                .bind(hash.as_bytes())
-                .bind(entry.path.as_str())
-                .bind(entry.blob.as_bytes())
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query!(
+                "INSERT INTO tree_entry (tree_hash, path, blob_hash) VALUES ($1, $2, $3)",
+                hash.as_bytes(),
+                entry.path.as_str(),
+                entry.blob.as_bytes()
+            )
+            .execute(&mut *tx)
+            .await?;
         }
     }
     Ok(hash)
@@ -347,42 +370,64 @@ pub async fn record_revision(
     metadata: Option<&Metadata>,
 ) -> Result<RevisionHash> {
     let hash = revision_hash(draft);
-    let query = sqlx::query(
+    let m = MetadataColumns::of(metadata);
+    sqlx::query!(
         "INSERT INTO revision (hash, tree_hash, parent_hash, author_id, author_handle,
              created_at, message, format_version, layer_count, copper_layer_count,
              board_width_mm, board_height_mm, fonts, net_count, footprint_count)
-         VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz, $7, $8, $9, $10, $11, $12, $13, $14, $15)
          ON CONFLICT (hash) DO NOTHING",
+        hash.as_bytes(),
+        draft.tree.as_bytes(),
+        draft.parent.as_ref().map(RevisionHash::as_bytes),
+        author as AccountId,
+        draft.author.as_str(),
+        draft.time,
+        draft.message,
+        m.format_version,
+        m.layer_count,
+        m.copper_layer_count,
+        m.board_width_mm,
+        m.board_height_mm,
+        m.fonts.as_deref(),
+        m.net_count,
+        m.footprint_count
     )
-    .bind(hash.as_bytes())
-    .bind(draft.tree.as_bytes())
-    .bind(draft.parent.as_ref().map(RevisionHash::as_bytes))
-    .bind(author)
-    .bind(draft.author.as_str())
-    .bind(draft.time)
-    .bind(draft.message);
-    bind_metadata(query, metadata).execute(tx).await?;
+    .execute(tx)
+    .await?;
     Ok(hash)
 }
 
-/// The eight metadata columns `revision` and `pending_revision` share,
-/// bound in their order: format version, layers, copper layers, width,
+/// The eight metadata columns `revision` and `pending_revision` share, as
+/// a statement writes them: format version, layers, copper layers, width,
 /// height, fonts, nets, footprints.
-pub(crate) fn bind_metadata<'q>(
-    query: sqlx::query::Query<'q, Postgres, PgArguments>,
-    metadata: Option<&Metadata>,
-) -> sqlx::query::Query<'q, Postgres, PgArguments> {
-    let count = |n: u32| i32::try_from(n).unwrap_or(i32::MAX);
-    let size = metadata.and_then(|m| m.board_size);
-    query
-        .bind(metadata.map(|m| count(m.format_version)))
-        .bind(metadata.map(|m| count(m.layer_count)))
-        .bind(metadata.map(|m| count(m.copper_layer_count)))
-        .bind(size.map(|(width, _)| width))
-        .bind(size.map(|(_, height)| height))
-        .bind(metadata.map(|m| m.fonts.clone()))
-        .bind(metadata.map(|m| count(m.net_count)))
-        .bind(metadata.map(|m| count(m.footprint_count)))
+pub(crate) struct MetadataColumns {
+    pub(crate) format_version: Option<i32>,
+    pub(crate) layer_count: Option<i32>,
+    pub(crate) copper_layer_count: Option<i32>,
+    pub(crate) board_width_mm: Option<f64>,
+    pub(crate) board_height_mm: Option<f64>,
+    pub(crate) fonts: Option<Vec<String>>,
+    pub(crate) net_count: Option<i32>,
+    pub(crate) footprint_count: Option<i32>,
+}
+
+impl MetadataColumns {
+    /// The columns for `metadata`, all null without one.
+    pub(crate) fn of(metadata: Option<&Metadata>) -> Self {
+        let count = |n: u32| i32::try_from(n).unwrap_or(i32::MAX);
+        let size = metadata.and_then(|m| m.board_size);
+        Self {
+            format_version: metadata.map(|m| count(m.format_version)),
+            layer_count: metadata.map(|m| count(m.layer_count)),
+            copper_layer_count: metadata.map(|m| count(m.copper_layer_count)),
+            board_width_mm: size.map(|(width, _)| width),
+            board_height_mm: size.map(|(_, height)| height),
+            fonts: metadata.map(|m| m.fonts.clone()),
+            net_count: metadata.map(|m| count(m.net_count)),
+            footprint_count: metadata.map(|m| count(m.footprint_count)),
+        }
+    }
 }
 
 /// The head of `branch` on `design`, or `None` for a branch that does not
@@ -397,12 +442,13 @@ pub async fn head(
     design: DesignId,
     branch: &str,
 ) -> Result<Option<RevisionHash>> {
-    let row: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT head_hash FROM branch WHERE design_id = $1 AND name = $2")
-            .bind(design)
-            .bind(branch)
-            .fetch_optional(tx)
-            .await?;
+    let row: Option<Vec<u8>> = sqlx::query_scalar!(
+        "SELECT head_hash FROM branch WHERE design_id = $1 AND name = $2",
+        design as DesignId,
+        branch
+    )
+    .fetch_optional(tx)
+    .await?;
     row.as_deref().map(RevisionHash::from_bytes).transpose()
 }
 
@@ -420,11 +466,11 @@ pub async fn lock_head(
     design: DesignId,
     branch: &str,
 ) -> Result<Option<RevisionHash>> {
-    let row: Option<Vec<u8>> = sqlx::query_scalar(
+    let row: Option<Vec<u8>> = sqlx::query_scalar!(
         "SELECT head_hash FROM branch WHERE design_id = $1 AND name = $2 FOR UPDATE",
+        design as DesignId,
+        branch
     )
-    .bind(design)
-    .bind(branch)
     .fetch_optional(tx)
     .await?;
     row.as_deref().map(RevisionHash::from_bytes).transpose()
@@ -443,12 +489,15 @@ pub async fn on_branch(
     branch: &str,
     revision: RevisionHash,
 ) -> Result<bool> {
-    Ok(sqlx::query_scalar(&format!(
-        "WITH RECURSIVE {CHAIN} SELECT EXISTS (SELECT 1 FROM chain WHERE hash = $3)"
+    Ok(statement!(query_scalar!(
+        [
+            "WITH RECURSIVE " CHAIN
+            r#" SELECT EXISTS (SELECT 1 FROM chain WHERE hash = $3) AS "on_branch!""#
+        ],
+        design as DesignId,
+        branch,
+        revision.as_bytes()
     ))
-    .bind(design)
-    .bind(branch)
-    .bind(revision.as_bytes())
     .fetch_one(tx)
     .await?)
 }
@@ -473,15 +522,15 @@ pub async fn set_head(
 ) -> Result<()> {
     let (moved, refusal) = match expected {
         None => (
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO branch (design_id, name, head_hash, created_by)
                  VALUES ($1, $2, $3, $4)
                  ON CONFLICT (design_id, name) DO NOTHING",
+                design as DesignId,
+                branch,
+                new.as_bytes(),
+                creator as AccountId
             )
-            .bind(design)
-            .bind(branch)
-            .bind(new.as_bytes())
-            .bind(creator)
             .execute(tx)
             .await?,
             Refusal::BranchTaken {
@@ -489,14 +538,14 @@ pub async fn set_head(
             },
         ),
         Some(expected) => (
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE branch SET head_hash = $3, updated_at = now()
                  WHERE design_id = $1 AND name = $2 AND head_hash = $4",
+                design as DesignId,
+                branch,
+                new.as_bytes(),
+                expected.as_bytes()
             )
-            .bind(design)
-            .bind(branch)
-            .bind(new.as_bytes())
-            .bind(expected.as_bytes())
             .execute(tx)
             .await?,
             Refusal::HeadMoved {
@@ -523,11 +572,11 @@ pub async fn reaches<'c, E>(db: E, design: DesignId, revision: RevisionHash) -> 
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM design_revision WHERE design_id = $1 AND revision_hash = $2)",
+    Ok(sqlx::query_scalar!(
+        r#"SELECT EXISTS (SELECT 1 FROM design_revision WHERE design_id = $1 AND revision_hash = $2) AS "reaches!""#,
+        design as DesignId,
+        revision.as_bytes()
     )
-    .bind(design)
-    .bind(revision.as_bytes())
     .fetch_one(db)
     .await?)
 }
@@ -541,19 +590,19 @@ where
 ///
 /// [`Error::Db`] when Postgres refuses.
 pub async fn holding(db: &PgPool, revision: RevisionHash) -> Result<Vec<(DesignId, Handle)>> {
-    let rows: Vec<(DesignId, String)> = sqlx::query_as(
-        "SELECT d.id, a.handle
+    let rows = sqlx::query!(
+        r#"SELECT d.id AS "id: DesignId", a.handle AS "handle!"
          FROM design_revision dr
          JOIN design d ON d.id = dr.design_id
          JOIN account a ON a.id = d.owner_id
-         WHERE dr.revision_hash = $1",
+         WHERE dr.revision_hash = $1"#,
+        revision.as_bytes()
     )
-    .bind(revision.as_bytes())
     .fetch_all(db)
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, handle)| (id, Handle::from_row(handle)))
+        .map(|row| (row.id, Handle::from_row(row.handle)))
         .collect())
 }
 
@@ -567,12 +616,12 @@ pub async fn record_design_revision(
     design: DesignId,
     revision: RevisionHash,
 ) -> Result<()> {
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO design_revision (design_id, revision_hash) VALUES ($1, $2)
          ON CONFLICT DO NOTHING",
+        design as DesignId,
+        revision.as_bytes()
     )
-    .bind(design)
-    .bind(revision.as_bytes())
     .execute(tx)
     .await?;
     Ok(())
@@ -597,8 +646,8 @@ pub async fn account_bytes(
     // by owner, design_revision by design, revision and tree_entry by
     // primary key; the sums join blob by its primary key from that set
     // and from the given hashes, so neither scans blob.
-    let (used, added): (i64, i64) = sqlx::query_as(
-        "WITH reachable AS (
+    let row = sqlx::query!(
+        r#"WITH reachable AS (
              SELECT DISTINCT te.blob_hash
              FROM design d
              JOIN design_revision dr ON dr.design_id = d.id
@@ -616,15 +665,15 @@ pub async fn account_bytes(
              WHERE b.hash = ANY($2)
                AND NOT EXISTS (SELECT 1 FROM reachable x WHERE x.blob_hash = b.hash)
          )
-         SELECT used.bytes, added.bytes FROM used, added",
+         SELECT used.bytes AS "used!", added.bytes AS "added!" FROM used, added"#,
+        owner as AccountId,
+        &adding
     )
-    .bind(owner)
-    .bind(&adding)
     .fetch_one(tx)
     .await?;
     Ok((
-        u64::try_from(used).unwrap_or(0),
-        u64::try_from(added).unwrap_or(0),
+        u64::try_from(row.used).unwrap_or(0),
+        u64::try_from(row.added).unwrap_or(0),
     ))
 }
 
@@ -636,12 +685,12 @@ pub async fn account_bytes(
 ///
 /// [`Error::Db`] when Postgres refuses.
 pub async fn is_blocked(db: &PgPool, hash: &BlobHash) -> Result<bool> {
-    Ok(
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM blocked_blob WHERE hash = $1)")
-            .bind(hash.as_bytes())
-            .fetch_one(db)
-            .await?,
+    Ok(sqlx::query_scalar!(
+        r#"SELECT EXISTS (SELECT 1 FROM blocked_blob WHERE hash = $1) AS "blocked!""#,
+        hash.as_bytes()
     )
+    .fetch_one(db)
+    .await?)
 }
 
 /// A revision as a page shows it.
@@ -659,9 +708,8 @@ pub struct Revision {
     pub metadata: Option<Metadata>,
 }
 
-/// A revision's row, read by column name so the revision columns can sit
-/// inside a wider row ([`DesignHead`]'s) unchanged.
-#[derive(sqlx::FromRow)]
+/// A revision's row, as the `REVISION_COLUMNS` fragment (`crate::sql`)
+/// selects it; [`revision_row!`] takes it out of a wider row.
 struct RevisionRow {
     hash: Vec<u8>,
     tree_hash: Vec<u8>,
@@ -670,14 +718,6 @@ struct RevisionRow {
     /// Formatted by Postgres: UTC, ISO 8601 to the second.
     created_at: String,
     message: Option<String>,
-    #[sqlx(flatten)]
-    metadata: MetadataRow,
-}
-
-/// The metadata columns `revision` and `pending_revision` share, read by
-/// column name.
-#[derive(sqlx::FromRow)]
-pub(crate) struct MetadataRow {
     format_version: Option<i32>,
     layer_count: Option<i32>,
     copper_layer_count: Option<i32>,
@@ -687,6 +727,61 @@ pub(crate) struct MetadataRow {
     net_count: Option<i32>,
     footprint_count: Option<i32>,
 }
+
+/// The [`RevisionRow`] in `$row`, a record of a query that selected the
+/// `REVISION_COLUMNS` fragment among others.
+macro_rules! revision_row {
+    ($row:ident) => {
+        RevisionRow {
+            hash: $row.hash,
+            tree_hash: $row.tree_hash,
+            parent_hash: $row.parent_hash,
+            author_handle: $row.author_handle,
+            created_at: $row.created_at,
+            message: $row.message,
+            format_version: $row.format_version,
+            layer_count: $row.layer_count,
+            copper_layer_count: $row.copper_layer_count,
+            board_width_mm: $row.board_width_mm,
+            board_height_mm: $row.board_height_mm,
+            fonts: $row.fonts,
+            net_count: $row.net_count,
+            footprint_count: $row.footprint_count,
+        }
+    };
+}
+
+/// The metadata columns `revision` and `pending_revision` share, as a
+/// row has them.
+pub(crate) struct MetadataRow {
+    pub(crate) format_version: Option<i32>,
+    pub(crate) layer_count: Option<i32>,
+    pub(crate) copper_layer_count: Option<i32>,
+    pub(crate) board_width_mm: Option<f64>,
+    pub(crate) board_height_mm: Option<f64>,
+    pub(crate) fonts: Option<Vec<String>>,
+    pub(crate) net_count: Option<i32>,
+    pub(crate) footprint_count: Option<i32>,
+}
+
+/// The [`MetadataRow`] in `$row`, a record of a query that selected the
+/// eight metadata columns among others.
+macro_rules! metadata_row {
+    ($row:ident) => {
+        $crate::design::MetadataRow {
+            format_version: $row.format_version,
+            layer_count: $row.layer_count,
+            copper_layer_count: $row.copper_layer_count,
+            board_width_mm: $row.board_width_mm,
+            board_height_mm: $row.board_height_mm,
+            fonts: $row.fonts,
+            net_count: $row.net_count,
+            footprint_count: $row.footprint_count,
+        }
+    };
+}
+
+pub(crate) use metadata_row;
 
 impl MetadataRow {
     /// What the board said, or `None` for a revision without one.
@@ -704,29 +799,25 @@ impl MetadataRow {
     }
 }
 
-/// The columns every read of a revision selects, under [`RevisionRow`]'s
-/// names, from a `revision` aliased `r`.
-const REVISION_COLUMNS: &str = r#"r.hash, r.tree_hash, r.parent_hash, r.author_handle,
-    to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
-    r.message, r.format_version, r.layer_count, r.copper_layer_count,
-    r.board_width_mm, r.board_height_mm, r.fonts, r.net_count, r.footprint_count"#;
-
 impl TryFrom<RevisionRow> for Revision {
     type Error = Error;
 
     fn try_from(row: RevisionRow) -> Result<Self> {
+        let hash = RevisionHash::from_bytes(&row.hash)?;
+        let tree = TreeHash::from_bytes(&row.tree_hash)?;
+        let parent = row
+            .parent_hash
+            .as_deref()
+            .map(RevisionHash::from_bytes)
+            .transpose()?;
         Ok(Revision {
-            hash: RevisionHash::from_bytes(&row.hash)?,
-            tree: TreeHash::from_bytes(&row.tree_hash)?,
-            parent: row
-                .parent_hash
-                .as_deref()
-                .map(RevisionHash::from_bytes)
-                .transpose()?,
+            hash,
+            tree,
+            parent,
             author: row.author_handle,
             created_at: row.created_at,
             message: row.message,
-            metadata: row.metadata.into_metadata(),
+            metadata: metadata_row!(row).into_metadata(),
         })
     }
 }
@@ -969,23 +1060,22 @@ pub async fn show_at(
 ///
 /// [`Error::Db`] when Postgres refuses.
 pub async fn find(db: &PgPool, handle: &str, slug: &str) -> Result<Option<(Design, Handle)>> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        #[sqlx(flatten)]
-        design: DesignRow,
-        handle: String,
-    }
-    let row: Option<Row> = sqlx::query_as(&format!(
-        "SELECT {DESIGN_COLUMNS}, a.handle
+    let row = statement!(query!(
+        [
+            "SELECT " DESIGN_COLUMNS r#", a.handle AS "handle!"
          FROM design d JOIN account a ON a.id = d.owner_id
-         WHERE a.handle = $1 AND d.slug = $2"
+         WHERE a.handle = $1 AND d.slug = $2"#
+        ],
+        handle,
+        slug
     ))
-    .bind(handle)
-    .bind(slug)
     .fetch_optional(db)
     .await?;
-    row.map(|row| Ok((Design::try_from(row.design)?, Handle::from_row(row.handle))))
-        .transpose()
+    row.map(|row| {
+        let handle = Handle::from_row(row.handle);
+        Ok((Design::try_from(design_row!(row))?, handle))
+    })
+    .transpose()
 }
 
 /// Every branch of `design` with its head, by name. One read on the pool:
@@ -996,16 +1086,17 @@ pub async fn find(db: &PgPool, handle: &str, slug: &str) -> Result<Option<(Desig
 /// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
 /// holds a hash that is not 32 bytes, which the schema forbids.
 pub async fn branches(db: &PgPool, design: DesignId) -> Result<Vec<Branch>> {
-    let rows: Vec<(String, Vec<u8>)> =
-        sqlx::query_as("SELECT name, head_hash FROM branch WHERE design_id = $1 ORDER BY name")
-            .bind(design)
-            .fetch_all(db)
-            .await?;
+    let rows = sqlx::query!(
+        "SELECT name, head_hash FROM branch WHERE design_id = $1 ORDER BY name",
+        design as DesignId
+    )
+    .fetch_all(db)
+    .await?;
     rows.into_iter()
-        .map(|(name, head)| {
+        .map(|row| {
             Ok(Branch {
-                name: BranchName::from_row(name),
-                head: RevisionHash::from_bytes(&head)?,
+                name: BranchName::from_row(row.name),
+                head: RevisionHash::from_bytes(&row.head_hash)?,
             })
         })
         .collect()
@@ -1019,20 +1110,6 @@ struct Position {
     behind: u32,
 }
 
-/// The chain from a branch's head down through the parents, as SQL: one
-/// row per revision with how far behind the head it is. Over every branch
-/// of the design (`$1`) with `$2` null, or the one named `$2`. Each step
-/// is a primary-key probe of `revision`, so the walk costs the chains'
-/// length, never a scan; a chain cannot loop, since a revision's hash
-/// covers its parent's.
-pub(crate) const CHAIN: &str = "chain AS (
-    SELECT b.name, b.head_hash AS hash, 0 AS behind
-    FROM branch b WHERE b.design_id = $1 AND ($2::text IS NULL OR b.name = $2)
-    UNION ALL
-    SELECT c.name, r.parent_hash, c.behind + 1
-    FROM chain c JOIN revision r ON r.hash = c.hash WHERE r.parent_hash IS NOT NULL
-)";
-
 /// The ordinal of a row of the chain: the chain's length less how far
 /// behind the head the row is.
 fn ordinal(length: i64, behind: i64) -> u32 {
@@ -1043,23 +1120,26 @@ fn ordinal(length: i64, behind: i64) -> u32 {
 /// name, with its ordinal and distance behind the head on each. One read
 /// on the pool: a page's lookup, part of no write.
 async fn positions(db: &PgPool, design: DesignId, hash: RevisionHash) -> Result<Vec<Position>> {
-    let rows: Vec<(String, i64, i64)> = sqlx::query_as(&format!(
-        "WITH RECURSIVE {CHAIN}
-         SELECT name, behind::bigint, length FROM (
+    let rows = statement!(query!(
+        [
+            "WITH RECURSIVE " CHAIN
+            r#"
+         SELECT name AS "name!", behind::bigint AS "behind!", length AS "length!" FROM (
              SELECT name, hash, behind, count(*) OVER (PARTITION BY name) AS length FROM chain
-         ) x WHERE x.hash = $3 ORDER BY name"
+         ) x WHERE x.hash = $3 ORDER BY name"#
+        ],
+        design as DesignId,
+        None::<&str>,
+        hash.as_bytes()
     ))
-    .bind(design)
-    .bind(None::<&str>)
-    .bind(hash.as_bytes())
     .fetch_all(db)
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(name, behind, length)| Position {
-            branch: BranchName::from_row(name),
-            ordinal: ordinal(length, behind),
-            behind: u32::try_from(behind).unwrap_or(u32::MAX),
+        .map(|row| Position {
+            branch: BranchName::from_row(row.name),
+            ordinal: ordinal(row.length, row.behind),
+            behind: u32::try_from(row.behind).unwrap_or(u32::MAX),
         })
         .collect())
 }
@@ -1079,29 +1159,26 @@ pub async fn history(
     branch: &BranchName,
     limit: Option<u32>,
 ) -> Result<Vec<HistoryEntry>> {
-    #[derive(sqlx::FromRow)]
-    struct EntryRow {
-        behind: i64,
-        length: i64,
-        #[sqlx(flatten)]
-        revision: RevisionRow,
-    }
-    let rows: Vec<EntryRow> = sqlx::query_as(&format!(
-        "WITH RECURSIVE {CHAIN}
-         SELECT c.behind::bigint AS behind, count(*) OVER () AS length, {REVISION_COLUMNS}
+    let rows = statement!(query!(
+        [
+            "WITH RECURSIVE " CHAIN
+            r#"
+         SELECT c.behind::bigint AS "behind!", count(*) OVER () AS "length!", "# REVISION_COLUMNS "
          FROM chain c JOIN revision r ON r.hash = c.hash
          ORDER BY c.behind LIMIT $3"
+        ],
+        design as DesignId,
+        Some(branch.as_str()),
+        limit.map(i64::from)
     ))
-    .bind(design)
-    .bind(Some(branch.as_str()))
-    .bind(limit.map(i64::from))
     .fetch_all(db)
     .await?;
     rows.into_iter()
         .map(|row| {
+            let ordinal = ordinal(row.length, row.behind);
             Ok(HistoryEntry {
-                ordinal: ordinal(row.length, row.behind),
-                revision: Revision::try_from(row.revision)?,
+                ordinal,
+                revision: Revision::try_from(revision_row!(row))?,
             })
         })
         .collect()
@@ -1110,10 +1187,11 @@ pub async fn history(
 /// The revision `hash`, or `None` without one. Called after the design
 /// was checked to reach it: the row is global, the check is the scope.
 async fn revision(db: &PgPool, hash: RevisionHash) -> Result<Option<Revision>> {
-    let row: Option<RevisionRow> = sqlx::query_as(&format!(
-        "SELECT {REVISION_COLUMNS} FROM revision r WHERE r.hash = $1"
+    let row: Option<RevisionRow> = statement!(query_as!(
+        RevisionRow,
+        ["SELECT " REVISION_COLUMNS " FROM revision r WHERE r.hash = $1"],
+        hash.as_bytes()
     ))
-    .bind(hash.as_bytes())
     .fetch_optional(db)
     .await?;
     row.map(Revision::try_from).transpose()
@@ -1136,20 +1214,20 @@ pub async fn files_of(db: &PgPool, hash: RevisionHash) -> Result<Option<Vec<Tree
 
 /// The entries of `tree`, in path order.
 async fn entries(db: &PgPool, tree: TreeHash) -> Result<Vec<TreeEntry>> {
-    let rows: Vec<(String, Vec<u8>, i64)> = sqlx::query_as(
+    let rows = sqlx::query!(
         "SELECT te.path, te.blob_hash, b.size FROM tree_entry te
          JOIN blob b ON b.hash = te.blob_hash
          WHERE te.tree_hash = $1 ORDER BY te.path",
+        tree.as_bytes()
     )
-    .bind(tree.as_bytes())
     .fetch_all(db)
     .await?;
     rows.into_iter()
-        .map(|(path, blob, size)| {
+        .map(|row| {
             Ok(TreeEntry {
-                path: TreePath::from_str(&path)?,
-                blob: BlobHash::from_bytes(&blob)?,
-                size: u64::try_from(size).unwrap_or(0),
+                path: TreePath::from_str(&row.path)?,
+                blob: BlobHash::from_bytes(&row.blob_hash)?,
+                size: u64::try_from(row.size).unwrap_or(0),
             })
         })
         .collect()
@@ -1167,14 +1245,17 @@ async fn entries(db: &PgPool, tree: TreeHash) -> Result<Vec<TreeEntry>> {
 /// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when the
 /// row's visibility is not one, which the schema forbids.
 pub async fn lock_at(tx: &mut PgConnection, owner: &Handle, slug: &Slug) -> Result<Option<Design>> {
-    let row: Option<DesignRow> = sqlx::query_as(&format!(
-        "SELECT {DESIGN_COLUMNS} FROM design d
+    let row: Option<DesignRow> = statement!(query_as!(
+        DesignRow,
+        [
+            "SELECT " DESIGN_COLUMNS " FROM design d
          JOIN account a ON a.id = d.owner_id
          WHERE a.handle = $1 AND d.slug = $2
          FOR SHARE OF d"
+        ],
+        owner.as_str(),
+        slug.as_str()
     ))
-    .bind(owner.as_str())
-    .bind(slug.as_str())
     .fetch_optional(tx)
     .await?;
     row.map(Design::try_from).transpose()
@@ -1205,16 +1286,26 @@ pub(crate) async fn lock(
     id: DesignId,
     lock: Lock,
 ) -> Result<Option<Design>> {
-    let clause = match lock {
-        Lock::Shared => "FOR SHARE",
-        Lock::Exclusive => "FOR UPDATE",
+    let row: Option<DesignRow> = match lock {
+        Lock::Shared => {
+            statement!(query_as!(
+                DesignRow,
+                ["SELECT " DESIGN_COLUMNS " FROM design d WHERE d.id = $1 FOR SHARE"],
+                id as DesignId
+            ))
+            .fetch_optional(tx)
+            .await?
+        }
+        Lock::Exclusive => {
+            statement!(query_as!(
+                DesignRow,
+                ["SELECT " DESIGN_COLUMNS " FROM design d WHERE d.id = $1 FOR UPDATE"],
+                id as DesignId
+            ))
+            .fetch_optional(tx)
+            .await?
+        }
     };
-    let row: Option<DesignRow> = sqlx::query_as(&format!(
-        "SELECT {DESIGN_COLUMNS} FROM design d WHERE d.id = $1 {clause}"
-    ))
-    .bind(id)
-    .fetch_optional(tx)
-    .await?;
     row.map(Design::try_from).transpose()
 }
 
@@ -1225,10 +1316,12 @@ pub(crate) async fn lock(
 ///
 /// [`Error::Db`] when Postgres refuses.
 pub(crate) async fn owner_handle(tx: &mut PgConnection, design: &Design) -> Result<Handle> {
-    let handle: String = sqlx::query_scalar("SELECT handle FROM account WHERE id = $1")
-        .bind(design.owner_id)
-        .fetch_one(tx)
-        .await?;
+    let handle: String = sqlx::query_scalar!(
+        r#"SELECT handle AS "handle!" FROM account WHERE id = $1"#,
+        design.owner_id as AccountId
+    )
+    .fetch_one(tx)
+    .await?;
     Ok(Handle::from_row(handle))
 }
 
@@ -1240,11 +1333,12 @@ pub(crate) async fn owner_handle(tx: &mut PgConnection, design: &Design) -> Resu
 /// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
 /// holds a hash that is not 32 bytes, which the schema forbids.
 pub(crate) async fn tree_blobs(tx: &mut PgConnection, tree: TreeHash) -> Result<Vec<BlobHash>> {
-    let rows: Vec<Vec<u8>> =
-        sqlx::query_scalar("SELECT DISTINCT blob_hash FROM tree_entry WHERE tree_hash = $1")
-            .bind(tree.as_bytes())
-            .fetch_all(tx)
-            .await?;
+    let rows: Vec<Vec<u8>> = sqlx::query_scalar!(
+        "SELECT DISTINCT blob_hash FROM tree_entry WHERE tree_hash = $1",
+        tree.as_bytes()
+    )
+    .fetch_all(tx)
+    .await?;
     rows.iter().map(|hash| BlobHash::from_bytes(hash)).collect()
 }
 
@@ -1258,17 +1352,17 @@ pub(crate) async fn tree_blobs(tx: &mut PgConnection, tree: TreeHash) -> Result<
 /// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when a row
 /// holds a hash that is not 32 bytes, which the schema forbids.
 pub async fn lock_branches(tx: &mut PgConnection, design: DesignId) -> Result<Vec<Branch>> {
-    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+    let rows = sqlx::query!(
         "SELECT name, head_hash FROM branch WHERE design_id = $1 ORDER BY name FOR SHARE",
+        design as DesignId
     )
-    .bind(design)
     .fetch_all(tx)
     .await?;
     rows.into_iter()
-        .map(|(name, head)| {
+        .map(|row| {
             Ok(Branch {
-                name: BranchName::from_row(name),
-                head: RevisionHash::from_bytes(&head)?,
+                name: BranchName::from_row(row.name),
+                head: RevisionHash::from_bytes(&row.head_hash)?,
             })
         })
         .collect()
@@ -1284,10 +1378,12 @@ pub async fn lock_branches(tx: &mut PgConnection, design: DesignId) -> Result<Ve
 /// [`Error::Db`] when Postgres refuses.
 pub async fn slugs_of(tx: &mut PgConnection, owner: AccountId) -> Result<Vec<Slug>> {
     // One person's designs, by the (owner_id, slug) index.
-    let rows: Vec<String> = sqlx::query_scalar("SELECT slug FROM design WHERE owner_id = $1")
-        .bind(owner)
-        .fetch_all(tx)
-        .await?;
+    let rows: Vec<String> = sqlx::query_scalar!(
+        "SELECT slug FROM design WHERE owner_id = $1",
+        owner as AccountId
+    )
+    .fetch_all(tx)
+    .await?;
     Ok(rows.into_iter().map(Slug::from_row).collect())
 }
 
@@ -1310,21 +1406,21 @@ pub async fn create_fork(
     revision: RevisionHash,
 ) -> Result<Design> {
     crate::slug::release(&mut *tx, owner, slug).await?;
-    let inserted: std::result::Result<DesignId, sqlx::Error> = sqlx::query_scalar(
-        "INSERT INTO design (owner_id, slug, name, default_branch, visibility,
+    let inserted: std::result::Result<DesignId, sqlx::Error> = sqlx::query_scalar!(
+        r#"INSERT INTO design (owner_id, slug, name, default_branch, visibility,
              forked_from_design_id, forked_from_handle, forked_from_slug,
              forked_from_revision_hash)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id AS "id: DesignId""#,
+        owner as AccountId,
+        slug.as_str(),
+        &source.name,
+        &source.default_branch,
+        source.visibility.as_str(),
+        source.id as DesignId,
+        source_owner.as_str(),
+        source.slug.as_str(),
+        revision.as_bytes()
     )
-    .bind(owner)
-    .bind(slug.as_str())
-    .bind(&source.name)
-    .bind(&source.default_branch)
-    .bind(source.visibility.as_str())
-    .bind(source.id)
-    .bind(source_owner.as_str())
-    .bind(source.slug.as_str())
-    .bind(revision.as_bytes())
     .fetch_one(tx)
     .await;
     match inserted {
@@ -1360,14 +1456,14 @@ pub async fn copy_branches(
     to: DesignId,
     names: &[&str],
 ) -> Result<u64> {
-    let copied = sqlx::query(
+    let copied = sqlx::query!(
         "INSERT INTO branch (design_id, name, head_hash, updated_at)
          SELECT $2, b.name, b.head_hash, b.updated_at FROM branch b
          WHERE b.design_id = $1 AND b.name = ANY($3)",
+        from as DesignId,
+        to as DesignId,
+        names as &[&str]
     )
-    .bind(from)
-    .bind(to)
-    .bind(names)
     .execute(tx)
     .await?
     .rows_affected();
@@ -1385,14 +1481,16 @@ pub async fn copy_branches(
 ///
 /// [`Error::Db`] when Postgres refuses.
 pub async fn rebuild_design_revisions(tx: &mut PgConnection, design: DesignId) -> Result<u64> {
-    let added = sqlx::query(&format!(
-        "WITH RECURSIVE {CHAIN}
+    let added = statement!(query!(
+        [
+            "WITH RECURSIVE " CHAIN "
          INSERT INTO design_revision (design_id, revision_hash)
          SELECT DISTINCT $1, c.hash FROM chain c
          ON CONFLICT DO NOTHING"
+        ],
+        design as DesignId,
+        None::<&str>
     ))
-    .bind(design)
-    .bind(None::<&str>)
     .execute(tx)
     .await?
     .rows_affected();
@@ -1425,31 +1523,21 @@ pub struct ForkSource {
 /// [`Error::Db`] when Postgres refuses; [`Error::Malformed`] when the row
 /// holds a hash that is not 32 bytes, which the schema forbids.
 pub async fn fork_source(db: &PgPool, design: DesignId) -> Result<Option<ForkSource>> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        kept_handle: String,
-        kept_slug: String,
-        source_id: Option<DesignId>,
-        handle: Option<String>,
-        slug: Option<String>,
-        revision: Option<Vec<u8>>,
-        reachable: bool,
-    }
     // The design by its key, the source by its key, its owner by its key,
     // the reachability by design_revision's key.
-    let row: Option<Row> = sqlx::query_as(
-        "SELECT d.forked_from_handle AS kept_handle, d.forked_from_slug AS kept_slug,
-                s.id AS source_id, a.handle, s.slug,
+    let row = sqlx::query!(
+        r#"SELECT d.forked_from_handle AS "kept_handle!", d.forked_from_slug AS "kept_slug!",
+                s.id AS "source_id?: DesignId", a.handle AS "handle?", s.slug AS "slug?",
                 d.forked_from_revision_hash AS revision,
                 EXISTS (SELECT 1 FROM design_revision dr
                         WHERE dr.design_id = s.id
-                          AND dr.revision_hash = d.forked_from_revision_hash) AS reachable
+                          AND dr.revision_hash = d.forked_from_revision_hash) AS "reachable!"
          FROM design d
          LEFT JOIN design s ON s.id = d.forked_from_design_id
          LEFT JOIN account a ON a.id = s.owner_id
-         WHERE d.id = $1 AND d.forked_from_handle IS NOT NULL",
+         WHERE d.id = $1 AND d.forked_from_handle IS NOT NULL"#,
+        design as DesignId
     )
-    .bind(design)
     .fetch_optional(db)
     .await?;
     let Some(row) = row else {
@@ -1493,24 +1581,24 @@ pub async fn file_at(
     revision: RevisionHash,
     path: &TreePath,
 ) -> Result<Option<TreeEntry>> {
-    let row: Option<(Vec<u8>, i64)> = sqlx::query_as(
+    let row = sqlx::query!(
         "SELECT te.blob_hash, b.size
          FROM design_revision dr
          JOIN revision r ON r.hash = dr.revision_hash
          JOIN tree_entry te ON te.tree_hash = r.tree_hash
          JOIN blob b ON b.hash = te.blob_hash
          WHERE dr.design_id = $1 AND dr.revision_hash = $2 AND te.path = $3",
+        design as DesignId,
+        revision.as_bytes(),
+        path.as_str()
     )
-    .bind(design)
-    .bind(revision.as_bytes())
-    .bind(path.as_str())
     .fetch_optional(db)
     .await?;
-    row.map(|(blob, size)| {
+    row.map(|row| {
         Ok(TreeEntry {
             path: path.clone(),
-            blob: BlobHash::from_bytes(&blob)?,
-            size: u64::try_from(size).unwrap_or(0),
+            blob: BlobHash::from_bytes(&row.blob_hash)?,
+            size: u64::try_from(row.size).unwrap_or(0),
         })
     })
     .transpose()

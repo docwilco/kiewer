@@ -1,0 +1,114 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH RECURSIVE chain AS (\n    SELECT b.name, b.head_hash AS hash, 0 AS behind\n    FROM branch b WHERE b.design_id = $1 AND ($2::text IS NULL OR b.name = $2)\n    UNION ALL\n    SELECT c.name, r.parent_hash, c.behind + 1\n    FROM chain c JOIN revision r ON r.hash = c.hash WHERE r.parent_hash IS NOT NULL\n)\n         SELECT c.behind::bigint AS \"behind!\", count(*) OVER () AS \"length!\", r.hash, r.tree_hash, r.parent_hash, r.author_handle,\n    to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS \"created_at!\",\n    r.message, r.format_version, r.layer_count, r.copper_layer_count,\n    r.board_width_mm, r.board_height_mm, r.fonts, r.net_count, r.footprint_count\n         FROM chain c JOIN revision r ON r.hash = c.hash\n         ORDER BY c.behind LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "behind!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "length!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "hash",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 3,
+        "name": "tree_hash",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 4,
+        "name": "parent_hash",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 5,
+        "name": "author_handle",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "format_version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "layer_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "copper_layer_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "board_width_mm",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 12,
+        "name": "board_height_mm",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 13,
+        "name": "fonts",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 14,
+        "name": "net_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 15,
+        "name": "footprint_count",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      false,
+      false,
+      true,
+      false,
+      null,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "4f2c55c8ee467953b0254e3e84ad5b6185ae19bca0030445032434136e91e2c3"
+}

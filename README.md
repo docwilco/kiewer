@@ -6,8 +6,10 @@ A site for uploading and sharing KiCad designs, rendered in the browser. The des
 
 One-time, after cloning: `git config core.hooksPath .githooks`, then for
 the viewer's browser build `rustup target add wasm32-unknown-unknown` and
-`cargo install wasm-bindgen-cli --version "$(scripts/wasm-bindgen-version.sh)" --locked`
-(the version Cargo.lock names; CI installs the same way). The hook runs
+`cargo install wasm-bindgen-cli --version "$(scripts/wasm-bindgen-version.sh)" --locked`,
+and for the sqlx stage
+`cargo install sqlx-cli --version "$(scripts/sqlx-version.sh)" --locked --no-default-features --features postgres,rustls`
+(each the version Cargo.lock names; CI installs the same way). The hook runs
 `scripts/checks.sh` (the stages are listed in its usage line) before every
 commit against a snapshot of the index, so unstaged edits never reach the
 checks and the working tree stays usable while they run; it needs `rsync`,
@@ -56,6 +58,21 @@ create and use a database of their own beside it, the URL's name plus
 `_collector`, so the role needs CREATEDB (compose's and CI's `kiewer` is
 the image's superuser). The schema is `migrations/` (its README has the
 naming rule).
+
+Every statement in `kiewer_lib` is a `sqlx::query!`, `query_as!` or
+`query_scalar!` macro, checked at compile time against the offline data
+committed in `.sqlx/`; statement text several statements share is spliced
+in by `kiewer_lib/src/sql.rs`. `scripts/checks.sh` and
+`scripts/release-build.sh` export `SQLX_OFFLINE=true`, so a build reads
+that data and never a database; `.env.example` sets it too, since the
+macros read a `.env` here or in any directory above. After a change to a
+statement or a migration, `scripts/sqlx-prepare.sh` rewrites `.sqlx/`
+against a scratch database beside `DATABASE_URL`'s (its name plus
+`_sqlx`, migrated from `migrations/`), and `git add -A .sqlx` stages the
+new and the deleted files with the change. The sqlx stage runs it with
+`--check` and fails while the data is stale. While a statement is in
+flux, build with `SQLX_OFFLINE=false` and `DATABASE_URL` on that scratch
+database, which the last prepare left migrated.
 
 Sign-in needs an OAuth app of your own at each provider you want, one per
 environment (docs/v1-scope.md, Q57). The callback URL to register is
