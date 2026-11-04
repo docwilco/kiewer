@@ -110,10 +110,11 @@ fn refused(
 }
 
 /// `POST /{handle}/{slug}/settings`: the settings become the design's
-/// and the browser goes to its page, at the new slug when that moved. The
-/// right to edit is the admin role or ownership, checked by the save
-/// itself (`roles::require` inside its transaction); anyone below it is
-/// 403. A malformed value is 422 and a slug a design of the owner's has
+/// and the browser goes to its page, at the new slug when that moved,
+/// with `?design` when the head has no board and so opens on its
+/// schematic (#70). The right to edit is the admin role or ownership,
+/// checked by the save itself (`roles::require` inside its
+/// transaction); anyone below it is 403. A malformed value is 422 and a slug a design of the owner's has
 /// is 409, each with the page again and the reason.
 pub(super) async fn save(
     State(state): State<AppState>,
@@ -155,10 +156,16 @@ pub(super) async fn save(
         Ok(slug) => {
             let keys = cache::of_design(shown.design.id, &shown.owner, shown.design.visibility);
             cache::after_write(state.purge.as_ref(), &keys).await;
-            return Ok(personal(
-                settled.jar,
-                Redirect::to(&format!("/{handle}/{slug}")),
-            ));
+            // A head that opens on its schematic would carry the browser
+            // past the name and the description just saved: `?design`
+            // keeps the design page, as the schematic page's way back does.
+            let page = design_url(&handle, &slug);
+            let location = if shown.opens_on_schematic() {
+                format!("{page}?design")
+            } else {
+                page
+            };
+            return Ok(personal(settled.jar, Redirect::to(&location)));
         }
         Err(error @ Error::Forbidden { .. }) => {
             tracing::info!(%error, design = %slug, "design settings refused");

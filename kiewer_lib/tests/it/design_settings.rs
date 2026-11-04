@@ -18,6 +18,8 @@ use kiewer_test_support::{TempDir, scratch_dir};
 use sqlx::PgPool;
 
 const SCHEMATIC: &[u8] = b"(kicad_sch (version 20250114))";
+const BOARD: &[u8] =
+    b"(kicad_pcb (version 20241229) (generator \"settings\") (layers (0 \"F.Cu\" signal)))";
 
 /// The server over `db` with a filesystem blob store under cargo's
 /// scratch directory and no sign-in provider.
@@ -135,7 +137,10 @@ async fn the_owner_saves_a_description_that_the_page_shows_rendered() {
         )
         .await;
     assert_eq!(saved.status, 303, "{}", saved.body);
-    assert_eq!(saved.header("location"), Some(design_path.as_str()));
+    // The design has no board, so its bare page opens on the schematic,
+    // which shows no description: the save keeps the design page (#70).
+    let design_page = format!("{design_path}?design");
+    assert_eq!(saved.header("location"), Some(design_page.as_str()));
     assert_eq!(saved.header("cache-control"), Some("private, no-store"));
 
     let page = http::request(addr, "GET", &format!("{design_path}?design"), &[], "").await;
@@ -178,6 +183,47 @@ async fn the_owner_saves_a_description_that_the_page_shows_rendered() {
     assert!(
         html.starts_with("<h2>About</h2>"),
         "cached in the row: {html}"
+    );
+}
+
+/// A design whose head has a board opens on it at the bare URL, so the
+/// save goes there, as it does for every design (#70).
+#[tokio::test]
+async fn a_save_on_a_design_with_a_board_goes_to_the_bare_page() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut browser, _, handle) = signed_in(&db, addr).await;
+    let posted = browser
+        .post_multipart(
+            "/upload",
+            &[
+                Part::text("name", "Boarded"),
+                Part::file("board.kicad_pcb", BOARD),
+                Part::file("sheet.kicad_sch", SCHEMATIC),
+            ],
+        )
+        .await;
+    assert_eq!(posted.status, 303, "{}", posted.body);
+    let design_path = format!("/{handle}/boarded");
+    assert_eq!(posted.header("location"), Some(design_path.as_str()));
+
+    let saved = browser
+        .post_form(
+            &format!("{design_path}/settings"),
+            &form("Boarded", "boarded", "a board"),
+        )
+        .await;
+    assert_eq!(saved.status, 303, "{}", saved.body);
+    assert_eq!(saved.header("location"), Some(design_path.as_str()));
+    let page = http::request(addr, "GET", &design_path, &[], "").await;
+    assert_eq!(page.status, 200, "the bare page is the design page");
+    assert!(
+        page.body
+            .contains(r#"<div id="description"><p>a board</p>"#),
+        "{}",
+        page.body
     );
 }
 
@@ -232,8 +278,8 @@ async fn a_moved_slug_redirects_until_a_new_design_takes_it() {
     assert_eq!(saved.status, 303, "{}", saved.body);
     assert_eq!(
         saved.header("location"),
-        Some(new_path.as_str()),
-        "the browser goes to the new slug"
+        Some(format!("{new_path}?design").as_str()),
+        "the browser goes to the new slug's design page"
     );
     let page = http::request(addr, "GET", &format!("{new_path}?design"), &[], "").await;
     assert_eq!(page.status, 200, "{}", page.body);
