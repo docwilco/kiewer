@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use kicad_core::font::outline::{self, FaceMetrics, Ink};
+use kicad_core::font::outline::{self, FaceMetrics, Ink, Overhang};
 use kicad_core::font::placed_texts;
 use kicad_core::geometry::Bounds;
 use kicad_core::hit::{Hit, find_footprint, footprint_bounds, net_pads};
@@ -89,6 +89,15 @@ struct SystemFace {
     advances: Vec<f64>,
     /// Each character's ink in em, measured with its advance.
     inks: Vec<Ink>,
+    /// Each glyph's quad width in em, its advance and its ink's overhang:
+    /// how wide its atlas cell is.
+    widths: Vec<f64>,
+    /// The pairs of neighbouring characters its texts draw, in the order
+    /// the page measures them.
+    pairs: Vec<[char; 2]>,
+    /// Each pair's kern in em, once the page has measured them; 0 for a
+    /// pair the face does not kern.
+    kerns: BTreeMap<[char; 2], f64>,
     /// Where its atlas stands.
     stage: AtlasStage,
 }
@@ -897,10 +906,10 @@ impl Viewer {
 /// the face, the default) or `set_face_system` with the face's measured
 /// ascent and descent. From then on, after every frame the page asks
 /// `atlas_wanted`; for the face it names, the page measures the advances
-/// and the ink of `face_chars` at some pixel size, hands them to
-/// `atlas_plan`, draws each character into the rectangle the plan gives
-/// at the plan's pixels per em, and hands the alpha channel to
-/// `atlas_upload`. The wasm keeps
+/// and the ink of `face_chars` and the widths of the pairs of
+/// `face_pairs` at some pixel size, hands them to `atlas_plan`, draws
+/// each character into the rectangle the plan gives at the plan's pixels
+/// per em, and hands the alpha channel to `atlas_upload`. The wasm keeps
 /// the layout (`kicad_core`) and the quads; the page keeps the font.
 #[wasm_bindgen]
 impl Viewer {
@@ -923,6 +932,21 @@ impl Viewer {
             .unwrap_or_default()
     }
 
+    /// The distinct pairs of neighbouring characters the texts in `face`
+    /// draw, two characters each, run together: the pairs whose widths
+    /// the page measures for their kerns, in this order.
+    #[must_use]
+    pub fn face_pairs(&self, face: &str) -> String {
+        self.silk()
+            .map(|(board, layer)| {
+                atlas::pairs_in(board, layer, face)
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Draw `face` in Newstroke: the default, and the choice when the
     /// browser lacks the face and the person picks nothing else.
     pub fn set_face_stroke(&mut self, face: &str) {
@@ -938,9 +962,14 @@ impl Viewer {
     /// scene; the next `atlas_wanted` names the face, and until the page
     /// uploads its atlas the text is not drawn.
     pub fn set_face_system(&mut self, face: &str, ascent: f64, descent: f64) {
-        let chars = self
+        let (chars, pairs) = self
             .silk()
-            .map(|(board, layer)| atlas::chars_in(board, layer, face))
+            .map(|(board, layer)| {
+                (
+                    atlas::chars_in(board, layer, face),
+                    atlas::pairs_in(board, layer, face),
+                )
+            })
             .unwrap_or_default();
         let metrics = FaceMetrics {
             ascent: if ascent.is_finite() && ascent > 0.0 {
@@ -961,6 +990,9 @@ impl Viewer {
                 chars,
                 advances: Vec::new(),
                 inks: Vec::new(),
+                widths: Vec::new(),
+                pairs,
+                kerns: BTreeMap::new(),
                 stage: AtlasStage::Wanted,
             },
         );
@@ -984,23 +1016,38 @@ impl Viewer {
 
     /// Plan `face`'s atlas from the page's measurement: `advances` is
     /// the width of each character of `face_chars` at `px` pixels per
-    /// em, in that order, and `inks` four numbers per character in the
-    /// same order and size, `measureText`'s `actualBoundingBoxLeft`,
-    /// `Right`, `Ascent` and `Descent` (a character whose four are not
-    /// all numbers counts as inked to its cell, the face's line box one
-    /// advance wide). Returns the pixels per em to draw at, the
-    /// atlas's width and height, the baseline's distance below a cell's
-    /// top in pixels (the face's ascent, as the layout places it), then
-    /// `x, y, width, height` per character, all whole texels; empty when
-    /// the face is unknown, the measurement does not match the
-    /// characters, or the cells fit no atlas.
+    /// em, in that order, `inks` four numbers per character in the same
+    /// order and size, `measureText`'s `actualBoundingBoxLeft`, `Right`,
+    /// `Ascent` and `Descent` (a character whose four are not all
+    /// numbers counts as inked to its cell, the face's line box one
+    /// advance wide), and `pair_widths` the width of each pair of
+    /// `face_pairs` at the same size, which less the two advances is the
+    /// pair's kern. Returns the pixels per em to draw at, the atlas's
+    /// width and height, the baseline's distance below a cell's top in
+    /// pixels (the face's ascent, as the layout places it), then
+    /// `x, y, width, height, pen` per character: its cell in whole
+    /// texels, as wide as its advance and its ink's overhang, and the x
+    /// to draw it at, the overhang's left part in from the cell's left.
+    /// Empty when the face is unknown, the measurement does not match the
+    /// characters and pairs, or the cells fit no atlas.
     #[must_use]
-    pub fn atlas_plan(&mut self, face: &str, px: u32, advances: &[f64], inks: &[f64]) -> Vec<f64> {
+    pub fn atlas_plan(
+        &mut self,
+        face: &str,
+        px: u32,
+        advances: &[f64],
+        inks: &[f64],
+        pair_widths: &[f64],
+    ) -> Vec<f64> {
         let wanted = self.wanted_px(face);
         let Some(system) = self.system_faces.get_mut(face) else {
             return Vec::new();
         };
-        if px == 0 || advances.len() != system.chars.len() || inks.len() != 4 * advances.len() {
+        if px == 0
+            || advances.len() != system.chars.len()
+            || inks.len() != 4 * advances.len()
+            || pair_widths.len() != system.pairs.len()
+        {
             return Vec::new();
         }
         let px_per_em = f64::from(px);
@@ -1011,7 +1058,38 @@ impl Viewer {
             .zip(inks.as_chunks::<4>().0)
             .map(|(&advance, &ink)| measured_ink(ink, px_per_em, advance, system.metrics))
             .collect();
-        let Some(plan) = atlas::plan(&system.advances, system.metrics.line_height(), wanted) else {
+        let overhangs: Vec<Overhang> = system
+            .inks
+            .iter()
+            .zip(&system.advances)
+            .map(|(ink, &advance)| ink.overhang(advance))
+            .collect();
+        system.widths = overhangs
+            .iter()
+            .zip(&system.advances)
+            .map(|(overhang, &advance)| overhang.quad_width(advance))
+            .collect();
+        let advance_of: BTreeMap<char, f64> = system
+            .chars
+            .iter()
+            .copied()
+            .zip(system.advances.iter().copied())
+            .collect();
+        system.kerns = system
+            .pairs
+            .iter()
+            .zip(pair_widths)
+            .filter_map(|(&pair, &width)| {
+                let [first, second] = pair;
+                let kern = atlas::kern(
+                    width / px_per_em,
+                    *advance_of.get(&first)?,
+                    *advance_of.get(&second)?,
+                );
+                Some((pair, kern))
+            })
+            .collect();
+        let Some(plan) = atlas::plan(&system.widths, system.metrics.line_height(), wanted) else {
             system.stage = AtlasStage::Unfit;
             return Vec::new();
         };
@@ -1021,8 +1099,9 @@ impl Viewer {
             f64::from(plan.packing.height),
             system.metrics.ascent * f64::from(plan.px),
         ];
-        for rect in &plan.packing.rects {
+        for (rect, overhang) in plan.packing.rects.iter().zip(&overhangs) {
             out.extend([rect.x, rect.y, rect.width, rect.height].map(f64::from));
+            out.push(f64::from(rect.x) + overhang.left * f64::from(plan.px));
         }
         system.stage = AtlasStage::Planned(plan);
         out
@@ -1040,11 +1119,7 @@ impl Viewer {
         else {
             return;
         };
-        let glyphs = plan.glyphs(
-            &system.chars,
-            &system.advances,
-            system.metrics.line_height(),
-        );
+        let glyphs = plan.glyphs(&system.chars, &system.widths, system.metrics.line_height());
         let advances: BTreeMap<char, f64> = system
             .chars
             .iter()
@@ -1059,6 +1134,8 @@ impl Viewer {
             .zip(system.inks.iter().copied())
             .collect();
         let ink = |c: char| inks.get(&c).copied().unwrap_or_default();
+        let kern =
+            |first: char, second: char| system.kerns.get(&[first, second]).copied().unwrap_or(0.0);
         // The silkscreen's colour under the view in force, as the flat
         // slices have it; a later view change recolours at the next
         // rebuild (#46 has the per-view text).
@@ -1077,6 +1154,7 @@ impl Viewer {
                 &placement,
                 system.metrics,
                 advance,
+                kern,
                 ink,
                 text.knockout,
             );

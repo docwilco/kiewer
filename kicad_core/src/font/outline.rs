@@ -17,17 +17,31 @@
 //! size 1 has its baseline 0.415 mm below its centre anchor and its
 //! capitals 0.9 mm tall.
 //!
-//! A cell is the character's advance wide, from the face's ascent above
-//! the baseline to its descent below, in the text's frame; its ink is
-//! whatever the browser rasterised into the matching atlas rectangle. A
-//! knockout text is its knockout box with the glyphs cut out. The box is
-//! KiCad 10's (`PCB_TEXT::buildBoundingHull`): the bounds of the glyph
-//! ink with the text unturned, grown on every side by KiCad's margin and
-//! no pen, since an outline glyph has none. A cell is taller than that
-//! box, so a knockout's cells are cropped to it, and
-//! [`OutlineText::strips`] are the parts of the box no cropped cell
-//! covers: the viewer fills the strips flat and the cells with their
-//! coverage inverted.
+//! The pen moves by each character's advance, and between two
+//! characters by the pair's kern as the browser measured it, as KiCad's
+//! HarfBuzz shaping sets a kerned pair. A glyph's quad runs from the
+//! face's ascent above the baseline to its descent below, in the text's
+//! frame, and across its advance grown by its ink's [`Overhang`] on
+//! either side, so ink that reaches past the advance (an italic f, a j's
+//! tail) is drawn whole; the atlas rectangle it samples is the same
+//! size. Neighbouring quads overlap where a glyph overhangs or a pair is
+//! kerned, which a plain text draws as it is: a glyph is transparent
+//! around its ink.
+//!
+//! A knockout text is its knockout box with the glyphs cut out. The box
+//! is KiCad 10's (`PCB_TEXT::buildBoundingHull`): the bounds of the
+//! glyph ink with the text unturned, grown on every side by KiCad's
+//! margin and no pen, since an outline glyph has none. The viewer draws
+//! a knockout's cells with their coverage inverted, so two of them over
+//! the same spot would fill each other's ink: a knockout's line is cut
+//! at every quad's edge instead, each piece is one cell that names the
+//! glyph over it and the neighbour whose quad overlaps it, and the
+//! viewer cuts both glyphs' ink out of that piece. A quad is taller than
+//! the box, so the cells are cropped to it, and [`OutlineText::strips`]
+//! are the parts of the box no cropped cell covers: the viewer fills the
+//! strips flat.
+
+use std::ops::Range;
 
 use super::{Placement, cursors, first_baseline, knockout_margin};
 use crate::geometry::{Bounds, Transform};
@@ -89,6 +103,19 @@ impl Ink {
         }
     }
 
+    /// How far this ink reaches past a cell `advance` em wide; nothing
+    /// for no ink.
+    #[must_use]
+    pub fn overhang(self, advance: f64) -> Overhang {
+        if self.is_empty() {
+            return Overhang::default();
+        }
+        Overhang {
+            left: self.left.max(0.0),
+            right: (self.right - advance).max(0.0),
+        }
+    }
+
     /// Whether there is no ink: no width or no height, as for a space,
     /// or a measurement that is not a number.
     fn is_empty(self) -> bool {
@@ -96,29 +123,65 @@ impl Ink {
     }
 }
 
-/// One character's cell on the board.
+/// How far a glyph's ink reaches past its advance, in em: left of the
+/// pen and right of the advance, each 0 where the ink stays inside. The
+/// glyph's quad on the board and its rectangle in the atlas are both the
+/// advance plus the two, with the pen `left` in from their left edge.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Overhang {
+    /// How far the ink reaches left of the pen.
+    pub left: f64,
+    /// How far it reaches right of the advance.
+    pub right: f64,
+}
+
+impl Overhang {
+    /// The width of the quad of a glyph `advance` em wide, in em.
+    #[must_use]
+    pub fn quad_width(self, advance: f64) -> f64 {
+        self.left + advance + self.right
+    }
+}
+
+/// One cell on the board: the quad of a glyph, or a piece of it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
     /// The character.
     pub c: char,
-    /// The corners of the part of the cell drawn, in board millimetres,
-    /// in reading order: the top left of the glyph, its top right,
-    /// bottom right, bottom left. Mirroring and rotation are applied, so
-    /// for a mirrored text the "top left" is on the right.
+    /// The corners of the part of the glyph's quad drawn, in board
+    /// millimetres, in reading order: the top left of the glyph, its top
+    /// right, bottom right, bottom left. Mirroring and rotation are
+    /// applied, so for a mirrored text the "top left" is on the right.
     pub corners: [Point; 4],
-    /// Which part of the cell `corners` covers, as fractions of the
-    /// cell's width and height from its top left in reading order: 0 to
-    /// 1 both ways for a whole cell, less for a knockout's cell cropped
-    /// to its box. The atlas samples the same part of the glyph's
-    /// rectangle.
+    /// Which part of the glyph's quad `corners` covers, as fractions of
+    /// the quad's width and height from its top left in reading order:
+    /// 0 to 1 both ways for a whole quad, less for a knockout's piece of
+    /// its line, cropped to its box. The atlas samples the same part of
+    /// the glyph's rectangle.
+    pub crop: Bounds,
+    /// In a knockout, the neighbouring glyph whose quad covers this same
+    /// piece of the line (a kerned pair, or ink overhanging the
+    /// neighbour), with the part of its quad the piece is: the viewer
+    /// cuts both glyphs' ink out here. `None` otherwise.
+    pub neighbour: Option<GlyphPart>,
+}
+
+/// A part of a glyph's quad: the character, and which part as
+/// [`Cell::crop`] has it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlyphPart {
+    /// The character.
+    pub c: char,
+    /// Which part of its quad, as fractions from its top left.
     pub crop: Bounds,
 }
 
 /// A text laid out in an outline face.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct OutlineText {
-    /// One cell per character drawn; spaces and tabs advance the pen
-    /// and have no cell.
+    /// One cell per character drawn, or for a knockout one per piece of
+    /// a line a glyph's quad covers; spaces and tabs advance the pen and
+    /// have no cell.
     pub cells: Vec<Cell>,
     /// For a knockout text, the parts of its knockout box no cell
     /// covers, each a quadrilateral in board millimetres; empty
@@ -206,25 +269,36 @@ pub const WHOLE_CELL: Bounds = Bounds {
     max: Point { x: 1.0, y: 1.0 },
 };
 
-/// A glyph's cell and its ink, in the text's unrotated frame.
+/// A glyph's quad and its ink, in the text's unrotated frame.
 struct PlacedGlyph {
     c: char,
-    cell: Rect,
+    quad: Rect,
     ink: Option<Rect>,
 }
 
+/// One line of a text: its glyphs (a range of the text's) and its box,
+/// from the pen's start to its end and from the face's ascent to its
+/// descent.
+struct Line {
+    glyphs: Range<usize>,
+    rect: Rect,
+}
+
 /// Lays `text` out as `placement` says in a face of `metrics`, each
-/// character `advance` em wide with its ink where `ink` says (the
+/// character `advance` em wide, each character after another moved by
+/// the pair's `kern` em, and each glyph's ink where `ink` says (the
 /// browser's measurements; a space is `advance(' ')`, a tab reaches the
 /// next stop as the stroke font places it). With `knockout`, the
-/// knockout box is the ink's bounds grown by KiCad's margin, the cells
-/// are cropped to it and the strips of it around them are computed too.
+/// knockout box is the ink's bounds grown by KiCad's margin, the lines
+/// are cut into cells that do not overlap, cropped to it, and the strips
+/// of it around them are computed too.
 #[must_use]
 pub fn layout(
     text: &str,
     placement: &Placement,
     metrics: FaceMetrics,
     advance: impl Fn(char) -> f64,
+    kern: impl Fn(char, char) -> f64,
     ink: impl Fn(char) -> Ink,
     knockout: bool,
 ) -> OutlineText {
@@ -243,8 +317,7 @@ pub fn layout(
     );
     let origin = placement.position;
     let mut glyphs: Vec<PlacedGlyph> = Vec::new();
-    let mut blanks: Vec<Rect> = Vec::new();
-    let mut line_boxes: Vec<Rect> = Vec::new();
+    let mut placed_lines: Vec<Line> = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         #[expect(
             clippy::cast_precision_loss,
@@ -262,18 +335,26 @@ pub fn layout(
             },
         };
         let first = glyphs.len();
-        line_boxes.push(line_cells(
+        let rect = line_cells(
             line,
             line_box,
             placement.justify.horizontal,
             em.x,
             &advance,
+            &kern,
             &mut glyphs,
-            &mut blanks,
-        ));
-        for glyph in glyphs.get_mut(first..).unwrap_or_default() {
-            glyph.ink = ink_at(ink(glyph.c), glyph.cell.min.x, baseline, em);
-        }
+        );
+        reach_ink(
+            glyphs.get_mut(first..).unwrap_or_default(),
+            baseline,
+            em,
+            &advance,
+            &ink,
+        );
+        placed_lines.push(Line {
+            glyphs: first..glyphs.len(),
+            rect,
+        });
     }
     if glyphs.is_empty() {
         // Nothing to draw: no glyph, so no box to cut one out of.
@@ -281,24 +362,13 @@ pub fn layout(
     }
     let unplaced = if knockout {
         let margin = knockout_margin(placement.pen, size.height);
-        let Some(unplaced) = knockout_parts(&glyphs, &blanks, &line_boxes, margin) else {
+        let Some(unplaced) = knockout_parts(&glyphs, &placed_lines, margin) else {
             // No ink anywhere: no box, and nothing in a cell to cut out.
             return OutlineText::default();
         };
         unplaced
     } else {
-        Unplaced {
-            cells: glyphs
-                .iter()
-                .map(|glyph| UnplacedCell {
-                    c: glyph.c,
-                    rect: glyph.cell,
-                    crop: WHOLE_CELL,
-                })
-                .collect(),
-            strips: Vec::new(),
-            knockout_box: None,
-        }
+        whole_quads(&glyphs)
     };
     let mirror = placement.justify.mirror;
     let turn = Transform::new(origin, placement.angle);
@@ -321,6 +391,7 @@ pub fn layout(
                 c: cell.c,
                 corners: cell.rect.corners().map(place),
                 crop: cell.crop,
+                neighbour: cell.neighbour,
             })
             .collect(),
         strips: unplaced
@@ -340,12 +411,49 @@ struct Unplaced {
     knockout_box: Option<Rect>,
 }
 
-/// A cell in the text's frame: the part of it drawn and which part
-/// that is, as [`Cell::crop`] has it.
+/// A cell in the text's frame: the part of its glyph's quad drawn,
+/// which part that is and the neighbour over it, as [`Cell`] has them.
 struct UnplacedCell {
     c: char,
     rect: Rect,
     crop: Bounds,
+    neighbour: Option<GlyphPart>,
+}
+
+/// A plain text's parts: every glyph's quad whole, and no strips or box.
+fn whole_quads(glyphs: &[PlacedGlyph]) -> Unplaced {
+    Unplaced {
+        cells: glyphs
+            .iter()
+            .map(|glyph| UnplacedCell {
+                c: glyph.c,
+                rect: glyph.quad,
+                crop: WHOLE_CELL,
+                neighbour: None,
+            })
+            .collect(),
+        strips: Vec::new(),
+        knockout_box: None,
+    }
+}
+
+/// Fills in the ink of `glyphs`, one line's, whose pens are on
+/// `baseline` in a face whose em is `em`, and grows each quad (so far its
+/// cell, the pen to the advance) by its ink's overhang.
+fn reach_ink(
+    glyphs: &mut [PlacedGlyph],
+    baseline: f64,
+    em: Point,
+    advance: &impl Fn(char) -> f64,
+    ink: &impl Fn(char) -> Ink,
+) {
+    for glyph in glyphs {
+        let measured = ink(glyph.c);
+        let overhang = measured.overhang(advance(glyph.c));
+        glyph.ink = ink_at(measured, glyph.quad.min.x, baseline, em);
+        glyph.quad.min.x -= overhang.left * em.x;
+        glyph.quad.max.x += overhang.right * em.x;
+    }
 }
 
 /// Where `measured` ink sits for a glyph whose pen is at `pen_x` on
@@ -364,86 +472,133 @@ fn ink_at(measured: Ink, pen_x: f64, baseline: f64, em: Point) -> Option<Rect> {
 }
 
 /// A knockout's parts: the box is the union of the glyphs' ink grown by
-/// `margin`, the cells are cropped to it, and the strips are the box
-/// less the cropped lines plus the cropped blanks. `None` when no glyph
-/// has ink.
-fn knockout_parts(
-    glyphs: &[PlacedGlyph],
-    blanks: &[Rect],
-    line_boxes: &[Rect],
-    margin: f64,
-) -> Option<Unplaced> {
+/// `margin`; each line, from the first quad's or the pen's start to the
+/// last's end, is cut into pieces at every quad's edge, and each piece
+/// cropped to the box is a cell (of the glyph whose quad covers it, and
+/// of the neighbour whose quad covers it too) or, covered by none, a
+/// blank. The strips are the box less the cropped lines, plus the
+/// blanks. `None` when no glyph has ink.
+fn knockout_parts(glyphs: &[PlacedGlyph], lines: &[Line], margin: f64) -> Option<Unplaced> {
     let knockout_box = glyphs
         .iter()
         .filter_map(|glyph| glyph.ink)
         .reduce(Rect::union)?
         .grown(margin);
-    let lines: Vec<Rect> = line_boxes
-        .iter()
-        .map(|line| line.crop(knockout_box))
-        .filter(|line| !line.is_empty())
-        .collect();
-    let mut strips = knockout_strips(&lines, knockout_box);
-    strips.extend(
-        blanks
+    let mut cells = Vec::new();
+    let mut blanks = Vec::new();
+    let mut cropped_lines = Vec::new();
+    for line in lines {
+        let glyphs = glyphs.get(line.glyphs.clone()).unwrap_or_default();
+        let extent = glyphs
             .iter()
-            .map(|blank| blank.crop(knockout_box))
-            .filter(|blank| !blank.is_empty()),
-    );
+            .fold(line.rect, |extent, glyph| extent.union(glyph.quad));
+        for (piece, over) in pieces(extent, glyphs) {
+            let part = piece.crop(knockout_box);
+            if part.is_empty() {
+                continue;
+            }
+            // A third quad over the same piece, which only an overhang
+            // reaching past a whole neighbour makes, is left out: its ink
+            // there is filled.
+            let mut over = over.into_iter();
+            match over.next() {
+                None => blanks.push(part),
+                Some(glyph) => cells.push(UnplacedCell {
+                    c: glyph.c,
+                    rect: part,
+                    crop: part_of(glyph.quad, part),
+                    neighbour: over.next().map(|neighbour| GlyphPart {
+                        c: neighbour.c,
+                        crop: part_of(neighbour.quad, part),
+                    }),
+                }),
+            }
+        }
+        let cropped = extent.crop(knockout_box);
+        if !cropped.is_empty() {
+            cropped_lines.push(cropped);
+        }
+    }
+    let mut strips = knockout_strips(&cropped_lines, knockout_box);
+    strips.extend(blanks);
     Some(Unplaced {
-        cells: glyphs
-            .iter()
-            .filter_map(|glyph| cropped(glyph, knockout_box))
-            .collect(),
+        cells,
         strips,
         knockout_box: Some(knockout_box),
     })
 }
 
-/// The part of `glyph`'s cell inside the knockout box `knockout_box`, with the
-/// fractions of the cell it is; `None` when none of it is.
-fn cropped(glyph: &PlacedGlyph, knockout_box: Rect) -> Option<UnplacedCell> {
-    let cell = glyph.cell;
-    let part = cell.crop(knockout_box);
-    if part.is_empty() {
-        return None;
-    }
-    // A part that is not empty comes of a cell that is not, so neither
-    // extent is zero.
-    let (width, height) = (cell.max.x - cell.min.x, cell.max.y - cell.min.y);
+/// The line `extent` cut at every edge of `glyphs`' quads, left to
+/// right, each piece with the glyphs whose quads cover it in reading
+/// order: none for a blank, two where neighbouring quads overlap.
+fn pieces(extent: Rect, glyphs: &[PlacedGlyph]) -> Vec<(Rect, Vec<&PlacedGlyph>)> {
+    let mut edges: Vec<f64> = glyphs
+        .iter()
+        .flat_map(|glyph| [glyph.quad.min.x, glyph.quad.max.x])
+        .chain([extent.min.x, extent.max.x])
+        .collect();
+    edges.sort_by(f64::total_cmp);
+    edges.dedup();
+    edges
+        .windows(2)
+        .filter_map(|pair| {
+            let (&from, &to) = (pair.first()?, pair.get(1)?);
+            let piece = Rect {
+                min: Point {
+                    x: from,
+                    y: extent.min.y,
+                },
+                max: Point {
+                    x: to,
+                    y: extent.max.y,
+                },
+            };
+            let over = glyphs
+                .iter()
+                .filter(|glyph| glyph.quad.min.x <= from && glyph.quad.max.x >= to)
+                .collect();
+            Some((piece, over))
+        })
+        .collect()
+}
+
+/// Which part of `quad` the `part` inside it is, as fractions of its
+/// width and height from its top left. A part that is not empty lies in
+/// a quad that is not, so neither extent is zero.
+fn part_of(quad: Rect, part: Rect) -> Bounds {
+    let (width, height) = (quad.max.x - quad.min.x, quad.max.y - quad.min.y);
     let fraction = |p: Point| Point {
-        x: (p.x - cell.min.x) / width,
-        y: (p.y - cell.min.y) / height,
+        x: (p.x - quad.min.x) / width,
+        y: (p.y - quad.min.y) / height,
     };
-    Some(UnplacedCell {
-        c: glyph.c,
-        rect: part,
-        crop: Bounds {
-            min: fraction(part.min),
-            max: fraction(part.max),
-        },
-    })
+    Bounds {
+        min: fraction(part.min),
+        max: fraction(part.max),
+    }
 }
 
 /// The cells of one line: `line_box` gives the anchor's x and the line's
 /// top and bottom; the line is justified about the anchor as
-/// `horizontal` says, each glyph's cell pushed to `glyphs` (its ink left
-/// for the caller) and each space's or tab's to `blanks`. Returns the
-/// line's box, anchor to advance.
+/// `horizontal` says, the pen moving by `advance` and between two
+/// characters by their `kern`, and each glyph's cell, pen to advance,
+/// pushed to `glyphs` as its quad (the caller widens it by the ink's
+/// overhang and fills the ink in). Spaces and tabs push nothing. Returns
+/// the line's box, from the pen's start to its end.
 fn line_cells(
     line: &str,
     line_box: Rect,
     horizontal: Horizontal,
     em: f64,
     advance: &impl Fn(char) -> f64,
+    kern: &impl Fn(char, char) -> f64,
     glyphs: &mut Vec<PlacedGlyph>,
-    blanks: &mut Vec<Rect>,
 ) -> Rect {
     let advances = cursors(
         line,
         em,
         advance(' ') * em,
         |c| advance(c) * em,
+        |previous, c| kern(previous, c) * em,
         Point::default(),
     );
     let width = advances.last().map_or(0.0, |(_, end)| end.x);
@@ -453,29 +608,26 @@ fn line_cells(
             Horizontal::Center => -width / 2.0,
             Horizontal::Right => -width,
         };
-    for pair in advances.windows(2) {
-        let (Some((c, from)), Some((_, to))) = (pair.first(), pair.get(1)) else {
-            continue;
-        };
-        let rect = Rect {
-            min: Point {
-                x: start_x + from.x,
-                y: line_box.min.y,
-            },
-            max: Point {
-                x: start_x + to.x,
-                y: line_box.max.y,
-            },
-        };
+    // The last entry is the pen at the end of the line, no character.
+    let characters = advances.split_last().map_or(&[][..], |(_, rest)| rest);
+    for &(c, from) in characters {
         if matches!(c, ' ' | '\t') {
             // A blank has no glyph; in a knockout it is part of the
             // filled box.
-            blanks.push(rect);
             continue;
         }
         glyphs.push(PlacedGlyph {
-            c: *c,
-            cell: rect,
+            c,
+            quad: Rect {
+                min: Point {
+                    x: start_x + from.x,
+                    y: line_box.min.y,
+                },
+                max: Point {
+                    x: start_x + (from.x + advance(c) * em),
+                    y: line_box.max.y,
+                },
+            },
             ink: None,
         });
     }
@@ -564,6 +716,11 @@ mod tests {
         ADVANCE
     }
 
+    /// A monospace face kerns no pair.
+    fn no_kern(_: char, _: char) -> f64 {
+        0.0
+    }
+
     /// Ink that fills the whole of a [`CONSOLAS`] cell.
     fn whole_cell(_: char) -> Ink {
         Ink::whole_cell(ADVANCE, CONSOLAS)
@@ -619,6 +776,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             monospace,
+            no_kern,
             whole_cell,
             false,
         );
@@ -657,6 +815,7 @@ mod tests {
             ),
             CONSOLAS,
             monospace,
+            no_kern,
             whole_cell,
             false,
         );
@@ -673,7 +832,7 @@ mod tests {
             width: 2.0,
             height: 1.0,
         };
-        let text = layout("I", &wide, CONSOLAS, monospace, whole_cell, false);
+        let text = layout("I", &wide, CONSOLAS, monospace, no_kern, whole_cell, false);
         let corners = cell(&text, 0).corners;
         assert!(close(corners[1].x - corners[0].x, ADVANCE * 1.4 * 2.0));
         assert!(close(corners[3].y - corners[0].y, 1.4));
@@ -690,6 +849,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             tall,
             monospace,
+            no_kern,
             whole_cell,
             false,
         );
@@ -717,6 +877,7 @@ mod tests {
             &placement(left, 0.0),
             CONSOLAS,
             monospace,
+            no_kern,
             whole_cell,
             false,
         );
@@ -727,12 +888,15 @@ mod tests {
 
     #[test]
     fn a_character_the_browser_measured_wider_gets_a_wider_cell() {
+        let advance = |c: char| if c == 'W' { 0.9 } else { 0.3 };
+        // Each glyph's ink fills its own cell, so neither overhangs.
         let text = layout(
             "iW",
             &placement(Justify::default(), 0.0),
             CONSOLAS,
-            |c| if c == 'W' { 0.9 } else { 0.3 },
-            whole_cell,
+            advance,
+            no_kern,
+            |c| Ink::whole_cell(advance(c), CONSOLAS),
             false,
         );
         let i = cell(&text, 0).corners;
@@ -749,6 +913,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             monospace,
+            no_kern,
             whole_cell,
             false,
         );
@@ -761,6 +926,7 @@ mod tests {
             &placement(mirror, 0.0),
             CONSOLAS,
             monospace,
+            no_kern,
             whole_cell,
             false,
         );
@@ -778,6 +944,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             monospace,
+            no_kern,
             whole_cell,
             false,
         );
@@ -786,6 +953,7 @@ mod tests {
             &placement(Justify::default(), 90.0),
             CONSOLAS,
             monospace,
+            no_kern,
             whole_cell,
             false,
         );
@@ -802,6 +970,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             monospace,
+            no_kern,
             whole_cell,
             true,
         );
@@ -829,6 +998,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             monospace,
+            no_kern,
             capital,
             true,
         );
@@ -909,6 +1079,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             monospace,
+            no_kern,
             capital,
             true,
         );
@@ -935,6 +1106,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             monospace,
+            no_kern,
             |_| Ink::default(),
             true,
         );
@@ -948,6 +1120,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             monospace,
+            no_kern,
             capital,
             false,
         );
@@ -971,6 +1144,7 @@ mod tests {
             &placement(left, 0.0),
             CONSOLAS,
             monospace,
+            no_kern,
             capital,
             true,
         );
@@ -979,6 +1153,7 @@ mod tests {
             &placement(mirrored, 0.0),
             CONSOLAS,
             monospace,
+            no_kern,
             capital,
             true,
         );
@@ -989,6 +1164,204 @@ mod tests {
             assert_point(b, 20.0 - a.x, a.y);
         }
         assert!(knockout_box(&flipped)[0].x > 10.0, "{flipped:?}");
+    }
+
+    /// A proportional face: an f 0.3 em wide, everything else
+    /// [`ADVANCE`].
+    fn proportional(c: char) -> f64 {
+        if c == 'f' { 0.3 } else { ADVANCE }
+    }
+
+    /// An italic f's ink, reaching 0.1 em left of its pen and 0.4 em
+    /// past its 0.3 em advance; every other glyph a [`capital`].
+    fn italic_f(c: char) -> Ink {
+        if c == 'f' {
+            Ink {
+                left: 0.1,
+                right: 0.7,
+                ascent: 0.7,
+                descent: 0.2,
+            }
+        } else {
+            capital(c)
+        }
+    }
+
+    /// A face that kerns every pair by -0.1 em.
+    fn kern_all(_: char, _: char) -> f64 {
+        -0.1
+    }
+
+    fn left_justified() -> Justify {
+        Justify {
+            horizontal: Horizontal::Left,
+            vertical: Vertical::Center,
+            mirror: false,
+        }
+    }
+
+    #[test_case(capital('I'), ADVANCE, 0.0, 0.0; "ink inside the advance")]
+    #[test_case(italic_f('f'), 0.3, 0.1, 0.4; "ink past both sides")]
+    #[test_case(Ink::default(), 0.3, 0.0, 0.0; "no ink")]
+    fn the_overhang_is_how_far_the_ink_reaches_past_the_advance(
+        ink: Ink,
+        advance: f64,
+        left: f64,
+        right: f64,
+    ) {
+        let overhang = ink.overhang(advance);
+        assert!(
+            close(overhang.left, left) && close(overhang.right, right),
+            "{overhang:?}"
+        );
+        assert!(close(overhang.quad_width(advance), left + advance + right));
+    }
+
+    #[test]
+    fn a_glyph_whose_ink_overhangs_its_advance_has_a_quad_that_reaches_it_and_the_pen_moves_by_the_advance()
+     {
+        let text = layout(
+            "fI",
+            &placement(left_justified(), 0.0),
+            CONSOLAS,
+            proportional,
+            no_kern,
+            italic_f,
+            false,
+        );
+        // The pen starts at 10: the f's quad reaches 0.1 em left of it
+        // and 0.7 em right, at 1.4 mm to the em, and is drawn whole.
+        let f = cell(&text, 0);
+        assert!(close(f.corners[0].x, 10.0 - 0.14), "{f:?}");
+        assert!(close(f.corners[1].x, 10.0 + 0.98), "{f:?}");
+        assert_eq!((f.crop, f.neighbour), (WHOLE_CELL, None));
+        // The I's pen is the f's advance on, so the quads overlap.
+        let i = cell(&text, 1).corners;
+        assert!(close(i[0].x, 10.0 + 0.42), "{i:?}");
+        assert!(close(i[1].x, 10.0 + 0.42 + ADVANCE * 1.4), "{i:?}");
+    }
+
+    #[test_case("AV", (ADVANCE - 0.1) * 1.4; "a kerned pair sits closer by the kern")]
+    #[test_case("A\tV", 3.0 * 1.4 + ADVANCE * 1.4; "a tab is kerned on neither side")]
+    fn the_kern_moves_the_second_glyph_of_a_pair(text: &str, expected_dx: f64) {
+        let laid = layout(
+            text,
+            &placement(left_justified(), 0.0),
+            CONSOLAS,
+            monospace,
+            kern_all,
+            capital,
+            false,
+        );
+        let dx = cell(&laid, 1).corners[0].x - cell(&laid, 0).corners[0].x;
+        assert!(close(dx, expected_dx), "{dx}");
+    }
+
+    #[test]
+    fn a_centred_kerned_pair_is_centred_on_its_kerned_width() {
+        let text = layout(
+            "AV",
+            &placement(Justify::default(), 0.0),
+            CONSOLAS,
+            monospace,
+            kern_all,
+            capital,
+            false,
+        );
+        // Two advances less the kern, 1.0 em or 1.4 mm, centred on 10.
+        let (a, v) = (cell(&text, 0).corners, cell(&text, 1).corners);
+        assert!(
+            close(a[0].x, 10.0 - 0.7) && close(v[1].x, 10.0 + 0.7),
+            "{text:?}"
+        );
+    }
+
+    /// Whether two upright quads share more than an edge.
+    fn overlap(a: &[Point; 4], b: &[Point; 4]) -> bool {
+        let overlap_x = a[1].x.min(b[1].x) - a[0].x.max(b[0].x);
+        let overlap_y = a[3].y.min(b[3].y) - a[0].y.max(b[0].y);
+        overlap_x > 1e-9 && overlap_y > 1e-9
+    }
+
+    #[test_case("II", monospace, no_kern, capital, &[('I', None), ('I', None)]; "a monospace pair, one cell each")]
+    #[test_case("fI", proportional, no_kern, italic_f, &[('f', None), ('f', Some('I')), ('I', None)]; "an f overhanging the I after it")]
+    #[test_case("AV", monospace, kern_all, capital, &[('A', None), ('A', Some('V')), ('V', None)]; "a kerned pair")]
+    fn a_knockouts_cells_do_not_overlap_and_name_each_glyph_whose_quad_covers_them(
+        text: &str,
+        advance: fn(char) -> f64,
+        kern: fn(char, char) -> f64,
+        ink: fn(char) -> Ink,
+        expected: &[(char, Option<char>)],
+    ) {
+        let laid = layout(
+            text,
+            &placement(left_justified(), 0.0),
+            CONSOLAS,
+            advance,
+            kern,
+            ink,
+            true,
+        );
+        let named: Vec<(char, Option<char>)> = laid
+            .cells
+            .iter()
+            .map(|cell| (cell.c, cell.neighbour.map(|n| n.c)))
+            .collect();
+        assert_eq!(named, expected);
+        // A shared piece runs from where the neighbour's quad starts to
+        // where the glyph's ends.
+        for cell in &laid.cells {
+            if let Some(neighbour) = cell.neighbour {
+                assert!(close(cell.crop.max.x, 1.0), "{cell:?}");
+                assert!(close(neighbour.crop.min.x, 0.0), "{cell:?}");
+            }
+        }
+        // No inverted cell over another, none outside the box, and the
+        // cells and strips tile the box.
+        for (index, a) in laid.cells.iter().enumerate() {
+            for b in laid.cells.iter().skip(index + 1) {
+                assert!(!overlap(&a.corners, &b.corners), "{a:?} overlaps {b:?}");
+            }
+            for strip in &laid.strips {
+                assert!(!overlap(&a.corners, strip), "{a:?} overlaps {strip:?}");
+            }
+        }
+        let outer = knockout_box(&laid);
+        for corner in laid.cells.iter().flat_map(|cell| cell.corners) {
+            assert!(
+                corner.x >= outer[0].x - 1e-9
+                    && corner.x <= outer[2].x + 1e-9
+                    && corner.y >= outer[0].y - 1e-9
+                    && corner.y <= outer[2].y + 1e-9,
+                "{corner:?} is outside {outer:?}"
+            );
+        }
+        let tiled: f64 = laid
+            .cells
+            .iter()
+            .map(|cell| area(&cell.corners))
+            .sum::<f64>()
+            + laid.strips.iter().map(area).sum::<f64>();
+        assert!(close(tiled, area(&outer)), "{tiled} vs {}", area(&outer));
+    }
+
+    #[test]
+    fn a_knockouts_box_is_the_ink_grown_by_the_margin_whatever_the_overhang() {
+        // The f's ink reaches 0.1 em left of the pen at 10 and 0.7 em
+        // right; the I's ends 0.05 em short of its cell, 0.3 + 0.5 em on.
+        let laid = layout(
+            "fI",
+            &placement(left_justified(), 0.0),
+            CONSOLAS,
+            proportional,
+            no_kern,
+            italic_f,
+            true,
+        );
+        let margin = 1.0 / 9.0;
+        let outer = knockout_box(&laid);
+        assert!(close(outer[0].x, 10.0 - 0.14 - margin), "{outer:?}");
+        assert!(close(outer[1].x, 10.0 + 0.8 * 1.4 + margin), "{outer:?}");
     }
 
     const BOARD_PATH: &str = concat!(
@@ -1072,7 +1445,9 @@ mod tests {
             '7' => inks.get(1).copied().unwrap_or_default(),
             _ => Ink::default(),
         };
-        let laid = layout(&content, &placement, CONSOLAS, monospace, ink, true);
+        let laid = layout(
+            &content, &placement, CONSOLAS, monospace, no_kern, ink, true,
+        );
         // KiCad's plot viewer-drop/exports/midi8knob-F_Silkscreen.svg
         // draws the box with these corners, 50 mm short of the board's
         // in both axes and rounded to 0.1 um: the text's top left, top

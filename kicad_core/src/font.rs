@@ -315,20 +315,31 @@ pub(crate) fn knockout_margin(pen: f64, height: f64) -> f64 {
 
 /// Where the pen is after each character of `line`, from `start`, in a
 /// font whose em is `em` wide and whose space advances `space`, each
-/// other character `advance(c)`, all in millimetres: a tab reaches the
-/// next stop, at every [`TAB_WIDTH`] ems plus the space, as KiCad's
-/// stroke font places them. Ends with `('\0', end)`.
+/// other character `advance(c)`, and each character after another moved
+/// by the pair's `kern(previous, c)`, all in millimetres: a tab reaches
+/// the next stop, at every [`TAB_WIDTH`] ems plus the space, as KiCad's
+/// stroke font places them, and no pair with a tab in it is kerned. Ends
+/// with `('\0', end)`.
 pub(crate) fn cursors(
     line: &str,
     em: f64,
     space: f64,
     advance: impl Fn(char) -> f64,
+    kern: impl Fn(char, char) -> f64,
     start: Point,
 ) -> Vec<(char, Point)> {
     let mut cursor = start;
     let mut column = 0usize;
     let mut out = Vec::new();
+    let mut previous: Option<char> = None;
     for c in line.chars() {
+        if let Some(previous) = previous
+            && previous != '\t'
+            && c != '\t'
+        {
+            cursor.x += kern(previous, c);
+        }
+        previous = Some(c);
         out.push((c, cursor));
         match c {
             '\t' => {
@@ -383,6 +394,7 @@ fn stroke_cursors(line: &str, size: Size, start: Point) -> Vec<(char, Point)> {
         size.width,
         size.width * space_width(),
         |c| size.width * glyph(c).advance,
+        |_, _| 0.0,
         start,
     )
 }

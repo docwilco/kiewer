@@ -6,12 +6,15 @@
 //! size they are rasterised at for the current zoom, and the quads.
 //!
 //! The split with the page: the page measures each character's advance
-//! and ink and the face's ascent and descent with `measureText`, this module
-//! plans the atlas ([`plan`]), the page draws every glyph into its
-//! planned rectangle and hands back the alpha channel, and [`Quads::add`]
-//! places the cells `kicad_core::font::outline` laid out on the board
-//! with the texture coordinates of [`Plan::glyphs`]. The texture is
-//! coverage only (R8): the colour is the layer's, from the vertex.
+//! and ink, each pair's kern ([`pairs_in`], [`kern`]) and the face's
+//! ascent and descent with `measureText`, this module plans the atlas
+//! ([`plan`]) with each glyph's rectangle as wide as its quad (its
+//! advance and its ink's overhang, so no ink is clipped), the page draws
+//! every glyph into its planned rectangle and hands back the alpha
+//! channel, and [`Quads::add`] places the cells
+//! `kicad_core::font::outline` laid out on the board with the texture
+//! coordinates of [`Plan::glyphs`]. The texture is coverage only (R8):
+//! the colour is the layer's, from the vertex.
 //!
 //! Sharpness across zoom: a face's atlas is rasterised at a power of two
 //! pixels per em, chosen from the largest text in the face at the
@@ -25,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use bytemuck::{Pod, Zeroable};
 use kicad_core::font::outline::{EM_PER_HEIGHT, OutlineText};
 use kicad_core::font::placed_texts;
+use kicad_core::geometry::Bounds;
 use kicad_core::model::{Board, LayerId, Point, Text};
 
 /// The atlas's largest side: the WebGL2 floor's `max_texture_dimension_2d`.
@@ -152,27 +156,27 @@ pub struct Glyphs {
 }
 
 impl Plan {
-    /// The glyphs of this plan for `chars`, each `advances` em wide (both
-    /// in the order given to [`plan`]), with a line box `line_height` em
-    /// tall: the sample of a character is its packed rectangle's origin
-    /// and its advance and line height at this plan's pixels per em,
-    /// unrounded, so the quad on the board, which is exactly those sizes
-    /// in millimetres, samples exactly the glyph and not the texel the
-    /// rounding added.
+    /// The glyphs of this plan for `chars`, each quad `widths` em wide
+    /// (both in the order given to [`plan`]), with a line box
+    /// `line_height` em tall: the sample of a character is its packed
+    /// rectangle's origin and its quad's width and line height at this
+    /// plan's pixels per em, unrounded, so the quad on the board, which
+    /// is exactly those sizes in millimetres, samples exactly the glyph
+    /// and not the texel the rounding added.
     #[must_use]
-    pub fn glyphs(&self, chars: &[char], advances: &[f64], line_height: f64) -> Glyphs {
+    pub fn glyphs(&self, chars: &[char], widths: &[f64], line_height: f64) -> Glyphs {
         let px = f64::from(self.px);
         let by_char = chars
             .iter()
-            .zip(advances)
+            .zip(widths)
             .zip(&self.packing.rects)
-            .map(|((&c, &advance), rect)| {
+            .map(|((&c, &width), rect)| {
                 (
                     c,
                     Sample {
                         x: f64::from(rect.x),
                         y: f64::from(rect.y),
-                        width: advance * px,
+                        width: width * px,
                         height: line_height * px,
                     },
                 )
@@ -186,20 +190,22 @@ impl Plan {
     }
 }
 
-/// Plan the atlas of a face for `chars`, each `advances` em wide (same
-/// order), with a line box `line_height` em tall, at `px` pixels per em
-/// or the largest halving of it whose cells fit. `None` when they do
-/// not fit even at [`MIN_PX`].
+/// Plan the atlas of a face for its characters, each glyph's quad
+/// `widths` em wide (its advance and its ink's overhang, in the order of
+/// the characters), with a line box `line_height` em tall, at `px`
+/// pixels per em or the largest halving of it whose cells fit: each
+/// cell is allotted its whole width, so no two overlap. `None` when they
+/// do not fit even at [`MIN_PX`].
 #[must_use]
-pub fn plan(advances: &[f64], line_height: f64, px: u32) -> Option<Plan> {
+pub fn plan(widths: &[f64], line_height: f64, px: u32) -> Option<Plan> {
     let wanted = px.clamp(MIN_PX, MAX_PX);
     let mut px = wanted;
     loop {
-        let sizes: Vec<(u32, u32)> = advances
+        let sizes: Vec<(u32, u32)> = widths
             .iter()
-            .map(|advance| {
+            .map(|width| {
                 (
-                    texels(advance * f64::from(px)),
+                    texels(width * f64::from(px)),
                     texels(line_height * f64::from(px)),
                 )
             })
@@ -222,7 +228,7 @@ pub fn plan(advances: &[f64], line_height: f64, px: u32) -> Option<Plan> {
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "an advance or a line height at MAX_PX pixels per em is a few thousand at most, and a negative or NaN measurement rounds to the one-texel floor"
+    reason = "a quad's width or a line height at MAX_PX pixels per em is a few thousand at most, and a negative or NaN measurement rounds to the one-texel floor"
 )]
 fn texels(length: f64) -> u32 {
     if length.is_finite() {
@@ -300,6 +306,51 @@ pub fn chars_in(board: &Board, layer: LayerId, face: &str) -> Vec<char> {
     chars.into_iter().collect()
 }
 
+/// The distinct pairs of neighbouring characters the texts in `face` on
+/// `layer` draw, their footprint variables resolved, sorted: the pairs
+/// whose kern the page measures. A pair is two characters side by side
+/// on one line, neither of them a tab, which moves to a stop and is
+/// never kerned.
+#[must_use]
+pub fn pairs_in(board: &Board, layer: LayerId, face: &str) -> Vec<[char; 2]> {
+    let mut pairs = BTreeSet::new();
+    for (content, _, text) in placed_texts(board, layer) {
+        if text.font.face.as_deref() != Some(face) {
+            continue;
+        }
+        for line in content.split('\n') {
+            let chars: Vec<char> = line.chars().collect();
+            pairs.extend(
+                chars
+                    .windows(2)
+                    .filter_map(|pair| Some([*pair.first()?, *pair.get(1)?]))
+                    .filter(|pair| !pair.contains(&'\t')),
+            );
+        }
+    }
+    pairs.into_iter().collect()
+}
+
+/// A kern below this many em is the measurement's rounding, not the
+/// face's: a monospace face's pair measures its two advances to within a
+/// few millionths of an em, and the smallest kern a face sets is a few
+/// thousandths.
+pub const KERN_FLOOR: f64 = 1e-3;
+
+/// The kern of a pair whose two characters are `first` and `second` em
+/// wide alone and `pair` em wide together, in em: the pair's width less
+/// the two advances, negative for a pair set closer. 0 for a kern under
+/// [`KERN_FLOOR`] either way, or a measurement that is not a number.
+#[must_use]
+pub fn kern(pair: f64, first: f64, second: f64) -> f64 {
+    let kern = pair - first - second;
+    if kern.is_finite() && kern.abs() >= KERN_FLOOR {
+        kern
+    } else {
+        0.0
+    }
+}
+
 /// The tallest text in `face` on `layer`, in millimetres; 0 without one.
 #[must_use]
 pub fn max_height(board: &Board, layer: LayerId, face: &str) -> f64 {
@@ -332,14 +383,18 @@ pub fn stroke_board(board: &Board, system_faces: &BTreeSet<String>) -> Board {
 }
 
 /// One vertex of the text pass: a position in millimetres relative to
-/// the scene's origin, where in the atlas it samples (0 to 1), the
-/// colour, and whether the coverage is inverted (1 for a knockout's
-/// cells and strips, 0 for a glyph).
+/// the scene's origin, where in the atlas it samples (0 to 1), where it
+/// samples the neighbouring glyph that shares a knockout's piece (the
+/// empty corner texel when none does), the colour, and whether the
+/// coverage is inverted (1 for a knockout's cells and strips, 0 for a
+/// glyph). The shader takes the larger of the two coverages, so both
+/// glyphs' ink is cut out of the piece.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct TextVertex {
     pub position: [f32; 2],
     pub uv: [f32; 2],
+    pub neighbour_uv: [f32; 2],
     pub color: [f32; 4],
     pub invert: f32,
 }
@@ -348,7 +403,7 @@ impl TextVertex {
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<TextVertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32],
+        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x4, 4 => Float32],
     };
 }
 
@@ -362,10 +417,12 @@ pub struct Quads {
 impl Quads {
     /// Append `text`'s cells, each sampling the part of its character's
     /// glyph of `glyphs` its crop names (a knockout's cell is cropped to
-    /// the knockout box, so the inverted coverage never fills past it),
-    /// and its knockout strips, sampling the empty corner texel with the
-    /// coverage inverted; `knockout` inverts the cells too. Positions are
-    /// made relative to `origin`. A character the atlas lacks is skipped.
+    /// the knockout box, so the inverted coverage never fills past it)
+    /// and the part of its neighbour's glyph, when a knockout's piece has
+    /// one, and its knockout strips, sampling the empty corner texel with
+    /// the coverage inverted; `knockout` inverts the cells too. Positions
+    /// are made relative to `origin`. A character the atlas lacks is
+    /// skipped, and a neighbour it lacks samples the empty texel.
     pub fn add(
         &mut self,
         text: &OutlineText,
@@ -376,44 +433,55 @@ impl Quads {
     ) {
         let (width, height) = (f64::from(glyphs.width), f64::from(glyphs.height));
         let invert = if knockout { 1.0 } else { 0.0 };
-        for cell in &text.cells {
-            let Some(sample) = glyphs.by_char.get(&cell.c) else {
-                continue;
-            };
-            let crop = cell.crop;
+        // The pad texel at (0, 0) has no coverage; inverted, a strip is
+        // solid colour. Sampled at its centre, so filtering stays on it.
+        let pad = [0.5 / width, 0.5 / height];
+        // The corners' texture coordinates of the part `crop` of `sample`.
+        let uvs = |sample: &Sample, crop: Bounds| {
             let u = |fraction: f64| (sample.x + fraction * sample.width) / width;
             let v = |fraction: f64| (sample.y + fraction * sample.height) / height;
             let (x0, y0) = (u(crop.min.x), v(crop.min.y));
             let (x1, y1) = (u(crop.max.x), v(crop.max.y));
+            [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+        };
+        for cell in &text.cells {
+            let Some(sample) = glyphs.by_char.get(&cell.c) else {
+                continue;
+            };
+            let neighbour = cell
+                .neighbour
+                .and_then(|part| Some(uvs(glyphs.by_char.get(&part.c)?, part.crop)))
+                .unwrap_or([pad; 4]);
             self.quad(
                 cell.corners,
-                [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+                [uvs(sample, cell.crop), neighbour],
                 origin,
                 color,
                 invert,
             );
         }
-        // The pad texel at (0, 0) has no coverage; inverted, a strip is
-        // solid colour. Sampled at its centre, so filtering stays on it.
-        let pad = [0.5 / width, 0.5 / height];
         for strip in &text.strips {
-            self.quad(*strip, [pad; 4], origin, color, 1.0);
+            self.quad(*strip, [[pad; 4]; 2], origin, color, 1.0);
         }
     }
 
+    /// One quad at `corners`, sampling the glyph and the neighbour at
+    /// `uvs`'s two sets of corners.
     fn quad(
         &mut self,
         corners: [Point; 4],
-        uvs: [[f64; 2]; 4],
+        uvs: [[[f64; 2]; 4]; 2],
         origin: Point,
         color: [f32; 4],
         invert: f32,
     ) {
         let base = u32::try_from(self.vertices.len()).unwrap_or(u32::MAX);
-        for (corner, uv) in corners.iter().zip(uvs) {
+        let [glyph, neighbour] = uvs;
+        for ((corner, uv), neighbour_uv) in corners.iter().zip(glyph).zip(neighbour) {
             self.vertices.push(TextVertex {
                 position: relative(*corner, origin),
                 uv: uv.map(to_f32),
+                neighbour_uv: neighbour_uv.map(to_f32),
                 color,
                 invert,
             });
@@ -634,6 +702,11 @@ mod tests {
         Ink::whole_cell(0.5, METRICS)
     }
 
+    /// A face that kerns no pair.
+    fn no_kern(_: char, _: char) -> f64 {
+        0.0
+    }
+
     /// Two glyphs 0.5 em wide in a 256 texel atlas at 64 px per em: cells
     /// of 32 by 64 at (1, 1) and (34, 1).
     fn glyphs() -> Glyphs {
@@ -669,6 +742,7 @@ mod tests {
             &placement_at_anchor(),
             METRICS,
             |_| 0.5,
+            no_kern,
             whole_cell,
             true,
         );
@@ -709,7 +783,15 @@ mod tests {
             ascent: 0.25,
             descent: 0.0,
         };
-        let text = layout("A", &placement_at_anchor(), METRICS, |_| 0.5, ink, true);
+        let text = layout(
+            "A",
+            &placement_at_anchor(),
+            METRICS,
+            |_| 0.5,
+            no_kern,
+            ink,
+            true,
+        );
         let mut quads = Quads::default();
         quads.add(&text, &glyphs(), Point::default(), [1.0; 4], true);
         let top_left = quads.vertices.first().expect("a vertex");
@@ -734,6 +816,7 @@ mod tests {
             &placement_at_anchor(),
             METRICS,
             |_| 0.5,
+            no_kern,
             whole_cell,
             false,
         );
@@ -750,6 +833,7 @@ mod tests {
                 c: 'Z',
                 corners: [Point::default(); 4],
                 crop: WHOLE_CELL,
+                neighbour: None,
             }],
             strips: Vec::new(),
             knockout_box: None,
@@ -760,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn a_glyph_samples_its_exact_advance_not_the_rounded_cell() {
+    fn a_glyph_samples_its_exact_quad_not_the_rounded_cell() {
         // 0.3 em at 64 px is 19.2 texels, packed in a 20 texel cell; the
         // quad on the board is 0.3 em wide, so it samples 19.2.
         let plan = Plan {
@@ -785,10 +869,149 @@ mod tests {
 
     #[test]
     fn the_vertex_layout_matches_the_struct() {
-        assert_eq!(TextVertex::LAYOUT.array_stride, 36);
-        assert_eq!(TextVertex::LAYOUT.attributes.len(), 4);
+        assert_eq!(TextVertex::LAYOUT.array_stride, 44);
+        assert_eq!(TextVertex::LAYOUT.attributes.len(), 5);
         assert_eq!(TextVertex::LAYOUT.attributes[1].offset, 8);
         assert_eq!(TextVertex::LAYOUT.attributes[2].offset, 16);
-        assert_eq!(TextVertex::LAYOUT.attributes[3].offset, 32);
+        assert_eq!(TextVertex::LAYOUT.attributes[3].offset, 24);
+        assert_eq!(TextVertex::LAYOUT.attributes[4].offset, 40);
+    }
+
+    #[test]
+    fn a_glyph_whose_ink_overhangs_is_allotted_and_samples_its_whole_quad() {
+        // An italic f, 0.3 em of advance, its ink 0.1 em left of the pen
+        // and 0.4 em past the advance: its quad and its cell are 0.8 em
+        // wide, beside an I 0.5 em wide whose ink stays inside.
+        let advance = |c: char| if c == 'f' { 0.3 } else { 0.5 };
+        let ink = |c: char| {
+            if c == 'f' {
+                Ink {
+                    left: 0.1,
+                    right: 0.7,
+                    ascent: 0.7,
+                    descent: 0.2,
+                }
+            } else {
+                Ink {
+                    left: -0.05,
+                    right: 0.45,
+                    ascent: 0.7,
+                    descent: 0.0,
+                }
+            }
+        };
+        let chars = ['I', 'f'];
+        let widths: Vec<f64> = chars
+            .iter()
+            .map(|&c| ink(c).overhang(advance(c)).quad_width(advance(c)))
+            .collect();
+        let planned = plan(&widths, METRICS.line_height(), 64).expect("fits");
+        let (Some(i), Some(f)) = (planned.packing.rects.first(), planned.packing.rects.get(1))
+        else {
+            panic!("two cells in {planned:?}");
+        };
+        // 0.8 em at 64 px is 51.2 texels: the f's cell is allotted 52,
+        // after the I's 32 and the padding.
+        assert_eq!((i.width, f.width), (32, 52));
+        assert_eq!((i.x, f.x), (1, 34));
+        let glyphs = planned.glyphs(&chars, &widths, METRICS.line_height());
+        let text = layout(
+            "f",
+            &placement_at_anchor(),
+            METRICS,
+            advance,
+            no_kern,
+            ink,
+            false,
+        );
+        let mut quads = Quads::default();
+        quads.add(&text, &glyphs, Point::default(), [1.0; 4], false);
+        let (Some(top_left), Some(bottom_right)) = (quads.vertices.first(), quads.vertices.get(2))
+        else {
+            panic!("a quad in {quads:?}");
+        };
+        // The quad is 0.8 em wide on the board, 1.12 mm, and samples the
+        // f's 51.2 texels whole.
+        let width = f64::from(bottom_right.position[0] - top_left.position[0]);
+        assert!((width - 1.12).abs() < 1e-6, "{width}");
+        assert!((f64::from(top_left.uv[0]) - 34.0 / 256.0).abs() < 1e-6);
+        assert!((f64::from(bottom_right.uv[0]) - (34.0 + 51.2) / 256.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_knockouts_piece_two_quads_share_samples_both_glyphs() {
+        // A and B 0.5 em wide, kerned by -0.1 em, their ink inside: the
+        // quads overlap by 0.1 em, a fifth of each.
+        let ink = |_| Ink {
+            left: -0.05,
+            right: 0.45,
+            ascent: 0.7,
+            descent: 0.2,
+        };
+        let text = layout(
+            "AB",
+            &placement_at_anchor(),
+            METRICS,
+            |_| 0.5,
+            |_, _| -0.1,
+            ink,
+            true,
+        );
+        assert_eq!(text.cells.len(), 3, "{text:?}");
+        let mut quads = Quads::default();
+        quads.add(&text, &glyphs(), Point::default(), [1.0; 4], true);
+        // The shared piece samples the last fifth of A's 32 texels from
+        // 1, and the first fifth of B's from 34.
+        let (Some(top_left), Some(bottom_right)) = (quads.vertices.get(4), quads.vertices.get(6))
+        else {
+            panic!("three quads in {quads:?}");
+        };
+        let texel = |uv: f32| f64::from(uv) * 256.0;
+        assert!((texel(top_left.uv[0]) - (1.0 + 0.8 * 32.0)).abs() < 1e-4);
+        assert!((texel(bottom_right.uv[0]) - 33.0).abs() < 1e-4);
+        assert!((texel(top_left.neighbour_uv[0]) - 34.0).abs() < 1e-4);
+        assert!((texel(bottom_right.neighbour_uv[0]) - (34.0 + 0.2 * 32.0)).abs() < 1e-4);
+        assert!((texel(bottom_right.neighbour_uv[1]) - 65.0).abs() < 1e-4);
+        // A piece one glyph has alone samples the empty texel for the
+        // neighbour, as a strip does.
+        let alone = quads.vertices.first().expect("a vertex");
+        assert!((texel(alone.neighbour_uv[0]) - 0.5).abs() < 1e-4);
+        assert!((texel(alone.neighbour_uv[1]) - 0.5).abs() < 1e-4);
+    }
+
+    #[test_case("Consolas", &[" t", "Hi", "R1", "er", "he", "i ", "re", "th"]; "the board text and the reference")]
+    #[test_case("Verdana", &["1!", "R1"]; "a footprint text with its variable resolved")]
+    #[test_case("Nothing", &[]; "a face no text names has none")]
+    fn the_pairs_of_a_face_are_its_neighbouring_characters_distinct(face: &str, expected: &[&str]) {
+        let board = board();
+        let pairs: Vec<String> = pairs_in(&board, silk(&board), face)
+            .into_iter()
+            .map(String::from_iter)
+            .collect();
+        assert_eq!(pairs, expected);
+    }
+
+    #[test]
+    fn a_pair_never_spans_a_line_break_or_a_tab() {
+        let board = kicad_core::parse_board(
+            r#"(kicad_pcb (version 20241229) (generator "pcbnew")
+            (layers (0 "F.Cu" signal) (37 "F.SilkS" user))
+            (gr_text "AB\nC\tD" (at 0 0) (layer "F.SilkS") (effects (font (face "Arial") (size 1 1)))))"#,
+        )
+        .expect("parses");
+        assert_eq!(pairs_in(&board, silk(&board), "Arial"), [['A', 'B']]);
+    }
+
+    #[test_case(0.9, 0.5, 0.5, -0.1; "a pair set closer")]
+    #[test_case(1.0 + 1e-6, 0.5, 0.5, 0.0; "a monospace pair's rounding")]
+    #[test_case(f64::NAN, 0.5, 0.5, 0.0; "no measurement")]
+    fn a_kern_is_the_pairs_width_less_its_two_advances(
+        pair: f64,
+        first: f64,
+        second: f64,
+        expected: f64,
+    ) {
+        let measured = kern(pair, first, second);
+        assert!((measured - expected).abs() < 1e-9, "{measured}");
     }
 }

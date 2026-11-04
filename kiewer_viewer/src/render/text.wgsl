@@ -2,6 +2,9 @@
 // flat shader, each sampling a face's coverage atlas (R8, one channel).
 // A glyph's alpha is the coverage; a knockout's cells and strips invert
 // it, so the colour fills the box and the glyph shows what is beneath.
+// A knockout's piece that two glyphs' quads share samples both and takes
+// the larger coverage, so both glyphs' ink is cut out; every other quad's
+// second sample is the atlas's empty corner texel, which adds nothing.
 
 struct View {
     center: vec2<f32>,
@@ -15,15 +18,17 @@ struct View {
 struct VertexInput {
     @location(0) position: vec2<f32>,
     @location(1) uv: vec2<f32>,
-    @location(2) color: vec4<f32>,
-    @location(3) invert: f32,
+    @location(2) neighbour_uv: vec2<f32>,
+    @location(3) color: vec4<f32>,
+    @location(4) invert: f32,
 }
 
 struct VertexOutput {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) color: vec4<f32>,
-    @location(2) invert: f32,
+    @location(1) neighbour_uv: vec2<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) invert: f32,
 }
 
 @vertex
@@ -32,6 +37,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let clip = (input.position - view.center) * view.scale;
     out.clip = vec4<f32>(clip, 0.0, 1.0);
     out.uv = input.uv;
+    out.neighbour_uv = input.neighbour_uv;
     out.color = input.color;
     out.invert = input.invert;
     return out;
@@ -39,7 +45,10 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let coverage = textureSample(atlas, atlas_sampler, input.uv).r;
+    let coverage = max(
+        textureSample(atlas, atlas_sampler, input.uv).r,
+        textureSample(atlas, atlas_sampler, input.neighbour_uv).r,
+    );
     let alpha = mix(coverage, 1.0 - coverage, input.invert);
     return vec4<f32>(input.color.rgb, input.color.a * alpha);
 }

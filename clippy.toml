@@ -2,4 +2,4 @@
 # proper names, not code, and are not linkable anywhere in this repo. ".."
 # keeps clippy's built-in list. Everything else is answered in code with a
 # site-level #[expect(..., reason = "...")], never here.
-doc-valid-idents = ["..", "Canvas2D", "DevTools", "KiCad", "OAuth2", "OpenID", "SwiftShader"]
+doc-valid-idents = ["..", "Canvas2D", "DevTools", "HarfBuzz", "KiCad", "OAuth2", "OpenID", "SwiftShader"]

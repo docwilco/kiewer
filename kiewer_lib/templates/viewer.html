@@ -379,15 +379,21 @@ function setup() {
   fontsBox.hidden = missing === 0;
 }
 // Rasterise the face the wasm asks for: measure each character's advance
-// and ink at MEASURE_PX (the ink sets a knockout's box), take the plan,
-// draw each character at the plan's pixels per em into its cell (clipped
-// to it, so an overhang never reaches the neighbour) with its baseline
-// where the plan says, and hand the alpha channel over.
+// and ink at MEASURE_PX (the ink sets a knockout's box and how far the
+// glyph overhangs its advance) and each neighbouring pair's width (less
+// the two advances, its kern), take the plan, draw each character at the
+// plan's pixels per em at the pen x the plan gives, inside its cell, with
+// its baseline where the plan says, and hand the alpha channel over. A
+// cell is as wide as the glyph's advance and overhang, so the clip to it
+// cuts no ink across; it keeps ink past the face's line box out of the
+// cell above or below.
 function rasterise(face) {
   const family = families.get(face);
   if (!family) return;
   const chars = Array.from(fontsViewer.face_chars(face));
+  const pairs = Array.from(fontsViewer.face_pairs(face));
   probeCtx.font = MEASURE_PX + "px " + quoted(family);
+  if ("fontKerning" in probeCtx) probeCtx.fontKerning = "normal";
   const advances = new Float64Array(chars.length);
   const inks = new Float64Array(chars.length * 4);
   chars.forEach(function (c, i) {
@@ -395,7 +401,9 @@ function rasterise(face) {
     advances[i] = m.width;
     inks.set([m.actualBoundingBoxLeft, m.actualBoundingBoxRight, m.actualBoundingBoxAscent, m.actualBoundingBoxDescent], i * 4);
   });
-  const plan = fontsViewer.atlas_plan(face, MEASURE_PX, advances, inks);
+  const pairWidths = new Float64Array(pairs.length / 2);
+  for (let i = 0; i < pairWidths.length; i++) pairWidths[i] = probeCtx.measureText(pairs[2 * i] + pairs[2 * i + 1]).width;
+  const plan = fontsViewer.atlas_plan(face, MEASURE_PX, advances, inks, pairWidths);
   if (plan.length < 4) return;
   const px = plan[0], width = plan[1], height = plan[2], ascent = plan[3];
   atlasCanvas.width = width;
@@ -407,12 +415,13 @@ function rasterise(face) {
   ctx.textAlign = "left";
   ctx.font = px + "px " + quoted(family);
   for (let i = 0; i < chars.length; i++) {
-    const x = plan[4 + i * 4], y = plan[5 + i * 4], w = plan[6 + i * 4], h = plan[7 + i * 4];
+    const at = 4 + i * 5;
+    const x = plan[at], y = plan[at + 1], w = plan[at + 2], h = plan[at + 3], pen = plan[at + 4];
     ctx.save();
     ctx.beginPath();
     ctx.rect(x, y, w, h);
     ctx.clip();
-    ctx.fillText(chars[i], x, y + ascent);
+    ctx.fillText(chars[i], pen, y + ascent);
     ctx.restore();
   }
   const data = ctx.getImageData(0, 0, width, height).data;
