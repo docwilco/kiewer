@@ -472,7 +472,7 @@ mod tests {
     }
 
     /// The synthetic boards' frame: (0, 0) to (20, 20) mm at 10 px/mm.
-    const SYNTHETIC: Frame = Frame {
+    const SYNTHETIC_FRAME: Frame = Frame {
         width: 200,
         height: 200,
         center: Point { x: 10.0, y: 10.0 },
@@ -481,14 +481,14 @@ mod tests {
     };
 
     /// The colour of `image` at the world point (`x`, `y`) in millimetres,
-    /// drawn in [`SYNTHETIC`].
+    /// drawn in [`SYNTHETIC_FRAME`].
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "the points are inside the 20 mm frame, so the pixel is 0 to 199"
     )]
     fn at(image: &Image, x: f64, y: f64) -> [u8; 3] {
-        let pixel = |world: f64| ((world - 10.0) * SYNTHETIC.scale + 100.0) as u32;
+        let pixel = |world: f64| ((world - 10.0) * SYNTHETIC_FRAME.scale + 100.0) as u32;
         let rgba = image.pixel(pixel(x), pixel(y)).expect("inside the frame");
         [rgba[0], rgba[1], rgba[2]]
     }
@@ -504,6 +504,7 @@ mod tests {
         out
     }
 
+    /// `rgb` as it reads where it covers everything under it.
     fn solid(rgb: Rgb) -> [f64; 3] {
         over(rgb, 1.0, [0.0; 3])
     }
@@ -530,7 +531,7 @@ mod tests {
         let mut state = ViewState::new(1);
         state.set(&scene.views[0], Layer::Copper("F.Cu".to_owned()), Some(0.5));
         let image = headless
-            .render(&scene, &state, &SYNTHETIC)
+            .render(&scene, &state, &SYNTHETIC_FRAME)
             .expect("renders");
         let once = over(palette::F_CU, 0.5, solid(palette::PAGE));
         assert_reads(at(&image, 6.0, 10.0), once, "one track");
@@ -561,7 +562,7 @@ mod tests {
             state.set(view, layer, None);
         }
         let image = headless
-            .render(&scene, &state, &SYNTHETIC)
+            .render(&scene, &state, &SYNTHETIC_FRAME)
             .expect("renders");
         let board = solid(palette::BOARD);
         assert_reads(
@@ -577,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn a_track_on_a_zone_reads_the_layer_and_the_zone_that_times_the_zone_opacity() {
+    fn a_track_on_a_zone_owns_its_area_and_the_zone_around_it_reads_the_zone_opacity() {
         let Some(mut headless) = headless_or_skip() else {
             return;
         };
@@ -589,7 +590,7 @@ mod tests {
         let mut state = ViewState::new(1);
         state.set(&scene.views[0], Layer::Copper("F.Cu".to_owned()), Some(0.8));
         let image = headless
-            .render(&scene, &state, &SYNTHETIC)
+            .render(&scene, &state, &SYNTHETIC_FRAME)
             .expect("renders");
         let page = solid(palette::PAGE);
         assert_reads(
@@ -655,7 +656,7 @@ mod tests {
                 scene.origin,
                 clear_color(Offscreen::FORMAT),
                 &draws,
-                &SYNTHETIC,
+                &SYNTHETIC_FRAME,
             )
             .expect("renders");
         let on_zone = at(&image, 5.0, 10.0);

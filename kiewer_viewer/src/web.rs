@@ -601,7 +601,7 @@ impl Viewer {
     /// draw, as a fraction of their layer's opacity.
     #[must_use]
     pub fn zone_opacity(&self) -> f64 {
-        f64::from(self.state.zones)
+        f64::from(self.state.zone_opacity)
     }
 
     /// Set the zone opacity, for every copper layer at once; rounded to
@@ -611,7 +611,7 @@ impl Viewer {
         reason = "an opacity is 0 to 1, which f32 holds to the hundredth the state keeps"
     )]
     pub fn set_zone_opacity(&mut self, opacity: f64) {
-        self.state.set_zones(opacity as f32);
+        self.state.set_zone_opacity(opacity as f32);
     }
 
     /// The state as the URL fragment carries it, without the `#`:

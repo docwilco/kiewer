@@ -21,7 +21,7 @@
 //! slices top-most first (`crate::scene`). No stencil and no offscreen
 //! target per layer, which would cost a composite per layer per frame.
 //! The text and the net labels take the attachment with the compare
-//! `Always` and write nothing ([`overlay_depth`]): a glyph's ink is its
+//! `Always` and write nothing ([`overlay_depth_state`]): a glyph's ink is its
 //! alpha, which a depth write ignores, so a glyph quad in a group would
 //! claim its whole box and the silk under its clear part would vanish.
 //!
@@ -126,7 +126,7 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 /// The depth state of the flat triangles, which the groups are: a later
 /// group is nearer and passes, and a later shape of the same group has
 /// the equal depth and fails (the module doc).
-fn group_test() -> wgpu::DepthStencilState {
+fn group_depth_state() -> wgpu::DepthStencilState {
     wgpu::DepthStencilState {
         format: DEPTH_FORMAT,
         depth_write_enabled: Some(true),
@@ -140,7 +140,7 @@ fn group_test() -> wgpu::DepthStencilState {
 /// them, the text and the net labels: every sample passes, none is
 /// written.
 #[must_use]
-pub fn overlay_depth() -> wgpu::DepthStencilState {
+pub fn overlay_depth_state() -> wgpu::DepthStencilState {
     wgpu::DepthStencilState {
         format: DEPTH_FORMAT,
         depth_write_enabled: Some(false),
@@ -155,14 +155,25 @@ pub fn overlay_depth() -> wgpu::DepthStencilState {
 /// so two groups are far more than a step of the attachment apart, and
 /// the cleared 1 is behind them all.
 #[must_use]
-pub fn group_depth(group: u32, groups: u32) -> f32 {
+pub fn depth_of_group(group: u32, groups: u32) -> f32 {
     let depth = 1.0 - (f64::from(group) + 1.0) / (f64::from(groups) + 1.0);
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "a depth in 0 to 1, at least 2^-32 from the next group's, which f32 keeps apart"
+        reason = "a frame has a few hundred groups (its layers, and each lit net on each copper layer), so two depths are about 1e-3 apart, far more than the 2^-24 near 1 that f32 and a 24-bit attachment tell apart"
     )]
     let depth = depth as f32;
     depth
+}
+
+/// The group after every one of `draws`: where the groups drawn after
+/// them start, and how many groups a frame of them has. 0 for none.
+#[must_use]
+pub fn next_group(draws: &[Draw]) -> u32 {
+    draws
+        .iter()
+        .map(|draw| draw.group.saturating_add(1))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Samples per pixel when the target format allows it: the edges of
@@ -331,10 +342,10 @@ pub struct Renderer {
     geometry: Option<Geometry>,
     format: wgpu::TextureFormat,
     sample_count: u32,
-    msaa: Option<MsaaTarget>,
+    msaa: Option<Attachment>,
     /// The depth attachment the groups are told apart by, sampled as the
     /// colour is.
-    depth: Option<MsaaTarget>,
+    depth: Option<Attachment>,
     /// Named-face text through the glyph atlas (`atlas_pipeline`), drawn
     /// after the flat geometry.
     text: TextPass,
@@ -394,7 +405,7 @@ struct Paints {
 
 /// A texture a frame draws into beside its target, at the target's
 /// size: the multisampled colour, or the depth.
-struct MsaaTarget {
+struct Attachment {
     size: (u32, u32),
     view: wgpu::TextureView,
 }
@@ -486,7 +497,7 @@ impl Renderer {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(group_test()),
+            depth_stencil: Some(group_depth_state()),
             multisample: wgpu::MultisampleState {
                 count: sample_count,
                 ..Default::default()
@@ -644,11 +655,7 @@ impl Renderer {
         let clear = target.clear;
         // Every draw's paint in one write, each at its stride.
         if !draws.is_empty() {
-            let groups = draws
-                .iter()
-                .map(|draw| draw.group.saturating_add(1))
-                .max()
-                .unwrap_or(1);
+            let groups = next_group(draws);
             let mut packed = vec![0u8; draws.len() * PAINT_STRIDE];
             for (chunk, draw) in packed
                 .as_chunks_mut::<PAINT_STRIDE>()
@@ -658,7 +665,7 @@ impl Renderer {
             {
                 let paint = Paint {
                     color: draw.color,
-                    depth: group_depth(draw.group, groups),
+                    depth: depth_of_group(draw.group, groups),
                     padding: [0.0; 3],
                 };
                 let bytes = bytemuck::bytes_of(&paint);
@@ -796,7 +803,7 @@ impl Renderer {
 /// `format` at `samples` per pixel, which `held` then keeps.
 fn attachment(
     device: &wgpu::Device,
-    held: &mut Option<MsaaTarget>,
+    held: &mut Option<Attachment>,
     size: (u32, u32),
     format: wgpu::TextureFormat,
     samples: u32,
@@ -822,7 +829,7 @@ fn attachment(
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    *held = Some(MsaaTarget {
+    *held = Some(Attachment {
         size,
         view: view.clone(),
     });
@@ -922,7 +929,7 @@ mod tests {
     fn a_later_group_is_nearer_and_every_group_is_in_front_of_the_clear() {
         let groups = 40;
         let depths: Vec<f32> = (0..groups)
-            .map(|group| group_depth(group, groups))
+            .map(|group| depth_of_group(group, groups))
             .collect();
         assert!(
             depths.iter().all(|depth| *depth > 0.0 && *depth < 1.0),

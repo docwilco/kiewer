@@ -212,7 +212,10 @@ impl Scene {
                 let (rgb, alpha) = match slice.paint {
                     Paint::Layer => (view.color(&self.stack, &layer), opacity),
                     Paint::Page => (palette::PAGE, opacity),
-                    Paint::Zone => (view.color(&self.stack, &layer), opacity * state.zones),
+                    Paint::Zone => (
+                        view.color(&self.stack, &layer),
+                        opacity * state.zone_opacity,
+                    ),
                 };
                 let mut color = rgb.for_format(format);
                 color[3] = alpha;
@@ -385,7 +388,7 @@ mod tests {
         );
         assert_eq!(changed[0], plain[0]);
         // The zone opacity moves the zones and nothing else.
-        state.zones = 1.0;
+        state.zone_opacity = 1.0;
         let opaque = scene.draw_list(&state, format);
         assert!((opaque[3].color[3] - 0.5).abs() < 1e-6, "{:?}", opaque[3]);
         assert_eq!(opaque[..3], changed[..3]);

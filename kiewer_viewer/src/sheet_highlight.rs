@@ -28,7 +28,7 @@ use kicad_core::tessellate::schematic::SchematicLayer;
 use crate::camera::Camera;
 use crate::highlight::{self, Ramp, Tail};
 use crate::pick::{OnNet, Pick};
-use crate::render::{Draw, Rgb, Splice};
+use crate::render::{Draw, Rgb, Splice, next_group};
 use crate::scene::TOLERANCE;
 use crate::schematic::{SheetScene, palette};
 
@@ -199,7 +199,7 @@ impl SheetHighlight {
             draw.color[3] *= self.pick.dim();
         }
         // Each lit run a group of its own, nearer than the sheet's.
-        let mut group = draws.iter().map(|draw| draw.group + 1).max().unwrap_or(0);
+        let mut group = next_group(&draws);
         for lit in self.pick.lit() {
             let generated = Ramp::SHEET.color(lit.slot);
             for (layer, range) in self.tail.runs(lit.net).unwrap_or_default() {

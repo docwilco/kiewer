@@ -484,7 +484,7 @@ pub struct ViewState {
     pub overrides: BTreeMap<Layer, Option<f32>>,
     /// The zone opacity, 0 to 1: every copper layer's zones draw at this
     /// fraction of their layer's opacity. Not a view's, like the labels.
-    pub zones: f32,
+    pub zone_opacity: f32,
     /// The net label toggles and threshold.
     pub labels: LabelSettings,
 }
@@ -497,7 +497,7 @@ impl ViewState {
         Self {
             view,
             overrides: BTreeMap::new(),
-            zones: DEFAULT_ZONE_OPACITY,
+            zone_opacity: DEFAULT_ZONE_OPACITY,
             labels: LabelSettings::default(),
         }
     }
@@ -507,7 +507,7 @@ impl ViewState {
     #[must_use]
     pub fn with_view(&self, view: usize) -> Self {
         Self {
-            zones: self.zones,
+            zone_opacity: self.zone_opacity,
             labels: self.labels.clone(),
             ..Self::new(view)
         }
@@ -515,9 +515,9 @@ impl ViewState {
 
     /// Set the zone opacity, rounded to a hundredth and clamped to 0..=1
     /// as a layer's opacity is; a value that is not a number is ignored.
-    pub fn set_zones(&mut self, opacity: f32) {
+    pub fn set_zone_opacity(&mut self, opacity: f32) {
         if opacity.is_finite() {
-            self.zones = round_opacity(opacity);
+            self.zone_opacity = round_opacity(opacity);
         }
     }
 
@@ -560,11 +560,11 @@ impl ViewState {
                 None => out.push_str("off"),
             }
         }
-        if self.zones != DEFAULT_ZONE_OPACITY {
+        if self.zone_opacity != DEFAULT_ZONE_OPACITY {
             out.push('&');
             out.push_str(ZONES_KEY);
             out.push('=');
-            out.push_str(&format_number(self.zones));
+            out.push_str(&format_number(self.zone_opacity));
         }
         if self.labels.threshold != DEFAULT_LABEL_THRESHOLD {
             out.push('&');
@@ -605,7 +605,7 @@ impl ViewState {
             }
             if key == ZONES_KEY {
                 if let Ok(opacity) = value.parse::<f32>() {
-                    state.set_zones(opacity);
+                    state.set_zone_opacity(opacity);
                 }
                 continue;
             }
@@ -911,16 +911,16 @@ mod tests {
     #[test]
     fn the_zone_opacity_round_trips_beside_the_layers_and_survives_a_view_change() {
         let mut state = ViewState::new(5);
-        assert!((state.zones - 0.66).abs() < 1e-6);
+        assert!((state.zone_opacity - 0.66).abs() < 1e-6);
         assert_eq!(state.fragment(), "view=5", "the default is no key");
         state.set(&four_layers().views()[4], copper("F.Cu"), Some(0.5));
-        state.set_zones(0.404);
+        state.set_zone_opacity(0.404);
         state.labels.set_threshold(12.0);
         assert_eq!(state.fragment(), "view=5&F.Cu=0.5&zones=0.4&labels=12");
         let parsed = ViewState::from_fragment(&state.fragment(), &four_layers());
         assert_eq!(parsed, state);
-        assert!((parsed.with_view(7).zones - 0.4).abs() < 1e-6);
-        state.set_zones(DEFAULT_ZONE_OPACITY);
+        assert!((parsed.with_view(7).zone_opacity - 0.4).abs() < 1e-6);
+        state.set_zone_opacity(DEFAULT_ZONE_OPACITY);
         assert_eq!(state.fragment(), "view=5&F.Cu=0.5&labels=12");
     }
 
@@ -931,7 +931,11 @@ mod tests {
     #[test_case("zones=off", 0.66; "a zone opacity that is not numeric is the default")]
     fn a_zone_opacity_is_kept_in_range(fragment: &str, zones: f32) {
         let state = ViewState::from_fragment(fragment, &four_layers());
-        assert!((state.zones - zones).abs() < 1e-6, "{}", state.zones);
+        assert!(
+            (state.zone_opacity - zones).abs() < 1e-6,
+            "{}",
+            state.zone_opacity
+        );
         assert!(state.overrides.is_empty());
     }
 

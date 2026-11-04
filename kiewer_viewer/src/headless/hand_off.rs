@@ -266,7 +266,7 @@ pub fn render_page(headless: &mut Headless, scene: &Scene, page: &Page) -> Resul
 #[must_use]
 pub fn as_composed(view: usize) -> ViewState {
     let mut state = ViewState::new(view);
-    state.set_zones(1.0);
+    state.set_zone_opacity(1.0);
     state
 }
 

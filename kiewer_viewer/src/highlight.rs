@@ -33,7 +33,7 @@ use kicad_core::tessellate::{Mesh, Tessellator};
 
 use crate::camera::Camera;
 use crate::pick::{OnNet, Pick};
-use crate::render::{Draw, Rgb, Splice, Vertex};
+use crate::render::{Draw, Rgb, Splice, Vertex, next_group};
 use crate::scene::{Paint, Scene, TOLERANCE};
 use crate::view::{Layer, ViewState};
 
@@ -372,7 +372,7 @@ impl Highlight {
             return draws;
         };
         let shown = shown_copper(scene, state);
-        let mut group = draws.iter().map(|draw| draw.group + 1).max().unwrap_or(0);
+        let mut group = next_group(&draws);
         for lit in self.pick.lit() {
             let Some(runs) = self.tail.runs(lit.net) else {
                 continue;
@@ -393,7 +393,7 @@ impl Highlight {
                 // The rest first: the first to cover a sample owns it.
                 for (part, strength) in [
                     (Part::Rest, lit.strength()),
-                    (Part::Zones, lit.zone_strength() * state.zones),
+                    (Part::Zones, lit.zone_strength() * state.zone_opacity),
                 ] {
                     let Some((_, range)) =
                         runs.iter().find(|(key, _)| *key == (layer.clone(), part))
