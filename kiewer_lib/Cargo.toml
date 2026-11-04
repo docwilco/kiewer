@@ -94,6 +94,15 @@ flate2 = "1"
 sha2 = "0.11"
 
 [dev-dependencies]
+# The browser test (tests/it/browser.rs): chrome-headless-shell driven over
+# the Chrome DevTools Protocol, on the tokio the tests already run. No
+# features: the default `bytes` is a byte-buffer type the test never
+# names, and the fetcher downloads a browser, which scripts/browser.sh
+# does at the pinned version instead.
+chromiumoxide = { version = "0.9.1", default-features = false }
+# StreamExt::next over chromiumoxide's protocol handler and event streams,
+# which are futures streams; in the tree already through chromiumoxide.
+futures-util = { version = "0.3", default-features = false }
 kiewer_assert = { path = "../kiewer_assert" }
 # The brotli decoder, so the asset test reads the .br variant back.
 brotli = { version = "9", default-features = false, features = ["std"] }

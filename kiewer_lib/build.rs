@@ -14,6 +14,12 @@
 // (scripts/release-build.sh) makes their absence a build error, so a
 // release cannot ship without the viewer.
 //
+// KIEWER_VIEWER_DIST names another directory to embed from in place of
+// kiewer_viewer/dist, and then the files must be there: the browser stage
+// of scripts/checks.sh points it at the debug build the wasm stage writes
+// under the target directory, so a check gets a server with the viewer in
+// it and kiewer_viewer/dist stays what a release embeds.
+//
 // The embedded files are the caching policy's static assets (ADR 0003;
 // docs/v1-scope.md, Caching): each is named by a prefix of the SHA-256
 // of its bytes, `kiewer_viewer_bg.<hash>.wasm`, so the server can serve
@@ -66,12 +72,16 @@ fn main() {
 
     println!("cargo::rustc-check-cfg=cfg(kiewer_viewer_embedded)");
     println!("cargo::rerun-if-env-changed=KIEWER_VIEWER_REQUIRED");
+    println!("cargo::rerun-if-env-changed=KIEWER_VIEWER_DIST");
     let manifest = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR")
             .expect("cargo sets CARGO_MANIFEST_DIR for a build script"),
     );
     let viewer = manifest.join("..").join("kiewer_viewer");
-    let dist = viewer.join("dist");
+    let named_dist = env::var_os("KIEWER_VIEWER_DIST")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from);
+    let dist = named_dist.clone().unwrap_or_else(|| viewer.join("dist"));
     let script = dist.join("kiewer_viewer.js");
     let wasm = dist.join("kiewer_viewer_bg.wasm");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
@@ -108,6 +118,12 @@ fn main() {
         );
         page_text.replace(PAGE_SCRIPT_IMPORT, &format!("\"./{script_name}\""))
     } else {
+        let shown = dist.display();
+        assert!(
+            named_dist.is_none(),
+            "KIEWER_VIEWER_DIST names {shown}, which has no kiewer_viewer.js and \
+             kiewer_viewer_bg.wasm; run scripts/build-viewer.sh debug {shown} first"
+        );
         assert!(
             env::var_os("KIEWER_VIEWER_REQUIRED").is_none_or(|value| value != "1"),
             "KIEWER_VIEWER_REQUIRED=1 but {} has no kiewer_viewer.js and kiewer_viewer_bg.wasm; \

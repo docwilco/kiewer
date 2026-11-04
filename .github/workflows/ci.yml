@@ -93,7 +93,8 @@ jobs:
       # The programs the code or its tests run. This list, the Dockerfile's
       # apt layer and the dev-box setup move together: a program one of them
       # gains, all gain in the same commit (Postgres is a service above, not
-      # a program on the runner).
+      # a program on the runner). The browser below is the exception the
+      # Dockerfile skips: only the tests run it, and the image runs none.
       #
       # mesa-vulkan-drivers: Mesa's lavapipe, the software Vulkan driver the
       # headless renderer draws with on a machine without a GPU (ADR 0004),
@@ -101,7 +102,13 @@ jobs:
       # thumbnail tests (kiewer_lib/tests/it/thumbnails.rs), which fail rather
       # than skip here when the loader finds no driver. The Vulkan loader
       # itself comes with the package.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+      #
+      # scripts/browser.sh packages: the shared libraries
+      # chrome-headless-shell links against, for the browser stage.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers $(scripts/browser.sh packages)
+      # chrome-headless-shell at the version and checksum scripts/browser.sh
+      # pins, for the browser stage below, which fails here without it.
+      - run: scripts/browser.sh install
       # fake-gcs-server, the GCS emulator for kiewer_lib/tests/it/gcs_blob_store.rs:
       # Google's own storage client against it over plain http on the
       # loopback. Pinned by version and checksum; the tests make their own
@@ -118,10 +125,20 @@ jobs:
           ./fake-gcs-server -scheme http -host 127.0.0.1 -port 8092 -backend memory -public-host 127.0.0.1 &
           for _ in $(seq 1 20); do curl -fs http://127.0.0.1:8092/storage/v1/b >/dev/null && break; sleep 0.5; done
           rm -f "fake-gcs-server_${version}_Linux_amd64.tar.gz" checksums.txt
+      # The browser stage runs here, after the test stage, on the native
+      # build that stage leaves: it needs the server and the viewer for
+      # the browser, so the wasm32 target and wasm-bindgen-cli come as in
+      # the wasm job. It adds one compile of kiewer_lib with the viewer
+      # embedded (scripts/checks.sh says why).
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: ./.github/actions/cargo-cached
         with:
-          run: ./scripts/checks.sh test
+          run: |
+            cargo install wasm-bindgen-cli --version "$(scripts/wasm-bindgen-version.sh)" --locked
+            ./scripts/checks.sh test
+            ./scripts/checks.sh browser
 
   docs:
     name: Docs

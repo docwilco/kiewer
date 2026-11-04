@@ -3,7 +3,7 @@
 # (.githooks/pre-commit) and CI (.github/workflows/ci.yml) both run this
 # script, so what passes locally is exactly what passes in CI.
 #
-# Usage: scripts/checks.sh [fmt|clippy|test|docs|wasm|all]   (default: all)
+# Usage: scripts/checks.sh [fmt|clippy|test|docs|wasm|browser|all]   (default: all)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -44,6 +44,40 @@ stage_wasm() {
   cargo clippy -p kiewer_viewer --lib --target wasm32-unknown-unknown -- -D warnings
 }
 
+# The board page in a real browser (kiewer_lib/tests/it/browser.rs):
+# chrome-headless-shell at the version scripts/browser.sh pins, drawing
+# WebGL2 on SwiftShader, against a server built with the viewer in it.
+# The viewer is the debug build the wasm stage writes under the target
+# directory (rebuilt here, a no-op after that stage, so the stage also
+# runs on its own), named to kiewer_lib/build.rs by KIEWER_VIEWER_DIST:
+# the snapshot and CI have no kiewer_viewer/dist, and a check never
+# writes there.
+#
+# The variable changes kiewer_lib's build script output, so kiewer_lib
+# and what links it compile once here and once more in the next test
+# stage, in the same target directory: a compile each way, where a
+# directory of its own would hold a second copy of every dependency.
+#
+# No browser is a skip with a line saying so; on CI (which sets CI) it
+# is a failure, since the workflow installs it and a skip would hide a
+# broken install.
+stage_browser() {
+  local browser target_dir
+  browser="$(scripts/browser.sh path)"
+  if [ ! -x "$browser" ]; then
+    if [ -n "${CI:-}" ]; then
+      echo "no chrome-headless-shell at $browser; the workflow installs it with scripts/browser.sh install" >&2
+      return 1
+    fi
+    echo "browser: skipped, no chrome-headless-shell at $browser (scripts/browser.sh install; README, Development)"
+    return 0
+  fi
+  target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+  scripts/build-viewer.sh debug "$target_dir/viewer-check"
+  KIEWER_VIEWER_DIST="$target_dir/viewer-check" KIEWER_BROWSER="$browser" \
+    cargo test --workspace --test it browser::
+}
+
 run() {
   local name=$1 start
   echo "==> $name"
@@ -53,7 +87,7 @@ run() {
 }
 
 case "${1:-all}" in
-  fmt|clippy|test|docs|wasm) run "$1" ;;
-  all) for stage in fmt clippy test docs wasm; do run "$stage"; done ;;
-  *) echo "usage: $0 [fmt|clippy|test|docs|wasm|all]" >&2; exit 2 ;;
+  fmt|clippy|test|docs|wasm|browser) run "$1" ;;
+  all) for stage in fmt clippy test docs wasm browser; do run "$stage"; done ;;
+  *) echo "usage: $0 [fmt|clippy|test|docs|wasm|browser|all]" >&2; exit 2 ;;
 esac

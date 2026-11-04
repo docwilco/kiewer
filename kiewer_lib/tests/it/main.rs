@@ -10,6 +10,7 @@
 mod accounts;
 mod beacon;
 mod branches;
+mod browser;
 mod cache;
 mod collector;
 mod db;

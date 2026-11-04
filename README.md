@@ -87,6 +87,18 @@ install. Without one it skips with a line saying so; on CI it fails
 instead. `cargo run --bin kiewer_render_dev -- viewer-drop/board/midi8knob.kicad_pcb <dir>`
 writes the same PNGs for a look.
 
+The browser stage (`scripts/checks.sh browser`, in `all`) loads the board
+page in Chrome for Testing's `chrome-headless-shell`, which draws WebGL2 on
+SwiftShader with no GPU (`kiewer_lib/tests/it/browser.rs`). On a dev box:
+`sudo apt install $(scripts/browser.sh packages)` for the libraries it
+links against (Ubuntu 24.04 names), then `scripts/browser.sh install`,
+which downloads the version the script pins, checks its SHA-256 and
+unpacks it under `~/.cache/kiewer` (it needs `curl` and `unzip`); CI
+installs the same way. Without it the stage skips with a line saying so;
+on CI it fails instead. The Dockerfile installs neither, though programs
+the tests run otherwise go into all three places: the image is
+runtime-only and runs no tests.
+
 Clippy is pedantic with no blanket allows: every finding is fixed or carries a
 site-level `#[expect(..., reason = "...")]` naming the invariant that makes it safe.
 
