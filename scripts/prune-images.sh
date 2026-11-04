@@ -25,7 +25,7 @@ project="${GCP_PROJECT_ID:?set GCP_PROJECT_ID}"
 region=europe-west4
 image="$region-docker.pkg.dev/$project/kiewer/kiewer"
 
-# The two shapes a Release takes, here and in the CI workflow's release job.
+# The two shapes a Release takes, here and in scripts/release-cut.sh.
 release_shape='^[0-9]+\.[0-9]+\.[0-9]+$'
 candidate_shape='^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$'
 

@@ -30,6 +30,7 @@ mod history;
 mod pending;
 mod pre_commit;
 mod prune_images;
+mod release_cut;
 mod roles;
 mod schematic;
 mod sign_in;

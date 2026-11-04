@@ -12,9 +12,10 @@ env:
 # binaries on the runner, build the runtime-only image around them and,
 # on a push to main only, push it to Artifact Registry as :<short hash>
 # and deploy it to the staging Cloud Run service. The last job cuts the
-# Release: a push to main whose jobs are all green and whose Version has
-# no v<Version> tag names that image by Version, deploys it to production,
-# tags the commit and prunes the registry. Any other push ends at staging.
+# Release: a push to main whose jobs are all green and whose Version sorts
+# above every Release tag in git names that image by Version, deploys it
+# to production, tags the commit and prunes the registry. Any other push
+# ends at staging.
 #
 # GCP comes in through repository variables, so this file carries nothing
 # Terraform (infra/) has to produce: GCP_PROJECT_ID, GCP_WIF_PROVIDER (the
@@ -315,22 +316,25 @@ jobs:
   # release build, so a run with a red Test still pushes an image, and that
   # run must tag nothing. A rerun of the red job on main reaches this job.
   #
-  # The Version is read from the manifest. v<Version> in git already means
-  # a plain push, and the job ends there: the run has done what every push
-  # does. Otherwise the job deploys the digest of the image this run
-  # pushed to the production service, names the image, makes the annotated
-  # tag and prunes the registry. The names and the tag come after the
-  # deploy because they are the record of a Release that happened: a
-  # failed deploy leaves the Version untagged and nothing pointing at the
-  # image, so a rerun of this job cuts it, and so does the green run of a
-  # fix pushed above the Bump. Every step before the tag repeats to the
-  # same result.
+  # The Version is read from the manifest, and scripts/release-cut.sh cuts
+  # it only when it sorts above every Release tag in git. A Version already
+  # tagged, or one below the newest Release (two Bumps whose runs finish
+  # out of order, a late rerun of a red older Bump), means a plain push,
+  # and the job ends there: the run has done what every push does, and
+  # production never moves back to older code. Otherwise the job deploys
+  # the digest of the image this run pushed to the production service,
+  # names the image, makes the annotated tag and prunes the registry. The
+  # names and the tag come after the deploy because they are the record of
+  # a Release that happened: a failed deploy leaves the Version untagged
+  # and nothing pointing at the image, so a rerun of this job cuts it, and
+  # so does the green run of a fix pushed above the Bump. Every step before
+  # the tag repeats to the same result.
   #
   # With the tag last, it cannot settle two runs racing for one Version;
   # the concurrency group does. Release jobs run one at a time, and the
   # later one finds the tag and ends. GitHub keeps one job waiting in a
   # group: a job already waiting when another arrives is cancelled, and a
-  # rerun or the next push cuts its Version.
+  # rerun or the next push cuts its Version while it is still the newest.
   #
   # A Release moves traffic to the new revision once it is ready; a
   # Release candidate becomes a revision with no traffic under the Cloud
@@ -359,48 +363,15 @@ jobs:
       IMAGE: europe-west4-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/kiewer/kiewer
     steps:
       - uses: actions/checkout@v5
-      - name: Read the Version
+      - name: Read the Version and whether to cut it
         id: version
         # bash by name is bash with pipefail, so a read that fails is not
-        # taken as an empty Version. The checkout is shallow and carries no
-        # tags, so the question goes to the remote, and it is asked in an
-        # assignment so a failed ls-remote stops the step: inside an
-        # `if [ -n ... ]` its empty output would read as an untagged
-        # Version. The two shapes a Release takes are spelled here and in
-        # scripts/prune-images.sh.
-        #
-        # A failed prune leaves the Release made and the run red with the
-        # tag already in git, so a rerun finds the Version tagged. The
-        # `prune` output is true on any rerun, so the rerun repeats the
-        # prune all the same; a first attempt on a tagged Version prunes
-        # nothing, and a plain push ends at staging.
+        # taken as an empty Version. The script writes the step's outputs
+        # (version, kind, cut, prune); its header has the rules.
         shell: bash
         run: |
           version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kiewer") | .version')"
-          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            kind=release
-          elif [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
-            kind=candidate
-          else
-            echo "::error::the Version '$version' is neither X.Y.Z nor X.Y.Z-rc.N, the two shapes a Release takes"
-            exit 1
-          fi
-          tagged="$(git ls-remote --refs origin "refs/tags/v$version")"
-          if [ -n "$tagged" ]; then
-            echo "v$version is in git: a plain push, nothing to cut"
-            cut=false
-          else
-            echo "v$version is not in git: this run cuts it"
-            cut=true
-          fi
-          prune="$cut"
-          [ "$GITHUB_RUN_ATTEMPT" = 1 ] || prune=true
-          {
-            echo "cut=$cut"
-            echo "prune=$prune"
-            echo "version=$version"
-            echo "kind=$kind"
-          } >> "$GITHUB_OUTPUT"
+          scripts/release-cut.sh "$version"
       - if: steps.version.outputs.prune == 'true'
         uses: google-github-actions/auth@v2
         with:
