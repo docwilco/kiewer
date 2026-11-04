@@ -188,6 +188,9 @@ start(document.getElementById("sheet"), async function (created, scheduler) {
 // the browser's own click event, and a left drag or a touch pan that
 // still ends in one is told apart by how far the pointer moved since it
 // went down (CLICK_SLOP), and ignored.
+// The pointer in device pixels is the page script's (devicePoint).
+import { devicePoint } from "{{ page_script_url }}";
+
 const CLICK_SLOP = 4;
 const netCanvas = document.getElementById("sheet");
 const netStage = document.getElementById("stage");
@@ -203,11 +206,7 @@ let netEnter = null;
 let netDown = null;
 let netPointer = "mouse";
 
-function netPoint(e) {
-  const r = netCanvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  return [(e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr];
-}
+function netPoint(e) { return devicePoint(netCanvas, e); }
 function hideTip() { netTip.hidden = true; }
 function showTip(e, text) {
   if (!text) { hideTip(); return; }

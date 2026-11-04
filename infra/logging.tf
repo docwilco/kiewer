@@ -35,7 +35,7 @@ resource "google_logging_metric" "renderer_beacon" {
     labels {
       key         = "outcome"
       value_type  = "STRING"
-      description = "ok, failed, or panic"
+      description = "ok, failed, panic, or capped (the canvas held to the device texture limit; once per page load, beside ok)"
     }
     labels {
       key         = "webgpu_present"

@@ -14,6 +14,13 @@ crate-type = ["cdylib", "rlib"]
 [lints]
 workspace = true
 
+[features]
+# For the browser tests alone: Viewer.create panics when its canvas
+# carries data-panic-probe, so a test can make a real panic where the
+# page meets it. Off by default, and refused outside a debug build
+# (lib.rs), so no Release carries it.
+panic-probe = []
+
 [dependencies]
 kicad_core = { path = "../kicad_core" }
 # Vertex and uniform structs as the bytes the GPU reads; derive for

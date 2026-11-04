@@ -14,27 +14,90 @@
 // and `fit` (the Fit button).
 import init, { Viewer } from "./kiewer_viewer.js";
 
-// A wasm panic reaches the page as a bare "unreachable" trap; its message
-// goes through console_error_panic_hook to console.error first. This runs
-// when the module is evaluated, before any page calls `start`, so a panic
-// inside Viewer.create or the page's load is kept too; the beacon at the
-// end of `start` reads kiewerPanic and listens for kiewer-panic.
+// Telemetry (docs/v1-scope.md, Telemetry; the server side is
+// kiewer_lib/src/web/beacon.rs): one beacon per page load, after the
+// adapter init in `start`, with the backend, whether navigator.gpu
+// existed, the outcome of that init and the adapter vendor; a wasm panic
+// sends one more with its message, and the first canvas capped to the
+// device's texture limit one more again, `capped`, with no reason.
+// sendBeacon queues the POST and returns at once, so nothing here waits
+// on the network or runs before the first frame is scheduled. The
+// outcome is the adapter's: a board or sheet that fails to fetch or
+// parse after a working adapter is still "ok", and a module import that
+// fails sends nothing, since nothing here runs. No identifiers, no
+// cookie: the body is the five fields below.
+const BEACON_PATH = "/api/beacon";
+const MAX_REASON = 1024;
+const MAX_VENDOR = 64;
+// The backend and the vendor as the Viewer named them when it was
+// created, "none" and empty before. They are read once and never again
+// from the wasm: after a panic inside a &mut self call the object stays
+// borrowed and any call into it throws, so the panic path touches only
+// these.
+let backendName = "none";
+let vendorName = "";
+function bounded(text, max) {
+  text = String(text || "").slice(0, max);
+  // A cut through a surrogate pair leaves a lone high surrogate, which
+  // is not JSON the server accepts.
+  return /[\uD800-\uDBFF]$/.test(text) ? text.slice(0, -1) : text;
+}
+function sendBeacon(outcome, reason) {
+  if (!navigator.sendBeacon) return;
+  const body = JSON.stringify({
+    backend: backendName,
+    webgpu_present: "gpu" in navigator,
+    outcome: outcome,
+    reason: bounded(reason, MAX_REASON),
+    vendor: bounded(vendorName.toLowerCase(), MAX_VENDOR),
+  });
+  try { navigator.sendBeacon(BEACON_PATH, body); } catch (e) { /* telemetry never fails the page */ }
+}
+
+// The panic hook. A wasm panic reaches the page as a bare "unreachable"
+// trap, and a trap inside an async call such as Viewer.create leaves its
+// promise unsettled, so no catch and nothing after an await runs. The
+// message goes through console_error_panic_hook to console.error first,
+// so the hook acts there and then: it shows the panic in the error box
+// and sends the panic beacon, with backend "none" when no Viewer exists
+// yet. It is set when the module is evaluated, before any page calls
+// `start` and before the wasm is fetched, so a panic at any stage is
+// shown and sent. The first panic is the one shown and sent; kiewerPanic
+// keeps its message and kiewer-panic tells the page.
 window.kiewerPanic = "";
 const originalError = console.error.bind(console);
 console.error = function () {
   const text = Array.prototype.map.call(arguments, String).join(" ");
-  if (text.startsWith("panicked at")) {
+  if (text.startsWith("panicked at") && !window.kiewerPanic) {
     window.kiewerPanic = text.split("\n\nStack:")[0];
+    showError(window.kiewerPanic);
+    sendBeacon("panic", window.kiewerPanic);
     window.dispatchEvent(new Event("kiewer-panic"));
   }
   originalError.apply(console, arguments);
 };
 
-// Shows `message` in the page's error box.
-export function fail(message) {
+function showError(message) {
   const errorBox = document.getElementById("error");
   errorBox.textContent = String(message);
   errorBox.hidden = false;
+}
+
+// Shows `message` in the page's error box. After a panic the box keeps
+// the panic: the trap that follows it reaches a catch as "unreachable".
+export function fail(message) {
+  if (!window.kiewerPanic) showError(message);
+}
+
+// Device pixels for the pointer event `e` over `canvas`: its offset from
+// the canvas's corner scaled by the canvas's backing width over its
+// displayed width. That is devicePixelRatio until the viewer caps the
+// canvas to the device's texture limit (Viewer.create, resize), and the
+// capped canvas's own scale after. The pages' net blocks use it too.
+export function devicePoint(canvas, e) {
+  const r = canvas.getBoundingClientRect();
+  const scale = r.width > 0 ? canvas.width / r.width : 1;
+  return [(e.clientX - r.left) * scale, (e.clientY - r.top) * scale];
 }
 
 // The page owns nothing of the gestures: this hands each one to the wasm
@@ -44,7 +107,9 @@ export function fail(message) {
 // `start(canvas, load)` creates the Viewer on `canvas`, calls
 // `load(viewer, schedule)` once it exists, and sends the beacon after;
 // `schedule` asks for a frame. A load that throws shows its message in
-// the error box. Every frame sends kiewer-frame on the window.
+// the error box. Every frame sends kiewer-frame on the window. The page
+// asks for the canvas's displayed size in device pixels; the Viewer sets
+// the canvas to it, capped to the device's limit.
 export async function start(canvas, load) {
   const status = document.getElementById("status");
   const errorBox = document.getElementById("error");
@@ -52,11 +117,26 @@ export async function start(canvas, load) {
   let viewer = null;
   let frame = 0;
   let gesturing = false;
+  // Whether the ok beacon went, after which a cap sends `capped` at once,
+  // and whether that one went: at most one per page load.
+  let beaconsOpen = false;
+  let cappedSent = false;
 
-  function dpr() { return window.devicePixelRatio || 1; }
-  function point(e) {
+  function point(e) { return devicePoint(canvas, e); }
+  // The backing size the page asks for: the displayed size in device
+  // pixels.
+  function wanted() {
     const r = canvas.getBoundingClientRect();
-    return [(e.clientX - r.left) * dpr(), (e.clientY - r.top) * dpr()];
+    const dpr = window.devicePixelRatio || 1;
+    return [Math.max(1, Math.round(r.width * dpr)), Math.max(1, Math.round(r.height * dpr))];
+  }
+  function noteCap() {
+    if (!beaconsOpen || cappedSent || window.kiewerPanic) return;
+    let capped = false;
+    try { capped = viewer.capped(); } catch (e) { return; }
+    if (!capped) return;
+    cappedSent = true;
+    sendBeacon("capped", "");
   }
   function schedule() {
     if (frame || !viewer) return;
@@ -80,10 +160,11 @@ export async function start(canvas, load) {
       + viewer.scale().toPrecision(3) + " px/mm";
   }
   function resize() {
-    const r = canvas.getBoundingClientRect();
-    canvas.width = Math.max(1, Math.round(r.width * dpr()));
-    canvas.height = Math.max(1, Math.round(r.height * dpr()));
-    if (viewer) { viewer.resize(canvas.width, canvas.height); schedule(); }
+    if (!viewer) return;
+    const [width, height] = wanted();
+    viewer.resize(width, height);
+    noteCap();
+    schedule();
   }
 
   // Wheel: zoom at the pointer; with ctrl a horizontal pan and with shift
@@ -180,10 +261,14 @@ export async function start(canvas, load) {
 
   try {
     await init();
-    resize();
-    viewer = await Viewer.create(canvas, canvas.width, canvas.height);
+    const [width, height] = wanted();
+    viewer = await Viewer.create(canvas, width, height);
+    backendName = viewer.backend();
+    vendorName = viewer.adapter_vendor();
+    // The layout may have moved while the adapter was asked for.
+    viewer.resize(...wanted());
     const samples = viewer.samples();
-    status.textContent = viewer.backend() + (samples > 1 ? ", " + samples + "x msaa" : "");
+    status.textContent = backendName + (samples > 1 ? ", " + samples + "x msaa" : "");
     // On WebGL2, hovering the status says why WebGPU was not used.
     status.title = viewer.fallback_reasons();
     await load(viewer, schedule);
@@ -192,74 +277,29 @@ export async function start(canvas, load) {
     fail(e && e.message ? e.message : e);
   }
 
-  // Telemetry (docs/v1-scope.md, Telemetry; the server side is
-  // kiewer_lib/src/web/beacon.rs): one beacon per page load, after the
-  // adapter init above, with the backend, whether navigator.gpu existed,
-  // the outcome of that init and the adapter vendor; a wasm panic sends
-  // one more with its message. sendBeacon queues the POST and returns at
-  // once, so nothing here waits on the network or runs before the first
-  // frame is scheduled. The outcome is the adapter's: a board or sheet
-  // that fails to fetch or parse after a working adapter is still "ok",
-  // and a module import that fails sends nothing, since this never runs.
-  // No identifiers, no cookie: the body is the five fields below.
-  const BEACON_PATH = "/api/beacon";
-  const MAX_REASON = 1024;
-  const MAX_VENDOR = 64;
-  // The names are read once, here, and never again from the wasm: after a
-  // panic inside a &mut self call the object stays borrowed and any call
-  // into it throws, so the panic path below touches only these.
-  function fromViewer(read, fallback) {
-    try { return viewer ? read() : fallback; } catch (e) { return fallback; }
-  }
-  // The status line was set from viewer.backend() right after create, so
-  // it names the backend even when the viewer cannot be asked any more.
-  const backendName = fromViewer(function () { return viewer.backend(); },
-    /^(webgpu|webgl2)\b/.test(status.textContent) ? status.textContent.split(",")[0] : "none");
-  let vendorName = fromViewer(function () { return viewer.adapter_vendor(); }, "");
-  let panicSent = false;
-  function bounded(text, max) {
-    text = String(text || "").slice(0, max);
-    // A cut through a surrogate pair leaves a lone high surrogate, which
-    // is not JSON the server accepts.
-    return /[\uD800-\uDBFF]$/.test(text) ? text.slice(0, -1) : text;
-  }
-  function sendBeacon(outcome, reason) {
-    if (!navigator.sendBeacon) return;
-    const body = JSON.stringify({
-      backend: backendName,
-      webgpu_present: "gpu" in navigator,
-      outcome: outcome,
-      reason: bounded(reason, MAX_REASON),
-      vendor: bounded(vendorName.toLowerCase(), MAX_VENDOR),
-    });
-    try { navigator.sendBeacon(BEACON_PATH, body); } catch (e) { /* telemetry never fails the page */ }
-  }
-  function sendPanic() {
-    if (panicSent) return;
-    panicSent = true;
-    sendBeacon("panic", window.kiewerPanic);
-  }
-  // wgpu names the vendor on WebGL2 from the browser's vendor string and
-  // not yet on WebGPU (kiewer_viewer/src/web.rs, vendor_name), where the
-  // browser's own adapter info says it when the browser exposes one.
-  // Bounded to a second, so a slow adapter request cannot hold the beacon.
-  async function webgpuVendor() {
-    if (vendorName || backendName !== "webgpu" || !navigator.gpu) return vendorName;
-    try {
-      const adapter = await Promise.race([
-        navigator.gpu.requestAdapter(),
-        new Promise(function (resolve) { setTimeout(resolve, 1000, null); }),
-      ]);
-      return adapter && adapter.info ? adapter.info.vendor : "";
-    } catch (e) { return ""; }
-  }
-  window.addEventListener("kiewer-panic", sendPanic);
-  if (window.kiewerPanic) {
-    sendPanic();
-  } else if (viewer) {
+  // A panic sent its own beacon when it happened.
+  if (window.kiewerPanic) return;
+  if (viewer) {
     vendorName = await webgpuVendor();
     sendBeacon("ok", "");
+    beaconsOpen = true;
+    noteCap();
   } else {
     sendBeacon("failed", errorBox.textContent);
   }
+}
+
+// wgpu names the vendor on WebGL2 from the browser's vendor string and
+// not yet on WebGPU (kiewer_viewer/src/web.rs, vendor_name), where the
+// browser's own adapter info says it when the browser exposes one.
+// Bounded to a second, so a slow adapter request cannot hold the beacon.
+async function webgpuVendor() {
+  if (vendorName || backendName !== "webgpu" || !navigator.gpu) return vendorName;
+  try {
+    const adapter = await Promise.race([
+      navigator.gpu.requestAdapter(),
+      new Promise(function (resolve) { setTimeout(resolve, 1000, null); }),
+    ]);
+    return adapter && adapter.info ? adapter.info.vendor : "";
+  } catch (e) { return ""; }
 }

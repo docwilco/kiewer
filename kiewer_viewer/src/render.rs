@@ -37,10 +37,39 @@ pub const SHADER: &str = include_str!("shader.wgsl");
 
 /// The limits every device is asked for: WebGL2's, so what runs on
 /// WebGPU is what runs on WebGL2. They have no storage buffers and no
-/// compute.
+/// compute. The one exception (ADR 0001) is `max_texture_dimension_2d`,
+/// which the browser's device (`web`) and the headless one
+/// (`headless`) raise to the adapter's own: the screen sets the
+/// canvas's size, and a page at the hand-off's density sets the golden
+/// frames', so no code here can hold them under the floor's 2048. A canvas past even the
+/// adapter's limit is capped by [`cap_canvas`].
 #[must_use]
 pub fn limits() -> wgpu::Limits {
     wgpu::Limits::downlevel_webgl2_defaults()
+}
+
+/// A canvas of `width` by `height` device pixels as a device whose
+/// `max_texture_dimension_2d` is `limit` can draw it: as asked when both
+/// sides are within the limit, otherwise scaled down with its aspect
+/// ratio kept until the longer side is the limit, for the browser to
+/// stretch to the displayed size. A side is never under one pixel. A
+/// surface configured past the limit is a validation failure that wgpu
+/// makes a panic, so every configure goes through this.
+#[must_use]
+pub fn cap_canvas(width: u32, height: u32, limit: u32) -> (u32, u32) {
+    let (width, height, limit) = (width.max(1), height.max(1), limit.max(1));
+    let longer = width.max(height);
+    if longer <= limit {
+        return (width, height);
+    }
+    // Rounded to the nearest pixel, in u64 so the product cannot wrap; the
+    // result is at most `limit`, so it fits back in a u32.
+    let side = |side: u32| {
+        let scaled =
+            (u64::from(side) * u64::from(limit) + u64::from(longer) / 2) / u64::from(longer);
+        u32::try_from(scaled).unwrap_or(limit).max(1)
+    };
+    (side(width), side(height))
 }
 
 /// The device every platform requests: no optional features, the
@@ -674,6 +703,23 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
+
+    #[test_case((2076, 1665), 4096, (2076, 1665); "the phone's canvas under a GPU's own limit")]
+    #[test_case((2048, 2048), 2048, (2048, 2048); "a canvas at the limit")]
+    #[test_case((2100, 1000), 2048, (2048, 975); "a wide canvas over the limit")]
+    #[test_case((1000, 2100), 2048, (975, 2048); "a tall canvas over the limit")]
+    #[test_case((2076, 1665), 2048, (2048, 1643); "the phone's canvas at the WebGL2 floor")]
+    #[test_case((4096, 4096), 2048, (2048, 2048); "a square canvas over the limit")]
+    #[test_case((100_000, 1), 2048, (2048, 1); "a sliver keeps one pixel")]
+    #[test_case((0, 0), 2048, (1, 1); "an empty canvas is one pixel")]
+    #[test_case((u32::MAX, u32::MAX), 16384, (16384, 16384); "the largest canvas")]
+    fn a_canvas_is_capped_to_the_device_limit_with_its_aspect_kept(
+        (width, height): (u32, u32),
+        limit: u32,
+        capped: (u32, u32),
+    ) {
+        assert_eq!(cap_canvas(width, height, limit), capped);
+    }
 
     #[test]
     fn the_device_is_asked_for_the_webgl2_limits_with_no_storage_or_compute() {

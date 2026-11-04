@@ -10,6 +10,11 @@
 
 use wasm_bindgen::prelude::wasm_bindgen;
 
+// The browser tests' probe (Cargo.toml, panic-probe) makes a panic on
+// purpose; a build that could ship never has it.
+#[cfg(all(feature = "panic-probe", not(debug_assertions)))]
+compile_error!("panic-probe is for the browser tests' debug build alone, never a release build");
+
 pub mod atlas;
 pub mod camera;
 pub mod error;

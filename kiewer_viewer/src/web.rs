@@ -29,7 +29,7 @@ use crate::highlight::{self, Highlight, SLOP_PX};
 use crate::pick::Gesture;
 use crate::render::atlas_pipeline::Coverage;
 use crate::render::label_pipeline::LabelFrame;
-use crate::render::{Backend, MSAA_SAMPLES, Renderer, Rgb, Target, device_descriptor};
+use crate::render::{Backend, MSAA_SAMPLES, Renderer, Rgb, Target, cap_canvas, device_descriptor};
 use crate::scene::{Scene, clear_color};
 use crate::schematic::{self, SheetScene};
 use crate::sheet_highlight::SheetHighlight;
@@ -53,6 +53,9 @@ pub struct Viewer {
     state: ViewState,
     backend: Backend,
     fallback: Vec<String>,
+    /// Whether the canvas's size in force is smaller than the page asked
+    /// for, [`cap_canvas`] having held it to the device's limit.
+    capped: bool,
     /// The adapter's vendor as [`vendor_name`] read it, for the beacon.
     vendor: String,
     /// The scale the board was last fitted at, 0 before a board: the
@@ -127,6 +130,16 @@ struct Gpu {
     fallback: Vec<String>,
 }
 
+/// The device asked of `adapter`: the viewer's limits, the WebGL2 floor,
+/// with the adapter's own `max_texture_dimension_2d` (ADR 0001), since
+/// the screen sets the canvas's size; a request past the adapter's limit
+/// would fail, so it is read from the adapter and not picked here.
+fn browser_device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
+    let mut descriptor = device_descriptor();
+    descriptor.required_limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d;
+    descriptor
+}
+
 fn instance(backends: wgpu::Backends) -> wgpu::Instance {
     wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends,
@@ -157,7 +170,10 @@ async fn webgpu(canvas: &HtmlCanvasElement, reasons: &mut Vec<String>) -> Option
             return None;
         }
     };
-    let (device, queue) = match adapter.request_device(&device_descriptor()).await {
+    let (device, queue) = match adapter
+        .request_device(&browser_device_descriptor(&adapter))
+        .await
+    {
         Ok(pair) => pair,
         Err(error) => {
             reasons.push(format!("WebGPU: no device: {error}"));
@@ -203,7 +219,7 @@ async fn webgl2(canvas: HtmlCanvasElement, mut reasons: Vec<String>) -> Result<G
         }
     };
     let (device, queue) = adapter
-        .request_device(&device_descriptor())
+        .request_device(&browser_device_descriptor(&adapter))
         .await
         .map_err(|source| Error::Device { backend, source })?;
     Ok(Gpu {
@@ -251,20 +267,28 @@ async fn request_gpu(canvas: HtmlCanvasElement) -> Result<Gpu> {
 
 #[wasm_bindgen]
 impl Viewer {
-    /// A viewer drawing into `canvas`, whose backing size is `width` by
-    /// `height` device pixels.
+    /// A viewer drawing into `canvas`, whose backing size the page asks
+    /// to be `width` by `height` device pixels: the viewer sets it,
+    /// capped to the device's limit ([`cap_canvas`], [`Viewer::capped`]).
     ///
     /// # Errors
     ///
     /// No GPU to draw with, the message naming why: neither WebGPU nor
     /// WebGL2 gave an adapter, WebGL2 gave no surface on the canvas or no
     /// device, or the adapter in hand does not draw to this canvas.
+    ///
+    /// # Panics
+    ///
+    /// Only in the browser tests' build, with the `panic-probe` feature,
+    /// when the canvas carries `data-panic-probe`: on purpose.
     pub async fn create(
         canvas: HtmlCanvasElement,
         width: u32,
         height: u32,
     ) -> core::result::Result<Viewer, JsError> {
         console_error_panic_hook::set_once();
+        #[cfg(feature = "panic-probe")]
+        let probe = canvas.has_attribute("data-panic-probe");
         let gpu = request_gpu(canvas).await?;
         // The page shows the backend; why WebGPU was passed over goes to
         // the console, where a check on a browser that should have it
@@ -278,13 +302,26 @@ impl Viewer {
                 .into(),
             );
         }
+        // The browser tests' panic (lib.rs, panic-probe): at the point
+        // where an oversized canvas once panicked, so the page meets it
+        // with the GPU in hand and no viewer yet.
+        #[cfg(feature = "panic-probe")]
+        assert!(!probe, "panic-probe: the canvas carries data-panic-probe");
+        let wanted = (width.max(1), height.max(1));
+        let (width, height) = cap_canvas(
+            wanted.0,
+            wanted.1,
+            gpu.device.limits().max_texture_dimension_2d,
+        );
         let mut config = gpu
             .surface
-            .get_default_config(&gpu.adapter, width.max(1), height.max(1))
+            .get_default_config(&gpu.adapter, width, height)
             .ok_or(Error::NoSurfaceConfig {
                 backend: gpu.backend,
             })?;
         config.present_mode = wgpu::PresentMode::Fifo;
+        // Configuring sets the canvas's backing size to the config's, on
+        // WebGL2 (wgpu-hal) and on WebGPU (wgpu's browser backend) alike.
         gpu.surface.configure(&gpu.device, &config);
         let samples = if gpu
             .adapter
@@ -314,6 +351,7 @@ impl Viewer {
             state: ViewState::new(1),
             backend: gpu.backend,
             fallback: gpu.fallback,
+            capped: (width, height) != wanted,
             vendor,
             fit_scale: 0.0,
             board: None,
@@ -359,6 +397,14 @@ impl Viewer {
     #[must_use]
     pub fn adapter_vendor(&self) -> String {
         self.vendor.clone()
+    }
+
+    /// Whether the canvas is smaller than the page last asked for, held
+    /// to the device's limit: the browser stretches it, a little soft,
+    /// and the page sends the `capped` beacon once.
+    #[must_use]
+    pub fn capped(&self) -> bool {
+        self.capped
     }
 
     /// Samples per pixel the frame is drawn with: 4 with multisampling, 1
@@ -672,9 +718,17 @@ impl Viewer {
         self.camera.set_mirrored(mirrored);
     }
 
-    /// The canvas's backing size changed.
+    /// The page asks for a backing size of `width` by `height` device
+    /// pixels: the viewer sets the canvas to it, capped to the device's
+    /// limit as [`Viewer::create`] does.
     pub fn resize(&mut self, width: u32, height: u32) {
-        let (width, height) = (width.max(1), height.max(1));
+        let wanted = (width.max(1), height.max(1));
+        let (width, height) = cap_canvas(
+            wanted.0,
+            wanted.1,
+            self.device.limits().max_texture_dimension_2d,
+        );
+        self.capped = (width, height) != wanted;
         if (width, height) == (self.config.width, self.config.height) {
             return;
         }

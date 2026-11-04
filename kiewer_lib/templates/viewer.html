@@ -615,6 +615,9 @@ window.addEventListener("kiewer-board", function (e) {
 // middle or right drag never sends; a left drag or a touch pan that
 // still ends in one is told apart by how far the pointer moved since it
 // went down (CLICK_SLOP), and ignored.
+// The pointer in device pixels is the page script's (devicePoint).
+import { devicePoint } from "{{ page_script_url }}";
+
 const CLICK_SLOP = 4;
 const netCanvas = document.getElementById("board");
 const netStage = document.getElementById("stage");
@@ -631,11 +634,7 @@ let netDown = null;
 // What that pointer was: mouse, touch or pen.
 let netPointer = "mouse";
 
-function netPoint(e) {
-  const r = netCanvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  return [(e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr];
-}
+function netPoint(e) { return devicePoint(netCanvas, e); }
 const netMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 function followMotion() { if (netViewer) netViewer.set_reduced_motion(netMotion.matches); }
 netMotion.addEventListener("change", followMotion);

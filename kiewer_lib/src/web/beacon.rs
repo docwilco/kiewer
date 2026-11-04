@@ -2,7 +2,8 @@
 //! viewer page sends per page load through `navigator.sendBeacon`, with
 //! which backend ran, whether the browser exposed WebGPU at all, how the
 //! start went and which adapter vendor the browser named; a wasm panic
-//! sends the same report with its message. The server checks the shape,
+//! sends the same report with its message, and a canvas held to the
+//! device's texture limit sends one more, once. The server checks the shape,
 //! limits each client to [`LIMIT_PER_MINUTE`] and writes one `tracing`
 //! event with the fields below, which the JSON log the server runs with
 //! on Cloud Run makes one `jsonPayload` line and a Cloud Logging metric
@@ -88,7 +89,10 @@ pub enum Backend {
 }
 
 /// How the page load went: the adapter and device came up, they did
-/// not, or the wasm panicked (at any point in the page's life).
+/// not, or the wasm panicked (at any point in the page's life); or the
+/// canvas was held to the device's texture limit, sent beside `ok` the
+/// first time it happens in a page load (`cap_canvas` in
+/// `kiewer_viewer/src/render.rs`), with no reason and no sizes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Display)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {
@@ -98,6 +102,8 @@ pub enum Outcome {
     Failed,
     #[display("panic")]
     Panic,
+    #[display("capped")]
+    Capped,
 }
 
 /// One report as the page sends it. Every field is in the closed sets or
@@ -354,6 +360,7 @@ mod tests {
     #[test_case(Outcome::Ok, "ok")]
     #[test_case(Outcome::Failed, "failed")]
     #[test_case(Outcome::Panic, "panic")]
+    #[test_case(Outcome::Capped, "capped")]
     fn an_outcome_has_one_wire_name(outcome: Outcome, name: &str) {
         assert_eq!(outcome.to_string(), name, "as the log line writes it");
         let parsed: Outcome = serde_json::from_str(&format!("\"{name}\"")).expect("parses");
