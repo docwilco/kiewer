@@ -8,7 +8,34 @@
 //! never a panic. The tree keeps the byte offset and line of every node so
 //! the parser above it can say where a field went wrong.
 
+use std::time::Instant;
+
 use crate::error::{Error, Result};
+
+/// When a parse gives up: never, or at an instant.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Deadline(Option<Instant>);
+
+impl Deadline {
+    /// A parse that runs to the end.
+    pub(crate) const NONE: Self = Self(None);
+
+    /// A parse that gives up once the clock passes `instant`.
+    #[must_use]
+    pub(crate) fn at(instant: Instant) -> Self {
+        Self(Some(instant))
+    }
+
+    /// [`Error::DeadlinePassed`] once the deadline is behind the clock.
+    /// Without one the clock is never read: `Instant::now` panics on
+    /// wasm32-unknown-unknown, where the viewer parses with no deadline.
+    pub(crate) fn check(self) -> Result<()> {
+        match self.0 {
+            Some(at) if Instant::now() >= at => Err(Error::DeadlinePassed),
+            _ => Ok(()),
+        }
+    }
+}
 
 /// Where in the source a token or list starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,8 +247,22 @@ impl Node {
 /// The text is empty, has an unterminated string, has unbalanced
 /// parentheses, or holds anything after the one top-level list.
 pub fn read(source: &str) -> Result<Node> {
-    Reader::new(source).read_document()
+    read_by(source, Deadline::NONE)
 }
+
+/// [`read`], giving up with [`Error::DeadlinePassed`] once `deadline`
+/// passes. The clock is read at the first item and once every
+/// [`CHECK_EVERY`] items after, at any depth, so a file that is one huge
+/// list stops as soon as a file of many small ones.
+pub(crate) fn read_by(source: &str, deadline: Deadline) -> Result<Node> {
+    Reader::new(source, deadline).read_document()
+}
+
+/// How many items the reader takes between two looks at the clock. A
+/// look costs tens of nanoseconds and an item about as much, so one in
+/// 1024 is lost in the parse while the reader still stops within
+/// microseconds of the deadline.
+const CHECK_EVERY: u32 = 1024;
 
 /// The deepest nesting [`read`] accepts.
 pub const MAX_DEPTH: usize = 128;
@@ -230,14 +271,19 @@ struct Reader<'a> {
     chars: core::iter::Peekable<core::str::CharIndices<'a>>,
     len: usize,
     line: u32,
+    deadline: Deadline,
+    /// Items read so far, wrapping: when the next look at the clock is.
+    taken: u32,
 }
 
 impl<'a> Reader<'a> {
-    fn new(source: &'a str) -> Self {
+    fn new(source: &'a str, deadline: Deadline) -> Self {
         Self {
             chars: source.char_indices().peekable(),
             len: source.len(),
             line: 1,
+            deadline,
+            taken: 0,
         }
     }
 
@@ -295,6 +341,10 @@ impl<'a> Reader<'a> {
             items: Vec::new(),
         }];
         loop {
+            if self.taken.is_multiple_of(CHECK_EVERY) {
+                self.deadline.check()?;
+            }
+            self.taken = self.taken.wrapping_add(1);
             self.skip_whitespace();
             let position = self.here();
             let Some((_, c)) = self.bump() else {

@@ -15,11 +15,12 @@ pub mod model;
 pub mod sheet_tree;
 
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use crate::board::{at, flag, optional_number, optional_text, point, size};
 use crate::error::{Error, MIN_SCHEMATIC_VERSION, Result};
 use crate::model::{Font, Horizontal, Justify, Point, Property, Size, Vertical};
-use crate::sexpr::{self, Node};
+use crate::sexpr::{self, Deadline, Node};
 use model::{
     BusEntry, Field, Fill, FlagShape, Graphic, Junction, Label, LabelKind, LibrarySymbol,
     LibrarySymbolId, Mirror, Paper, PaperSize, Pin, PinElectrical, PinShape, Sheet, SheetPin,
@@ -42,7 +43,24 @@ const DEFAULT_PIN_NAME_OFFSET: f64 = 0.508;
 /// missing or malformed field, or places a symbol the file's
 /// `lib_symbols` does not hold.
 pub fn parse_schematic(source: &str) -> Result<Sheet> {
-    let root = sexpr::read(source)?;
+    parse(source, Deadline::NONE)
+}
+
+/// [`parse_schematic`], giving up with [`Error::DeadlinePassed`] shortly
+/// after `deadline`: the reader looks at the clock every thousand or so
+/// items and the walk once per library symbol and top-level element. For
+/// a caller that stops waiting at a deadline (the server's upload) and
+/// wants the parse to stop with it. Not for wasm32-unknown-unknown, where
+/// the clock panics.
+///
+/// # Errors
+/// Those of [`parse_schematic`], and [`Error::DeadlinePassed`].
+pub fn parse_schematic_before(source: &str, deadline: Instant) -> Result<Sheet> {
+    parse(source, Deadline::at(deadline))
+}
+
+fn parse(source: &str, deadline: Deadline) -> Result<Sheet> {
+    let root = sexpr::read_by(source, deadline)?;
     let head = root.head()?;
     if head != "kicad_sch" {
         return Err(root.error(format!("expected (kicad_sch ...), found ({head} ...)")));
@@ -61,10 +79,11 @@ pub fn parse_schematic(source: &str) -> Result<Sheet> {
     let mut library: Vec<LibrarySymbol> = Vec::new();
     if let Some(table) = root.child("lib_symbols") {
         for node in table.children("symbol") {
+            deadline.check()?;
             library.push(library_symbol(node)?);
         }
     }
-    resolve_extends(&mut library);
+    resolve_extends(&mut library, deadline)?;
     let mut by_name: BTreeMap<&str, LibrarySymbolId> = BTreeMap::new();
     for (index, symbol) in library.iter().enumerate() {
         let id = u32::try_from(index)
@@ -92,6 +111,7 @@ pub fn parse_schematic(source: &str) -> Result<Sheet> {
         graphics: Vec::new(),
     };
     for node in root.lists() {
+        deadline.check()?;
         match node.head()? {
             "uuid" => schematic.uuid = Some(node.atom(0)?.to_owned()),
             "generator" => schematic.generator = Some(node.atom(0)?.to_owned()),
@@ -191,8 +211,10 @@ fn library_symbol(node: &Node) -> Result<LibrarySymbol> {
 
 /// A derived symbol takes its parent's units and pin settings. KiCad
 /// allows one level of derivation; a parent the file lacks leaves the
-/// symbol as written, with whatever body it has.
-fn resolve_extends(library: &mut [LibrarySymbol]) {
+/// symbol as written, with whatever body it has. The clock is read once
+/// per derived symbol: the search for a parent by its short name is a
+/// scan of every parent.
+fn resolve_extends(library: &mut [LibrarySymbol], deadline: Deadline) -> Result<()> {
     let parents: BTreeMap<String, LibrarySymbol> = library
         .iter()
         .filter(|symbol| symbol.extends.is_none())
@@ -202,6 +224,7 @@ fn resolve_extends(library: &mut [LibrarySymbol]) {
         let Some(parent_name) = &symbol.extends else {
             continue;
         };
+        deadline.check()?;
         // The file names the parent without its library prefix; the
         // parent entry carries it.
         let parent = parents.get(parent_name).or_else(|| {
@@ -220,6 +243,7 @@ fn resolve_extends(library: &mut [LibrarySymbol]) {
             symbol.pin_name_offset = parent.pin_name_offset;
         }
     }
+    Ok(())
 }
 
 /// A sub-symbol `(symbol "NAME_U_S" ...)`: the unit and body style are the

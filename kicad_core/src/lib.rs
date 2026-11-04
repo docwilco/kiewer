@@ -10,6 +10,8 @@
 //! (groups, dimensions, 3D models, plot settings, images) are skipped; a
 //! known element with a missing or malformed field, an unknown layer name,
 //! or a format older than KiCad 9 is an [`Error`], never a panic.
+//! [`parse_board_before`] and [`parse_schematic_before`] take a deadline
+//! and stop with [`Error::DeadlinePassed`] shortly after it.
 
 // A parser of untrusted input: an index the input puts out of bounds must
 // fail as a parse error and never as a panic, so slicing and indexing are
@@ -27,6 +29,6 @@ pub mod schematic;
 pub mod sexpr;
 pub mod tessellate;
 
-pub use board::parse_board;
+pub use board::{parse_board, parse_board_before};
 pub use error::{Error, MIN_BOARD_VERSION, MIN_SCHEMATIC_VERSION, Result};
-pub use schematic::parse_schematic;
+pub use schematic::{parse_schematic, parse_schematic_before};

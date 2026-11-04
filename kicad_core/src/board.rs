@@ -8,6 +8,7 @@
 //! resolve.
 
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use crate::error::{Error, MIN_BOARD_VERSION, Result};
 use crate::model::{
@@ -16,7 +17,7 @@ use crate::model::{
     Property, Segment, Shape, Size, Tenting, TentingOverride, Text, TextRole, TrackArc, Vertical,
     Via, ViaKind, Zone,
 };
-use crate::sexpr::{self, Node};
+use crate::sexpr::{self, Deadline, Node};
 
 /// KiCad's default text size, used when a text item carries no `effects`.
 const DEFAULT_TEXT_SIZE: f64 = 1.27;
@@ -29,7 +30,23 @@ const DEFAULT_TEXT_SIZE: f64 = 1.27;
 /// ([`Error::UnsupportedVersion`]), or has a known element with a missing
 /// or malformed field, an unknown layer name among them.
 pub fn parse_board(source: &str) -> Result<Board> {
-    let root = sexpr::read(source)?;
+    parse(source, Deadline::NONE)
+}
+
+/// [`parse_board`], giving up with [`Error::DeadlinePassed`] shortly after
+/// `deadline`: the reader looks at the clock every thousand or so items
+/// and the walk once per top-level element. For a caller that stops
+/// waiting at a deadline (the server's upload) and wants the parse to stop
+/// with it. Not for wasm32-unknown-unknown, where the clock panics.
+///
+/// # Errors
+/// Those of [`parse_board`], and [`Error::DeadlinePassed`].
+pub fn parse_board_before(source: &str, deadline: Instant) -> Result<Board> {
+    parse(source, Deadline::at(deadline))
+}
+
+fn parse(source: &str, deadline: Deadline) -> Result<Board> {
+    let root = sexpr::read_by(source, deadline)?;
     let head = root.head()?;
     if head != "kicad_pcb" {
         return Err(root.error(format!("expected (kicad_pcb ...), found ({head} ...)")));
@@ -69,6 +86,7 @@ pub fn parse_board(source: &str) -> Result<Board> {
         tenting: Tenting::default(),
     };
     for node in root.lists() {
+        deadline.check()?;
         match node.head()? {
             "generator" => board.generator = Some(node.atom(0)?.to_owned()),
             "generator_version" => board.generator_version = Some(node.atom(0)?.to_owned()),

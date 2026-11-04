@@ -4,7 +4,8 @@
 //! through `kiewer_lib::upload` directly; and (#17) a dropped folder with
 //! its paths, the skip list, the rooting with its warning, and the hourly
 //! allowance; and (#83) the refusal of a zip part, since the upload page
-//! expands a zip itself (ADR 0005; its tests are in `browser.rs`). The
+//! expands a zip itself (ADR 0005; its tests are in `browser.rs`); and
+//! (#43) a parse refused at its deadline stops with the refusal. The
 //! Postgres tests skip without `DATABASE_URL`, like `tests/it/db.rs`; the
 //! route-priority test and the cap tests need no database.
 
@@ -547,6 +548,83 @@ async fn the_account_cap_and_the_parse_timeout_refuse_through_commit() {
     assert!(
         matches!(slow, Error::Refused(Refusal::ParseTimeout { seconds: 0 })),
         "{slow}"
+    );
+}
+
+/// The hand-off board with `segments` more tracks before its closing
+/// parenthesis: a board whose parse takes a while.
+fn long_board(segments: usize) -> String {
+    let board = std::str::from_utf8(BOARD).expect("the hand-off board is text");
+    let close = board.rfind(')').expect("the board's closing parenthesis");
+    let track = "\t(segment (start 112 86.5) (end 109.6 86.5) (width 0.25) (layer \"F.Cu\") \
+                 (net \"BOOT\") (uuid \"20a582cc-5c31-4dc3-a763-baed730683f4\"))\n";
+    let mut long = String::with_capacity(board.len() + segments * track.len());
+    long.push_str(&board[..close]);
+    for _ in 0..segments {
+        long.push_str(track);
+    }
+    long.push_str(&board[close..]);
+    long
+}
+
+/// An upload refused at the parse deadline leaves no parse running
+/// (#43): the blocking task ends soon after the refusal, where before it
+/// ran the whole parse on a thread nobody waited for. The runtime is the
+/// test's own because dropping one waits for every blocking task it
+/// spawned, which is how the test sees the task end. The deadline is a
+/// quarter of the board's full parse as measured here, so the bound
+/// moves with the machine's speed: a parse that ran on would linger
+/// about three quarters of it.
+#[test]
+fn an_upload_refused_at_the_parse_deadline_stops_its_parse() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let measured = runtime.block_on(async {
+        let db = pool_from_env().await?;
+        // About 30 MB, under the 50 MB file cap.
+        let board = long_board(270_000);
+        let started = std::time::Instant::now();
+        kicad_core::parse_board(&board).expect("the long board parses");
+        let full = started.elapsed();
+        let dir = scratch_dir!();
+        let blobs = FsBlobStore::new(dir.path());
+        let (account_id, handle) = person(&db).await;
+        let author = Author { account_id, handle };
+        let limits = Limits {
+            parse_timeout: full / 4,
+            ..Limits::DEFAULT
+        };
+        let mut incoming = Incoming::new(limits).unwrap();
+        receive(&mut incoming, "long.kicad_pcb", board.as_bytes(), 1 << 20)
+            .await
+            .unwrap();
+        let slow = upload::push(
+            &db,
+            &blobs,
+            &limits,
+            &author,
+            Target::New { name: None },
+            None,
+            incoming,
+        )
+        .await
+        .expect_err("past the parse deadline");
+        assert!(
+            matches!(slow, Error::Refused(Refusal::ParseTimeout { .. })),
+            "{slow}"
+        );
+        Some((std::time::Instant::now(), full))
+    });
+    drop(runtime);
+    let Some((refused, full)) = measured else {
+        return;
+    };
+    let lingered = refused.elapsed();
+    assert!(
+        lingered < full / 4,
+        "the parse ran {lingered:?} past the refusal; the full parse takes {full:?}"
     );
 }
 

@@ -562,24 +562,46 @@ fn root_at_project_folder(files: Vec<Received>) -> Rooted {
     }
 }
 
+/// The refusal of an upload whose parse ran past `timeout`.
+fn timed_out(timeout: Duration) -> Error {
+    Refusal::ParseTimeout {
+        seconds: timeout.as_secs(),
+    }
+    .into()
+}
+
 /// A file's bytes checked as its kind says, off the runtime's threads;
-/// the board's metadata when it is one.
-fn parse(kind: FileKind, path: &TreePath, bytes: &[u8]) -> Result<Option<Metadata>> {
+/// the board's metadata when it is one. A board or schematic parse stops
+/// at `deadline` (#43): the upload stops waiting for it there, and a
+/// blocking task cannot be cancelled from outside, so the parse ends
+/// itself rather than run to the end on a thread nobody waits for.
+fn parse(
+    kind: FileKind,
+    path: &TreePath,
+    bytes: &[u8],
+    deadline: std::time::Instant,
+    timeout: Duration,
+) -> Result<Option<Metadata>> {
     let malformed = |error: String| {
         Error::Refused(Refusal::DoesNotParse {
             path: path.to_string(),
             error,
         })
     };
+    // The parse may notice the deadline a hair before the runtime's
+    // timer does; the refusal is the timer's either way.
+    let refused = |error: kicad_core::Error| match error {
+        kicad_core::Error::DeadlinePassed => timed_out(timeout),
+        error => malformed(error.to_string()),
+    };
     let text = std::str::from_utf8(bytes).map_err(|_| malformed("not UTF-8 text".to_owned()))?;
     match kind {
         FileKind::Board => {
-            let board =
-                kicad_core::parse_board(text).map_err(|error| malformed(error.to_string()))?;
+            let board = kicad_core::parse_board_before(text, deadline).map_err(refused)?;
             Ok(Some(Metadata::of(&board)))
         }
         FileKind::Schematic => {
-            kicad_core::parse_schematic(text).map_err(|error| malformed(error.to_string()))?;
+            kicad_core::parse_schematic_before(text, deadline).map_err(refused)?;
             Ok(None)
         }
         FileKind::Project => {
@@ -674,10 +696,11 @@ async fn head_now(db: &PgPool, target: &Target) -> Result<Option<RevisionHash>> 
     design::head(&mut *db.acquire().await?, design.id, name).await
 }
 
-/// Each rooted file read, parsed under what is left of the timeout,
-/// checked against the block list and stored as a blob: the tree's
-/// entries, and the metadata of the first board in path order (the
-/// shallowest), the one the page shows.
+/// Each rooted file read, parsed under what is left of the timeout (the
+/// parse itself stopping at the deadline, so a refused upload leaves no
+/// parse running), checked against the block list and stored as a blob:
+/// the tree's entries, and the metadata of the first board in path order
+/// (the shallowest), the one the page shows.
 async fn parse_and_store(
     db: &PgPool,
     blobs: &dyn BlobStore,
@@ -692,20 +715,17 @@ async fn parse_and_store(
         let (bytes, parsed) = {
             let path = file.path.clone();
             let kind = file.kind;
+            let timeout = limits.parse_timeout;
+            let parse_by = deadline.into_std();
             let parsing = tokio::task::spawn_blocking(move || {
-                let parsed = parse(kind, &path, &bytes);
+                let parsed = parse(kind, &path, &bytes, parse_by, timeout);
                 (bytes, parsed)
             });
             match tokio::time::timeout_at(deadline, parsing).await {
                 Ok(joined) => joined.map_err(|join| Error::Failed {
                     reason: format!("the upload's parse task did not finish: {join}"),
                 })?,
-                Err(_) => {
-                    return Err(Refusal::ParseTimeout {
-                        seconds: limits.parse_timeout.as_secs(),
-                    }
-                    .into());
-                }
+                Err(_) => return Err(timed_out(timeout)),
             }
         };
         let parsed = parsed?;
@@ -1110,18 +1130,36 @@ mod tests {
         assert_eq!(rooted.warnings, warnings);
     }
 
+    /// [`parse`] with the whole default timeout ahead of it.
+    fn parse_in_time(kind: FileKind, path: &TreePath, bytes: &[u8]) -> Result<Option<Metadata>> {
+        let timeout = Limits::DEFAULT.parse_timeout;
+        parse(
+            kind,
+            path,
+            bytes,
+            std::time::Instant::now() + timeout,
+            timeout,
+        )
+    }
+
     #[test]
     fn the_hand_off_files_pass_their_shape_checks() {
         let path: TreePath = "midi8knob.kicad_pcb".parse().unwrap();
         let board = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pcb");
-        let metadata = parse(FileKind::Board, &path, board)
+        let metadata = parse_in_time(FileKind::Board, &path, board)
             .expect("the board parses")
             .expect("a board has metadata");
         assert_eq!(metadata.footprint_count, 78);
         let schematic = include_bytes!("../../viewer-drop/board/midi8knob.kicad_sch");
-        assert_eq!(parse(FileKind::Schematic, &path, schematic).unwrap(), None);
+        assert_eq!(
+            parse_in_time(FileKind::Schematic, &path, schematic).unwrap(),
+            None
+        );
         let project = include_bytes!("../../viewer-drop/board/midi8knob.kicad_pro");
-        assert_eq!(parse(FileKind::Project, &path, project).unwrap(), None);
+        assert_eq!(
+            parse_in_time(FileKind::Project, &path, project).unwrap(),
+            None
+        );
     }
 
     #[test_case(FileKind::Board, b"(kicad_pcb (version 20241229) (layers (0 \"F.Cu\" signal))" ; "an unbalanced board")]
@@ -1132,7 +1170,7 @@ mod tests {
     #[test_case(FileKind::Project, b"\xff\xfe" ; "bytes that are not UTF-8")]
     fn a_malformed_file_is_refused_naming_it(kind: FileKind, bytes: &[u8]) {
         let path: TreePath = "x.file".parse().unwrap();
-        let err = parse(kind, &path, bytes).expect_err("refused");
+        let err = parse_in_time(kind, &path, bytes).expect_err("refused");
         match err {
             Error::Refused(Refusal::DoesNotParse { path, error }) => {
                 assert_eq!(path, "x.file");
@@ -1140,6 +1178,26 @@ mod tests {
             }
             other => panic!("not a refusal: {other}"),
         }
+    }
+
+    /// A parse that notices the deadline before the runtime's timer does
+    /// is refused as the timer would refuse it, never as a malformed file.
+    #[test_case(FileKind::Board, include_bytes!("../../viewer-drop/board/midi8knob.kicad_pcb") ; "a board")]
+    #[test_case(FileKind::Schematic, include_bytes!("../../viewer-drop/board/midi8knob.kicad_sch") ; "a schematic")]
+    fn a_parse_past_its_deadline_is_the_timeout_refusal(kind: FileKind, bytes: &[u8]) {
+        let path: TreePath = "x.file".parse().unwrap();
+        let err = parse(
+            kind,
+            &path,
+            bytes,
+            std::time::Instant::now(),
+            Duration::from_secs(30),
+        )
+        .expect_err("past the deadline");
+        assert!(
+            matches!(err, Error::Refused(Refusal::ParseTimeout { seconds: 30 })),
+            "{err}"
+        );
     }
 
     #[test]

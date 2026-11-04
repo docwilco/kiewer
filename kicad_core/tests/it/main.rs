@@ -12,6 +12,7 @@
 
 mod board;
 mod connect;
+mod deadline;
 mod malformed;
 mod schematic;
 mod schematic_tessellate;

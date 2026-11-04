@@ -12,7 +12,7 @@ pub const MIN_SCHEMATIC_VERSION: u32 = 20_250_114;
 
 /// Why a file did not become a model.
 ///
-/// Every failure names where in the text it was found (1-based line and
+/// Every failure in the text names where it was found (1-based line and
 /// byte offset) and what was expected there; a malformed file is never a
 /// panic. The position is why `Malformed` carries fields rather than
 /// being the conventions' bare `Malformed(String)`: a 2 MB board with one
@@ -52,6 +52,11 @@ pub enum Error {
         /// The `(version N)` the file carries.
         version: u32,
     },
+    /// The parse was given a deadline ([`crate::parse_board_before`],
+    /// [`crate::parse_schematic_before`]) and ran past it; it stopped there
+    /// rather than run to the end.
+    #[display("the parse ran past its deadline")]
+    DeadlinePassed,
 }
 
 /// The crate's `Result`.
