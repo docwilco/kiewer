@@ -77,12 +77,14 @@ fn executable() -> Option<PathBuf> {
     Some(path)
 }
 
-async fn start_server() -> (SocketAddr, TempDir) {
+/// A pool that never connects, for the pages that read no database.
+fn no_database() -> PgPool {
+    kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool")
+}
+
+async fn start_server(db: PgPool) -> (SocketAddr, TempDir) {
     let dir = scratch_dir!();
-    let state = http::state(
-        kiewer_lib::db::lazy_pool("postgres://nobody@127.0.0.1:1/none").expect("a lazy pool"),
-        Arc::new(FsBlobStore::new(dir.path())),
-    );
+    let state = http::state(db, Arc::new(FsBlobStore::new(dir.path())));
     (http::serve_on_free_port(state).await, dir)
 }
 
@@ -189,7 +191,7 @@ async fn the_board_page_draws_on_webgl2_and_its_ok_beacon_arrives() {
     let Some(executable) = executable() else {
         return;
     };
-    let (addr, _blobs) = start_server().await;
+    let (addr, _blobs) = start_server(no_database()).await;
     let profile = scratch_dir!();
     let (mut browser, traffic) = launch(executable, &profile).await;
 
@@ -329,14 +331,20 @@ impl Session {
     /// A browser on a blank tab that records the beacons of whatever page
     /// loads next.
     async fn new(executable: PathBuf) -> Session {
+        Session::over(executable, no_database(), RECORD_BEACONS).await
+    }
+
+    /// A browser on a blank tab over a server on `db`, with `recorder`
+    /// run before any script of whatever page loads next.
+    async fn over(executable: PathBuf, db: PgPool, recorder: &str) -> Session {
         let permit = BROWSERS.acquire().await.expect("the semaphore stays open");
-        let (addr, blobs) = start_server().await;
+        let (addr, blobs) = start_server(db).await;
         let profile = scratch_dir!();
         let (browser, traffic) = launch(executable, &profile).await;
         let page = browser.new_page("about:blank").await.expect("a tab");
-        page.evaluate_on_new_document(RECORD_BEACONS)
+        page.evaluate_on_new_document(recorder)
             .await
-            .expect("the beacon recorder");
+            .expect("the recorder");
         Session {
             browser,
             traffic,
@@ -776,6 +784,9 @@ struct Entry<'a> {
     /// The uncompressed size the headers declare when it is not the true
     /// one: what a zip bomb's directory does.
     declared: Option<u32>,
+    /// The CRC-32 the headers declare when it is not the true one: what a
+    /// zip damaged after it was written holds.
+    crc: Option<u32>,
 }
 
 impl<'a> Entry<'a> {
@@ -786,6 +797,7 @@ impl<'a> Entry<'a> {
             method: 8,
             encrypted: false,
             declared: None,
+            crc: None,
         }
     }
 
@@ -847,7 +859,7 @@ fn zip_of(entries: &[Entry<'_>], shape: Shape) -> Vec<u8> {
         };
         let mut crc = Crc::new();
         crc.update(entry.bytes);
-        let crc = crc.sum();
+        let crc = entry.crc.unwrap_or(crc.sum());
         let packed_size = u32_of(packed.len());
         let size = entry.declared.unwrap_or(u32_of(entry.bytes.len()));
         let flags = u16::from(entry.encrypted) | if shape.streamed { 0b1000 } else { 0 };
@@ -1034,48 +1046,34 @@ fn zip_with_skipped_folders() -> Vec<u8> {
 /// A signed-in person's upload form in a browser of its own, with the
 /// server and its database behind it.
 struct Uploader {
-    browser: Browser,
-    traffic: tokio::task::JoinHandle<()>,
-    page: Page,
-    addr: SocketAddr,
+    session: Session,
     handle: Handle,
     zips: TempDir,
-    _blobs: TempDir,
-    _profile: TempDir,
-    _permit: SemaphorePermit<'static>,
 }
 
 impl Uploader {
     /// The upload form, loaded for a new person with a live session.
     async fn new(executable: PathBuf, db: PgPool) -> Uploader {
-        let permit = BROWSERS.acquire().await.expect("the semaphore stays open");
-        let blobs = scratch_dir!();
-        let state = http::state(db.clone(), Arc::new(FsBlobStore::new(blobs.path())));
-        let addr = http::serve_on_free_port(state).await;
+        let session = Session::over(executable, db.clone(), RECORD_UPLOAD).await;
         let (account_id, handle) = person(&db).await;
-        let session = session::start(&db, account_id).await.expect("a session");
-        let profile = scratch_dir!();
-        let (browser, traffic) = launch(executable, &profile).await;
-        let page = browser.new_page("about:blank").await.expect("a tab");
-        page.evaluate_on_new_document(RECORD_UPLOAD)
-            .await
-            .expect("the upload recorder");
-        let mut cookie = CookieParam::new("kiewer_session", session.to_string());
+        let id = session::start(&db, account_id).await.expect("a session");
+        let addr = session.addr;
+        let mut cookie = CookieParam::new("kiewer_session", id.to_string());
         cookie.url = Some(format!("http://{addr}/"));
-        page.set_cookie(cookie).await.expect("the session cookie");
-        page.goto(format!("http://{addr}/upload"))
+        session
+            .page
+            .set_cookie(cookie)
+            .await
+            .expect("the session cookie");
+        session
+            .page
+            .goto(format!("http://{addr}/upload"))
             .await
             .expect("the form loads");
         Uploader {
-            browser,
-            traffic,
-            page,
-            addr,
+            session,
             handle,
             zips: scratch_dir!(),
-            _blobs: blobs,
-            _profile: profile,
-            _permit: permit,
         }
     }
 
@@ -1084,16 +1082,15 @@ impl Uploader {
     async fn upload_zip(&self, name: &str, bytes: &[u8]) {
         let path = self.zips.path().join(name);
         std::fs::write(&path, bytes).expect("the zip written");
-        let input = self
-            .page
+        let page = &self.session.page;
+        let input = page
             .find_element(r#"input[type="file"]:not([webkitdirectory])"#)
             .await
             .expect("the file input");
         let mut chosen = SetFileInputFilesParams::new(vec![path.display().to_string()]);
         chosen.node_id = Some(input.node_id);
-        self.page.execute(chosen).await.expect("the zip chosen");
-        self.page
-            .evaluate(r#"document.querySelector("form").requestSubmit()"#)
+        page.execute(chosen).await.expect("the zip chosen");
+        page.evaluate(r#"document.querySelector("form").requestSubmit()"#)
             .await
             .expect("the form submitted");
     }
@@ -1105,6 +1102,7 @@ impl Uploader {
         let poll = async {
             loop {
                 let held = self
+                    .session
                     .page
                     .evaluate(condition)
                     .await
@@ -1131,19 +1129,7 @@ impl Uploader {
 
     /// The value of `expression` on the page.
     async fn read<T: serde::de::DeserializeOwned>(&self, expression: &str) -> T {
-        self.page
-            .evaluate(expression)
-            .await
-            .expect("the page evaluates")
-            .into_value()
-            .expect("a value of the expected shape")
-    }
-
-    /// Closes the browser and waits for it and its protocol task to end.
-    async fn close(mut self) {
-        self.browser.close().await.expect("the browser closes");
-        self.browser.wait().await.expect("the browser exits");
-        self.traffic.await.expect("the protocol task ends");
+        self.session.read(expression).await
     }
 }
 
@@ -1180,7 +1166,7 @@ async fn the_upload_page_expands_a_zip_and_sends_the_kicad_files_in_it(
         Some(project_names(prefix, '/').to_vec()),
         "the KiCad files alone, with their paths in the zip, and no zip"
     );
-    let page = http::request(uploader.addr, "GET", &design_path, &[], "").await;
+    let page = http::request(uploader.session.addr, "GET", &design_path, &[], "").await;
     assert_eq!(page.status, 200, "{}", page.body);
     assert_eq!(
         listed_paths(&page.body),
@@ -1198,7 +1184,7 @@ async fn the_upload_page_expands_a_zip_and_sends_the_kicad_files_in_it(
         "the board came out of the zip whole: {}",
         page.body
     );
-    uploader.close().await;
+    uploader.session.close().await;
 }
 
 /// The project zipped with its four files each changed by `change`.
@@ -1264,6 +1250,19 @@ fn board_over_the_file_cap() -> Vec<u8> {
     })
 }
 
+fn board_with_a_wrong_checksum() -> Vec<u8> {
+    project_zip_with(Shape::default(), |entry| {
+        if entry.path.ends_with(".kicad_pcb") {
+            Entry {
+                crc: Some(0x1234_5678),
+                ..entry
+            }
+        } else {
+            entry
+        }
+    })
+}
+
 /// The project and one more sheet, each declaring 45 MB: under the file
 /// cap, 225 MB together.
 fn files_over_the_revision_cap() -> Vec<u8> {
@@ -1285,20 +1284,18 @@ fn too_many_entries() -> Vec<u8> {
     zip_of(&entries, Shape::default())
 }
 
-const AGAIN: &str = "; zip the project again, or drop the project folder instead";
-
-#[test_case(zip64_end_records, "midi8knob.zip: has zip64 records, which the page does not read", true; "zip64 end records")]
-#[test_case(zip64_entries, "midi8knob.zip: has zip64 records, which the page does not read", true; "zip64 sizes in the entries")]
-#[test_case(encrypted_board, "midi8knob.zip: midi8knob.kicad_pcb is encrypted", true; "an encrypted entry")]
-#[test_case(board_in_bzip2, "midi8knob.zip: midi8knob.kicad_pcb is compressed with neither deflate nor store", true; "an entry in bzip2")]
-#[test_case(board_over_the_file_cap, "midi8knob.zip: midi8knob.kicad_pcb is larger than 50 MB, the limit for one file", false; "an entry over the file cap")]
-#[test_case(files_over_the_revision_cap, "the files together are larger than 200 MB, the limit for one revision", false; "entries over the revision cap")]
-#[test_case(too_many_entries, "midi8knob.zip: lists 10003 entries, more than the 10000 the page reads", true; "more entries than the page reads")]
+#[test_case(zip64_end_records, "midi8knob.zip: has zip64 records, which the page does not read; zip the project again, or drop the project folder instead"; "zip64 end records")]
+#[test_case(zip64_entries, "midi8knob.zip: has zip64 records, which the page does not read; zip the project again, or drop the project folder instead"; "zip64 sizes in the entries")]
+#[test_case(encrypted_board, "midi8knob.zip: midi8knob.kicad_pcb is encrypted; zip the project again, or drop the project folder instead"; "an encrypted entry")]
+#[test_case(board_in_bzip2, "midi8knob.zip: midi8knob.kicad_pcb is compressed with neither deflate nor store; zip the project again, or drop the project folder instead"; "an entry in bzip2")]
+#[test_case(board_with_a_wrong_checksum, "midi8knob.zip: midi8knob.kicad_pcb does not match its checksum; zip the project again, or drop the project folder instead"; "an entry that does not match its checksum")]
+#[test_case(board_over_the_file_cap, "midi8knob.zip: midi8knob.kicad_pcb is larger than 50 MB, the limit for one file"; "an entry over the file cap")]
+#[test_case(files_over_the_revision_cap, "the files together are larger than 200 MB, the limit for one revision"; "entries over the revision cap")]
+#[test_case(too_many_entries, "midi8knob.zip: lists 10003 entries, more than the 10000 the page reads; zip the project again, or drop the project folder instead"; "more entries than the page reads")]
 #[tokio::test]
 async fn the_upload_page_denies_a_zip_it_will_not_expand_and_sends_nothing(
     zip: fn() -> Vec<u8>,
     denial: &str,
-    says_zip_again: bool,
 ) {
     let Some(executable) = executable() else {
         return;
@@ -1316,12 +1313,7 @@ async fn the_upload_page_denies_a_zip_it_will_not_expand_and_sends_nothing(
     let shown: String = uploader
         .read(r#"document.getElementById("denied").textContent"#)
         .await;
-    let expected = if says_zip_again {
-        format!("{denial}{AGAIN}")
-    } else {
-        denial.to_owned()
-    };
-    assert_eq!(shown, expected);
+    assert_eq!(shown, denial);
     assert_eq!(uploader.sent().await, None, "nothing was posted");
     let (path, enabled): (String, bool) = uploader
         .read(r#"[location.pathname, !document.querySelector("form button").disabled]"#)
@@ -1331,5 +1323,5 @@ async fn the_upload_page_denies_a_zip_it_will_not_expand_and_sends_nothing(
         ("/upload", true),
         "still on the form, ready for another try"
     );
-    uploader.close().await;
+    uploader.session.close().await;
 }

@@ -82,7 +82,7 @@ const form = document.querySelector("form");
 const button = form.querySelector("button");
 const drop = document.getElementById("drop");
 const droppedList = document.getElementById("dropped");
-const denial = document.getElementById("denied");
+const deniedNote = document.getElementById("denied");
 const dropped = [];
 // A dropped folder is read a batch at a time; a submit waits for it, or the
 // revision would hold only what the walk had reached.
@@ -98,7 +98,9 @@ const zipEntries = {{ zip_entries }};
 // What leaves the browser. The server's rules decide what is kept (FileKind,
 // upload::skipped); these spare the transfer, since everything sent counts
 // against the body limit and a large .git beside the project would refuse
-// an upload whose files fit.
+// an upload whose files fit. They copy upload::skipped rule for rule, and
+// a zip's entries are checked and counted by them, so a change to one is a
+// change to the other.
 const skippedFolder = (name) => name.endsWith("-backups") || name.startsWith(".") || name === "__MACOSX";
 const skippedName = (name) => name.endsWith(".lck") || name.startsWith("_autosave-") || name.includes("-save.kicad_");
 
@@ -124,18 +126,34 @@ function damaged(zip, what) {
 
 const u16 = (view, at) => view.getUint16(at, true);
 const u32 = (view, at) => view.getUint32(at, true);
-const bytesOf = async (blob) => new DataView(await blob.arrayBuffer());
-const names = new TextDecoder();
+const viewOf = async (blob) => new DataView(await blob.arrayBuffer());
+// A name that is not UTF-8 is no path the upload keeps, as on the server.
+const pathDecoder = new TextDecoder("utf-8", { fatal: true });
+
+const crcTable = Uint32Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c;
+});
+
+// The CRC-32 of `bytes` carried on from `crc`, which starts at 0xffffffff
+// and is inverted once at the end.
+function crcAfter(crc, bytes) {
+  for (const byte of bytes) crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  return crc;
+}
 
 // The entries of `zip` the upload keeps, read from its central directory
 // alone: path, method, sizes and where the entry starts. Store and deflate
 // only; no encryption, no zip64, one file.
 async function directoryOf(zip) {
   const tailStart = Math.max(0, zip.size - (22 + 0xffff));
-  const tail = await bytesOf(zip.slice(tailStart));
+  const tail = await viewOf(zip.slice(tailStart));
+  // The end record is the one whose comment runs to the end of the file; a
+  // signature inside a comment is not one.
   let end = -1;
   for (let at = tail.byteLength - 22; at >= 0; at--) {
-    if (u32(tail, at) === 0x06054b50) {
+    if (u32(tail, at) === 0x06054b50 && at + 22 + u16(tail, at + 20) === tail.byteLength) {
       end = at;
       break;
     }
@@ -154,7 +172,7 @@ async function directoryOf(zip) {
     throw damaged(zip, `lists ${count} entries, more than the ${zipEntries} the page reads`);
   }
   if (offset + size > zip.size) throw damaged(zip, "has a damaged directory");
-  const directory = await bytesOf(zip.slice(offset, offset + size));
+  const directory = await viewOf(zip.slice(offset, offset + size));
   const entries = [];
   let at = 0;
   for (let index = 0; index < count; index++) {
@@ -163,6 +181,7 @@ async function directoryOf(zip) {
     }
     const flags = u16(directory, at + 8);
     const method = u16(directory, at + 10);
+    const crc = u32(directory, at + 16);
     const packed = u32(directory, at + 20);
     const unpacked = u32(directory, at + 24);
     const nameLength = u16(directory, at + 28);
@@ -171,8 +190,14 @@ async function directoryOf(zip) {
     at = start + nameLength + u16(directory, at + 30) + u16(directory, at + 32);
     if (at > directory.byteLength) throw damaged(zip, "has a damaged directory");
     const raw = new Uint8Array(directory.buffer, directory.byteOffset + start, nameLength);
+    let name;
+    try {
+      name = pathDecoder.decode(raw);
+    } catch {
+      continue;
+    }
     // Windows PowerShell's Compress-Archive writes backslashes.
-    const path = names.decode(raw).replaceAll("\\", "/");
+    const path = name.replaceAll("\\", "/");
     if (path.endsWith("/") || !kept(path)) continue;
     if (flags & 1) throw damaged(zip, `${path} is encrypted`);
     if (method !== 0 && method !== 8) {
@@ -184,26 +209,37 @@ async function directoryOf(zip) {
     if (method === 0 && packed !== unpacked) {
       throw damaged(zip, `${path} is stored with two sizes`);
     }
-    entries.push({ path, method, packed, unpacked, local });
+    entries.push({ path, method, crc, packed, unpacked, local });
   }
   return entries;
 }
 
-// The bytes of one entry, bounded by the size its directory entry declares:
-// an entry that inflates past it is a lie, and stops there.
+// The bytes of one entry, bounded by the size its directory entry declares
+// (an entry that inflates past it is a lie, and stops there) and checked
+// against its CRC-32.
 async function inflated(zip, entry) {
-  const head = await bytesOf(zip.slice(entry.local, entry.local + 30));
+  const head = await viewOf(zip.slice(entry.local, entry.local + 30));
   if (head.byteLength < 30 || u32(head, 0) !== 0x04034b50) {
     throw damaged(zip, `${entry.path} is not where its directory entry says`);
   }
   const start = entry.local + 30 + u16(head, 26) + u16(head, 28);
   const packed = zip.slice(start, start + entry.packed);
   if (packed.size !== entry.packed) throw damaged(zip, `${entry.path} is cut short`);
-  if (entry.method === 0) return packed;
+  let stream = packed.stream();
+  if (entry.method === 8) {
+    let inflater;
+    try {
+      inflater = new DecompressionStream("deflate-raw");
+    } catch {
+      throw new Denied(`${zip.name}: this browser cannot inflate a zip; drop the project folder instead`);
+    }
+    stream = stream.pipeThrough(inflater);
+  }
   const chunks = [];
   let size = 0;
+  let crc = 0xffffffff;
   try {
-    const reader = packed.stream().pipeThrough(new DecompressionStream("deflate-raw")).getReader();
+    const reader = stream.getReader();
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -212,6 +248,7 @@ async function inflated(zip, entry) {
         await reader.cancel();
         throw damaged(zip, `${entry.path} inflates to more than the ${entry.unpacked} bytes its directory entry declares`);
       }
+      crc = crcAfter(crc, value);
       chunks.push(value);
     }
   } catch (error) {
@@ -220,6 +257,9 @@ async function inflated(zip, entry) {
   }
   if (size !== entry.unpacked) {
     throw damaged(zip, `${entry.path} holds ${size} bytes where its directory entry declares ${entry.unpacked}`);
+  }
+  if (((crc ^ 0xffffffff) >>> 0) !== entry.crc) {
+    throw damaged(zip, `${entry.path} does not match its checksum`);
   }
   return new Blob(chunks);
 }
@@ -309,7 +349,7 @@ drop.addEventListener("drop", async (event) => {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   button.disabled = true;
-  denial.hidden = true;
+  deniedNote.hidden = true;
   try {
     await walking;
     const body = new FormData();
@@ -331,8 +371,8 @@ form.addEventListener("submit", async (event) => {
       files = await expanded(chosen);
     } catch (error) {
       if (!(error instanceof Denied)) throw error;
-      denial.textContent = error.message;
-      denial.hidden = false;
+      deniedNote.textContent = error.message;
+      deniedNote.hidden = false;
       return;
     }
     for (const { path, file } of files) body.append("files", file, path);
