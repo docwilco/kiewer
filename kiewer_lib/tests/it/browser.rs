@@ -6,9 +6,10 @@
 //! load is checked through the network, its beacon answered by the
 //! server; the canvas cases of #94 and the failed import of #96 below
 //! read the beacons the page hands to `sendBeacon`, through the server's
-//! parser. The upload page's zips (#83) are chosen in its file input and
-//! either land as a revision or are denied on the page; those cases need
-//! Postgres too.
+//! parser. The net block's case (#95) reads its computed display before
+//! and after the load. The upload page's zips (#83) are chosen in its
+//! file input and either land as a revision or are denied on the page;
+//! those cases need Postgres too.
 //!
 //! Runs when `KIEWER_BROWSER` names the browser's executable, which the
 //! browser stage of `scripts/checks.sh` sets, along with
@@ -500,6 +501,12 @@ impl Session {
             .collect()
     }
 
+    /// The net block's computed display: `none` while it is not shown.
+    async fn net_display(&self) -> String {
+        self.read(r#"getComputedStyle(document.getElementById("net")).display"#)
+            .await
+    }
+
     /// What the page shows, waiting for it to answer.
     async fn shown(&self) -> Shown {
         shown(&self.page).await.expect("the page answers")
@@ -746,6 +753,59 @@ async fn a_viewer_script_that_answers_404_shows_and_sends_its_beacon(viewed: Vie
     assert_eq!(
         beacons[0].reason, error,
         "the beacon carries what the box shows"
+    );
+    assert_eq!(
+        session.net_display().await,
+        "none",
+        "the net block stays hidden with no viewer (#95)"
+    );
+    session.close().await;
+}
+
+// The net block (#95): the pinned nets and the reference search box,
+// which each page shows once its board or sheet has loaded. Its rule
+// sets display only while it is not hidden, so the hidden attribute it
+// carries in the page holds until then.
+
+/// Records the net block's computed display once the document is parsed,
+/// which is before the page's module scripts run.
+const NET_AT_PARSE: &str = r#"
+document.addEventListener("readystatechange", function () {
+  if (document.readyState !== "interactive") return;
+  window.kiewerNetAtParse = getComputedStyle(document.getElementById("net")).display;
+});
+"#;
+
+#[test_case(Viewed::Board; "the board page")]
+#[test_case(Viewed::Schematic; "the schematic page")]
+#[tokio::test]
+async fn the_net_block_shows_only_once_the_page_has_loaded(viewed: Viewed) {
+    let Some(executable) = executable() else {
+        return;
+    };
+    let session = Session::new(executable).await;
+    session
+        .page
+        .evaluate_on_new_document(NET_AT_PARSE)
+        .await
+        .expect("the net block's recorder");
+    session.viewport(1000, 700, 1).await;
+    session.goto(viewed).await;
+    let unhidden = session
+        .held_within_deadline(r#"!document.getElementById("net").hidden"#)
+        .await;
+    let shown = session.shown().await;
+    assert!(
+        unhidden,
+        "the net block not unhidden within {DEADLINE:?}; the page shows {shown:?}"
+    );
+
+    let at_parse: String = session.read("window.kiewerNetAtParse").await;
+    assert_eq!(at_parse, "none", "hidden before the page has loaded");
+    assert_eq!(
+        session.net_display().await,
+        "flex",
+        "laid out as a column once loaded"
     );
     session.close().await;
 }

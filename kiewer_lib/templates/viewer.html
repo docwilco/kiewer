@@ -83,8 +83,11 @@
   /* The net interaction and the reference search (docs/v1-scope.md, Net
      interaction, Search box): the tooltip beside the pointer, the search
      box and the pinned net's pad list stacked at the stage's bottom
-     right above the zoom readout. */
-  #net { position: absolute; right: 0.8em; bottom: 2.4em; max-width: 20em; max-height: calc(100% - 4em); display: flex; flex-direction: column; gap: 0.4em; align-items: flex-end; font-size: 13px; }
+     right above the zoom readout. Hidden until the board loads: display
+     is set only while it is not hidden, as a display rule overrides the
+     hidden attribute's (#95). */
+  #net { position: absolute; right: 0.8em; bottom: 2.4em; max-width: 20em; max-height: calc(100% - 4em); flex-direction: column; gap: 0.4em; align-items: flex-end; font-size: 13px; }
+  #net:not([hidden]) { display: flex; }
   #net-tip { position: absolute; padding: 0.2em 0.5em; background: rgba(43, 43, 43, 0.95); border: 1px solid #666; border-radius: 3px; white-space: nowrap; pointer-events: none; font-size: 13px; }
   #net-pinned { padding: 0.3em 0.6em; background: rgba(43, 43, 43, 0.9); border: 1px solid #444; border-radius: 4px; overflow: auto; min-height: 0; }
   #net-pinned .pin { display: flex; gap: 0.4em; align-items: center; background: none; border: none; color: inherit; padding: 0.1em 0; cursor: pointer; text-align: left; }
