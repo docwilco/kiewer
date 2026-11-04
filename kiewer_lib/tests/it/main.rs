@@ -28,6 +28,7 @@ mod fs_blob_store;
 mod gcs_blob_store;
 mod history;
 mod pending;
+mod plans;
 mod pre_commit;
 mod prune_images;
 mod release_cut;
