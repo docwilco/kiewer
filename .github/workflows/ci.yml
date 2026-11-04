@@ -57,7 +57,8 @@ jobs:
     # Postgres beside the job, as compose.yaml gives a dev box: the same
     # major and the same role, password and database triple, so the
     # DATABASE_URL below is .env.example's. The tests gated on DATABASE_URL
-    # (kiewer_lib/tests/it/db.rs) run here and skip on a box without it.
+    # (kiewer_lib/tests/it/db.rs) run here; scripts/checks.sh test fails
+    # without it and refuses its opt-out on CI (#68).
     # POSTGRES_USER is the image's superuser, so the collector's tests may
     # create the database of their own, kiewer_collector (#107).
     services:
@@ -77,8 +78,8 @@ jobs:
     env:
       DATABASE_URL: postgres://kiewer:kiewer@127.0.0.1:5432/kiewer
       # The GCS emulator the step below starts; the tests gated on it
-      # (kiewer_lib/tests/it/gcs_blob_store.rs) run here and skip on a box
-      # without it.
+      # (kiewer_lib/tests/it/gcs_blob_store.rs) run here, under the same
+      # rule as DATABASE_URL.
       KIEWER_GCS_EMULATOR: http://127.0.0.1:8092
     steps:
       - uses: actions/checkout@v5

@@ -8,7 +8,8 @@ use sqlx::{Connection, PgConnection, PgPool};
 
 /// A pool on `DATABASE_URL` with the migrations run, or `None` with the
 /// variable unset or empty, in which case the test prints that it skips
-/// (README, Development: a box without Postgres skips, CI runs).
+/// (README, Development: `scripts/checks.sh test` fails on a box without
+/// Postgres unless `KIEWER_SKIP_DB_TESTS=1`, and CI runs them).
 ///
 /// # Panics
 ///

@@ -39,13 +39,20 @@ on a terminal and JSON lines anywhere else (Cloud Run reads those into
 them); `LOG_FORMAT=json` or `text` overrides. Ctrl-c or SIGTERM stops it
 after the requests in flight.
 
-The tests that need Postgres (`kiewer_lib/tests/it/db.rs`, `accounts.rs`,
-`sign_in.rs`) run when `DATABASE_URL` is exported and skip when it is not,
-in the hook as in a shell; CI sets it against a service container that
-matches `compose.yaml`. The collector's tests create and use a database of
-their own beside it, the URL's name plus `_collector`, so the role needs
-CREATEDB (compose's and CI's `kiewer` is the image's superuser). The
-schema is `migrations/` (its README has the naming rule).
+The tests that need Postgres (every user of `kiewer_test_support::db`)
+run when `DATABASE_URL` is exported; CI sets it against a service
+container that matches `compose.yaml`. Without it such a test returns
+early and counts as passed, so `scripts/checks.sh test` fails without
+it, unless `KIEWER_SKIP_DB_TESTS=1` is set: then they skip, and a loud
+line names them before the stages and again after the last. CI refuses
+the opt-out. The hook reads the variable from the shell that runs
+`git commit`, never from `.env`: each worktree needs a database of its
+own, since on a shared one sqlx refuses a worktree that lacks a
+migration another applied (`VersionMissing`). The collector's tests
+create and use a database of their own beside it, the URL's name plus
+`_collector`, so the role needs CREATEDB (compose's and CI's `kiewer` is
+the image's superuser). The schema is `migrations/` (its README has the
+naming rule).
 
 Sign-in needs an OAuth app of your own at each provider you want, one per
 environment (docs/v1-scope.md, Q57). The callback URL to register is
@@ -75,11 +82,12 @@ Cookies are `Secure` under an `https` `PUBLIC_URL`, so a dev box over
 provider on loopback and need no app. Production and staging get their
 registrations through Secret Manager, not `.env`.
 
-The GCS store test (`kiewer_lib/tests/it/gcs_blob_store.rs`) runs the same way
-when `KIEWER_GCS_EMULATOR` names a
-[fake-gcs-server](https://github.com/fsouza/fake-gcs-server) and skips when
-it is not set. On a dev box: the release binary for your platform (v1.56.1,
-the version CI pins), then
+The GCS store test (`kiewer_lib/tests/it/gcs_blob_store.rs`) runs when
+`KIEWER_GCS_EMULATOR` names a
+[fake-gcs-server](https://github.com/fsouza/fake-gcs-server), under the
+same rule as Postgres: without it `scripts/checks.sh test` fails, unless
+`KIEWER_SKIP_GCS_TESTS=1` is set, which CI refuses. On a dev box: the
+release binary for your platform (v1.56.1, the version CI pins), then
 `fake-gcs-server -scheme http -host 127.0.0.1 -port 8092 -backend memory -public-host 127.0.0.1`
 and `export KIEWER_GCS_EMULATOR=http://127.0.0.1:8092`.
 

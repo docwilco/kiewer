@@ -1,7 +1,8 @@
 //! Postgres: the pool connects and the migration set runs. Gated on
-//! `DATABASE_URL` so a machine without Postgres skips instead of failing;
-//! CI sets it against a service container, a dev box against docker
-//! compose (README, Development).
+//! `DATABASE_URL`: without it the test returns early, and
+//! `scripts/checks.sh test` fails unless `KIEWER_SKIP_DB_TESTS=1` says to
+//! skip (#68). CI sets it against a service container, a dev box against
+//! docker compose (README, Development).
 
 use std::sync::Arc;
 

@@ -4,6 +4,9 @@
 # script, so what passes locally is exactly what passes in CI.
 #
 # Usage: scripts/checks.sh [fmt|clippy|test|docs|wasm|browser|all]   (default: all)
+#
+# test and all need DATABASE_URL and KIEWER_GCS_EMULATOR, or their opt-outs
+# KIEWER_SKIP_DB_TESTS=1 and KIEWER_SKIP_GCS_TESTS=1 (the gates, below).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -84,6 +87,44 @@ stage_browser() {
     cargo test --workspace --test it browser::
 }
 
+# The test stage's gates (#68). The tests on Postgres (every user of
+# kiewer_test_support::db) and on the GCS emulator
+# (kiewer_lib/tests/it/gcs_blob_store.rs) return early without their
+# variable and count as passed, so a run without one would say green
+# having checked none of them. Without the variable the run fails, before
+# any stage, unless the gate's opt-out is set to 1; an opt-out prints a
+# loud line naming what skips, once here and once more after the last
+# stage, where a green run ends. CI sets both variables and refuses both
+# opt-outs, so a workflow that lost one fails instead of skipping.
+skipped=()
+gate() {  # $1: the variable, $2: its opt-out, $3: the service, $4: the tests on it
+  local var=$1 opt_out=$2 service=$3 tests=$4
+  [ -z "${!var:-}" ] || return 0
+  if [ "${!opt_out:-}" != 1 ]; then
+    echo "test: $var is unset, so the tests on $service would skip and count as passed ($tests)." >&2
+    echo "  Export $var (README, Development), or set $opt_out=1 to run without them." >&2
+    return 1
+  fi
+  if [ -n "${CI:-}" ]; then
+    echo "test: $opt_out=1 is refused on CI, which sets $var: a skip would hide a broken workflow." >&2
+    return 1
+  fi
+  skipped+=("!!! test: $opt_out=1, so the tests on $service skipped and counted as passed: $tests")
+}
+gates() {
+  local db_tests status=0
+  db_tests=$(grep -lE 'pool_from_env|pool_of_its_own' kiewer_lib/tests/it/*.rs |
+    xargs basename -a | paste -sd' ')
+  gate DATABASE_URL KIEWER_SKIP_DB_TESTS Postgres "kiewer_lib/tests/it/: $db_tests" || status=1
+  gate KIEWER_GCS_EMULATOR KIEWER_SKIP_GCS_TESTS "the GCS emulator" \
+    kiewer_lib/tests/it/gcs_blob_store.rs || status=1
+  [ "$status" = 0 ] || exit 1
+  report_skipped
+}
+report_skipped() {
+  [ "${#skipped[@]}" = 0 ] || printf '%s\n' "${skipped[@]}" >&2
+}
+
 run() {
   local name=$1 start
   echo "==> $name"
@@ -93,7 +134,8 @@ run() {
 }
 
 case "${1:-all}" in
-  fmt|clippy|test|docs|wasm|browser) run "$1" ;;
-  all) for stage in fmt clippy test docs wasm browser; do run "$stage"; done ;;
+  test) gates; run test; report_skipped ;;
+  fmt|clippy|docs|wasm|browser) run "$1" ;;
+  all) gates; for stage in fmt clippy test docs wasm browser; do run "$stage"; done; report_skipped ;;
   *) echo "usage: $0 [fmt|clippy|test|docs|wasm|browser|all]" >&2; exit 2 ;;
 esac

@@ -15,6 +15,7 @@ mod beacon;
 mod branches;
 mod browser;
 mod cache;
+mod checks;
 mod collector;
 mod db;
 mod delete;
