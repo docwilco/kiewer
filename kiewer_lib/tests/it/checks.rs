@@ -14,8 +14,6 @@ use std::process::{Command, Output};
 use test_case::test_case;
 
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/checks.sh");
-const DB: &str = "postgres://kiewer:kiewer@127.0.0.1:5432/kiewer";
-const GCS: &str = "http://127.0.0.1:8092";
 
 /// The variables the gates read, removed before each run puts back its
 /// own: a run inside the hook or on CI has them set.
@@ -27,6 +25,64 @@ const GATE_VARS: &[&str] = &[
     "CI",
 ];
 
+/// The script's stages these tests run.
+#[derive(Debug, Clone, Copy)]
+enum Stage {
+    Test,
+    All,
+}
+
+impl Stage {
+    fn arg(self) -> &'static str {
+        match self {
+            Self::Test => "test",
+            Self::All => "all",
+        }
+    }
+}
+
+/// A service the gated tests need, by its variable and its opt-out.
+#[derive(Debug, Clone, Copy)]
+enum Gate {
+    Postgres,
+    Gcs,
+}
+
+impl Gate {
+    fn var(self) -> &'static str {
+        match self {
+            Self::Postgres => "DATABASE_URL",
+            Self::Gcs => "KIEWER_GCS_EMULATOR",
+        }
+    }
+
+    /// A value for the variable; the stand-in cargo never connects to it.
+    fn value(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres://kiewer:kiewer@127.0.0.1:5432/kiewer",
+            Self::Gcs => "http://127.0.0.1:8092",
+        }
+    }
+
+    fn opt_out(self) -> &'static str {
+        match self {
+            Self::Postgres => "KIEWER_SKIP_DB_TESTS",
+            Self::Gcs => "KIEWER_SKIP_GCS_TESTS",
+        }
+    }
+
+    fn other(self) -> Self {
+        match self {
+            Self::Postgres => Self::Gcs,
+            Self::Gcs => Self::Postgres,
+        }
+    }
+
+    fn set(self) -> (&'static str, &'static str) {
+        (self.var(), self.value())
+    }
+}
+
 struct Run {
     success: bool,
     stdout: String,
@@ -37,11 +93,25 @@ impl Run {
     fn cargo_ran(&self) -> bool {
         self.stdout.contains("cargo-standin ")
     }
+
+    /// The run failed at a gate, before any stage built anything.
+    fn assert_refused_before_building(&self) {
+        assert!(!self.success, "stdout: {}", self.stdout);
+        assert!(!self.cargo_ran(), "stdout: {}", self.stdout);
+    }
+
+    fn assert_stderr_names(&self, text: &str) {
+        assert!(
+            self.stderr.contains(text),
+            "{text} in stderr: {}",
+            self.stderr
+        );
+    }
 }
 
-fn checks(stage: &str, vars: &[(&str, &str)]) -> Run {
+fn checks(stage: Stage, vars: &[(&str, &str)]) -> Run {
     let mut command = Command::new("bash");
-    command.arg(SCRIPT).arg(stage);
+    command.arg(SCRIPT).arg(stage.arg());
     for var in GATE_VARS {
         command.env_remove(var);
     }
@@ -61,10 +131,7 @@ fn checks(stage: &str, vars: &[(&str, &str)]) -> Run {
 
 #[test]
 fn with_both_services_the_test_stage_runs_and_names_no_skip() {
-    let run = checks(
-        "test",
-        &[("DATABASE_URL", DB), ("KIEWER_GCS_EMULATOR", GCS)],
-    );
+    let run = checks(Stage::Test, &[Gate::Postgres.set(), Gate::Gcs.set()]);
     assert!(run.success, "stderr: {}", run.stderr);
     assert!(
         run.stdout
@@ -80,85 +147,58 @@ fn with_both_services_the_test_stage_runs_and_names_no_skip() {
     assert!(!run.stderr.contains("skip"), "stderr: {}", run.stderr);
 }
 
-#[test_case(&[("KIEWER_GCS_EMULATOR", GCS)] ; "unset")]
-#[test_case(&[("DATABASE_URL", ""), ("KIEWER_GCS_EMULATOR", GCS)] ; "empty")]
-fn without_database_url_the_test_stage_fails_before_building(vars: &[(&str, &str)]) {
-    let run = checks("test", vars);
-    assert!(!run.success, "stdout: {}", run.stdout);
-    assert!(!run.cargo_ran(), "stdout: {}", run.stdout);
-    assert!(
-        run.stderr.contains("DATABASE_URL"),
-        "stderr: {}",
-        run.stderr
-    );
-    assert!(
-        run.stderr.contains("KIEWER_SKIP_DB_TESTS=1"),
-        "stderr: {}",
-        run.stderr
-    );
+#[test_case(Gate::Postgres ; "postgres")]
+#[test_case(Gate::Gcs ; "gcs")]
+fn without_its_service_the_test_stage_fails_before_building(gate: Gate) {
+    let run = checks(Stage::Test, &[gate.other().set()]);
+    run.assert_refused_before_building();
+    run.assert_stderr_names(gate.var());
+    run.assert_stderr_names(&format!("{}=1", gate.opt_out()));
 }
 
 #[test]
-fn without_the_gcs_emulator_the_test_stage_fails_before_building() {
-    let run = checks("test", &[("DATABASE_URL", DB)]);
-    assert!(!run.success, "stdout: {}", run.stdout);
-    assert!(!run.cargo_ran(), "stdout: {}", run.stdout);
-    assert!(
-        run.stderr.contains("KIEWER_SKIP_GCS_TESTS=1"),
-        "stderr: {}",
-        run.stderr
-    );
+fn an_empty_database_url_counts_as_unset() {
+    let run = checks(Stage::Test, &[("DATABASE_URL", ""), Gate::Gcs.set()]);
+    run.assert_refused_before_building();
+    run.assert_stderr_names("KIEWER_SKIP_DB_TESTS=1");
 }
 
 #[test]
 fn without_either_service_both_gates_are_named() {
-    let run = checks("test", &[]);
-    assert!(!run.success, "stdout: {}", run.stdout);
-    assert!(
-        run.stderr.contains("KIEWER_SKIP_DB_TESTS=1")
-            && run.stderr.contains("KIEWER_SKIP_GCS_TESTS=1"),
-        "stderr: {}",
-        run.stderr
-    );
+    let run = checks(Stage::Test, &[]);
+    run.assert_refused_before_building();
+    run.assert_stderr_names("KIEWER_SKIP_DB_TESTS=1");
+    run.assert_stderr_names("KIEWER_SKIP_GCS_TESTS=1");
 }
 
 #[test]
-fn every_stage_fails_at_once_without_database_url() {
-    let run = checks("all", &[("KIEWER_GCS_EMULATOR", GCS)]);
-    assert!(!run.success, "stdout: {}", run.stdout);
+fn all_fails_before_the_first_stage_without_database_url() {
+    let run = checks(Stage::All, &[Gate::Gcs.set()]);
+    run.assert_refused_before_building();
     assert!(!run.stdout.contains("==> fmt"), "stdout: {}", run.stdout);
 }
 
-#[test_case("KIEWER_SKIP_DB_TESTS", &[("KIEWER_GCS_EMULATOR", GCS)], &["db.rs", "accounts", "collector"] ; "postgres")]
-#[test_case("KIEWER_SKIP_GCS_TESTS", &[("DATABASE_URL", DB)], &["gcs_blob_store.rs"] ; "gcs")]
-fn an_opt_out_runs_the_stage_and_names_what_skipped_last(
-    opt_out: &str,
-    vars: &[(&str, &str)],
-    named: &[&str],
-) {
-    let mut vars = vars.to_vec();
-    vars.push((opt_out, "1"));
-    let run = checks("test", &vars);
+#[test_case(Gate::Postgres, &["db.rs", "accounts.rs", "collector.rs"] ; "postgres")]
+#[test_case(Gate::Gcs, &["gcs_blob_store.rs"] ; "gcs")]
+fn an_opt_out_runs_the_stage_and_names_what_skipped_last(gate: Gate, named: &[&str]) {
+    let run = checks(Stage::Test, &[gate.other().set(), (gate.opt_out(), "1")]);
     assert!(run.success, "stderr: {}", run.stderr);
     assert!(run.cargo_ran(), "stdout: {}", run.stdout);
     let last = run.stderr.trim_end().lines().last().unwrap_or_default();
-    assert!(
-        last.contains(&format!("{opt_out}=1")),
-        "stderr: {}",
-        run.stderr
-    );
+    let opt_out = format!("{}=1", gate.opt_out());
+    assert!(last.contains(&opt_out), "{opt_out} in: {last}");
     for name in named {
         assert!(last.contains(name), "{name} in: {last}");
     }
 }
 
-#[test_case("KIEWER_SKIP_DB_TESTS", &[("KIEWER_GCS_EMULATOR", GCS)] ; "postgres")]
-#[test_case("KIEWER_SKIP_GCS_TESTS", &[("DATABASE_URL", DB)] ; "gcs")]
-fn ci_refuses_an_opt_out(opt_out: &str, vars: &[(&str, &str)]) {
-    let mut vars = vars.to_vec();
-    vars.extend([(opt_out, "1"), ("CI", "true")]);
-    let run = checks("test", &vars);
-    assert!(!run.success, "stdout: {}", run.stdout);
-    assert!(!run.cargo_ran(), "stdout: {}", run.stdout);
-    assert!(run.stderr.contains(opt_out), "stderr: {}", run.stderr);
+#[test_case(Gate::Postgres ; "postgres")]
+#[test_case(Gate::Gcs ; "gcs")]
+fn ci_refuses_an_opt_out(gate: Gate) {
+    let run = checks(
+        Stage::Test,
+        &[gate.other().set(), (gate.opt_out(), "1"), ("CI", "true")],
+    );
+    run.assert_refused_before_building();
+    run.assert_stderr_names(gate.opt_out());
 }

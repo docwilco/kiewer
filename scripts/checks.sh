@@ -87,21 +87,21 @@ stage_browser() {
     cargo test --workspace --test it browser::
 }
 
-# The test stage's gates (#68). The tests on Postgres (every user of
-# kiewer_test_support::db) and on the GCS emulator
-# (kiewer_lib/tests/it/gcs_blob_store.rs) return early without their
-# variable and count as passed, so a run without one would say green
-# having checked none of them. Without the variable the run fails, before
-# any stage, unless the gate's opt-out is set to 1; an opt-out prints a
-# loud line naming what skips, once here and once more after the last
-# stage, where a green run ends. CI sets both variables and refuses both
-# opt-outs, so a workflow that lost one fails instead of skipping.
+# The test stage's gates (#68). The tests on Postgres and on the GCS
+# emulator return early without their variable and count as passed, so a
+# run without one would say green having checked none of them. Without
+# the variable (unset or empty) the run fails, before any stage, unless
+# the gate's opt-out is set to 1; an opt-out prints a loud line naming
+# what skips, once here and once more after the last stage, where a green
+# run ends. CI sets both variables and refuses both opt-outs, so a
+# workflow that lost one fails instead of skipping.
 skipped=()
-gate() {  # $1: the variable, $2: its opt-out, $3: the service, $4: the tests on it
-  local var=$1 opt_out=$2 service=$3 tests=$4
+gate() {  # $1: the variable, $2: its opt-out, $3: the service, $4: a function naming the tests on it
+  local var=$1 opt_out=$2 service=$3 tests
   [ -z "${!var:-}" ] || return 0
+  tests=$("$4")
   if [ "${!opt_out:-}" != 1 ]; then
-    echo "test: $var is unset, so the tests on $service would skip and count as passed ($tests)." >&2
+    echo "test: $var is unset or empty, so the tests on $service would skip and count as passed ($tests)." >&2
     echo "  Export $var (README, Development), or set $opt_out=1 to run without them." >&2
     return 1
   fi
@@ -109,15 +109,22 @@ gate() {  # $1: the variable, $2: its opt-out, $3: the service, $4: the tests on
     echo "test: $opt_out=1 is refused on CI, which sets $var: a skip would hide a broken workflow." >&2
     return 1
   fi
-  skipped+=("!!! test: $opt_out=1, so the tests on $service skipped and counted as passed: $tests")
+  skipped+=("!!! test: $opt_out=1, so the tests on $service skip and count as passed: $tests")
 }
+# The files that take a pool from kiewer_test_support::db; every user of
+# it is under kiewer_lib/tests/it/ today.
+db_tests() {
+  local file names=()
+  for file in kiewer_lib/tests/it/*.rs; do
+    if grep -qE 'pool_from_env|pool_of_its_own' "$file"; then names+=("${file##*/}"); fi
+  done
+  echo "kiewer_lib/tests/it/: ${names[*]:-none found}"
+}
+gcs_tests() { echo kiewer_lib/tests/it/gcs_blob_store.rs; }
 gates() {
-  local db_tests status=0
-  db_tests=$(grep -lE 'pool_from_env|pool_of_its_own' kiewer_lib/tests/it/*.rs |
-    xargs basename -a | paste -sd' ')
-  gate DATABASE_URL KIEWER_SKIP_DB_TESTS Postgres "kiewer_lib/tests/it/: $db_tests" || status=1
-  gate KIEWER_GCS_EMULATOR KIEWER_SKIP_GCS_TESTS "the GCS emulator" \
-    kiewer_lib/tests/it/gcs_blob_store.rs || status=1
+  local status=0
+  gate DATABASE_URL KIEWER_SKIP_DB_TESTS Postgres db_tests || status=1
+  gate KIEWER_GCS_EMULATOR KIEWER_SKIP_GCS_TESTS "the GCS emulator" gcs_tests || status=1
   [ "$status" = 0 ] || exit 1
   report_skipped
 }
