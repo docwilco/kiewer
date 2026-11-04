@@ -161,6 +161,10 @@ _Avoid_: picking, selection
 An area of copper on a board that belongs to one net, as KiCad filled it.
 _Avoid_: pour
 
+**Zone opacity**:
+How strongly a zone draws against the other copper of its layer, as a fraction of the layer's opacity: what tells a fill from the tracks and pads on it.
+_Avoid_: fill opacity, pour opacity
+
 **Net highlight**:
 The viewer showing a net lit and everything else dimmed: the net under the pointer, or the pinned ones.
 _Avoid_: selection, focus
