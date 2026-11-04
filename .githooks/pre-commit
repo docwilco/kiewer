@@ -19,19 +19,26 @@ set -euo pipefail
 # issue tracker's directory (.scratch) when the repo has one.
 prose_dirs=(docs viewer-drop)
 
-prose_only=1
-while IFS= read -r path; do
-  under_prose=0
-  for dir in "${prose_dirs[@]}"; do
-    case "$path" in "$dir"/*) under_prose=1 ;; esac
-  done
-  [ "$under_prose" = 1 ] && continue
-  case "$path" in
-    */*) prose_only=0; break ;;
-    *.md) ;;
-    *) prose_only=0; break ;;
-  esac
-done < <(git diff --cached --name-only)
+# No staged path at all counts as code: `git commit --amend` with nothing
+# staged lists none, since the index matches the commit being amended, and
+# still commits that commit's whole tree (#79).
+staged="$(git diff --cached --name-only)"
+prose_only=0
+if [ -n "$staged" ]; then
+  prose_only=1
+  while IFS= read -r path; do
+    under_prose=0
+    for dir in "${prose_dirs[@]}"; do
+      case "$path" in "$dir"/*) under_prose=1 ;; esac
+    done
+    [ "$under_prose" = 1 ] && continue
+    case "$path" in
+      */*) prose_only=0; break ;;
+      *.md) ;;
+      *) prose_only=0; break ;;
+    esac
+  done <<<"$staged"
+fi
 if [ "$prose_only" = 1 ]; then
   echo "pre-commit: prose only (${prose_dirs[*]}/, root *.md); checks skipped."
   exit 0
