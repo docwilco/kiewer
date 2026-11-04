@@ -262,8 +262,8 @@ impl Rect {
     }
 }
 
-/// The whole of a cell, as [`Cell::crop`] gives it for a cell nothing
-/// crops.
+/// The whole of a glyph's quad, as [`Cell::crop`] gives it for a quad
+/// nothing crops.
 pub const WHOLE_CELL: Bounds = Bounds {
     min: Point { x: 0.0, y: 0.0 },
     max: Point { x: 1.0, y: 1.0 },
@@ -335,7 +335,7 @@ pub fn layout(
             },
         };
         let first = glyphs.len();
-        let rect = line_cells(
+        let rect = line_quads(
             line,
             line_box,
             placement.justify.horizontal,
@@ -499,7 +499,7 @@ fn knockout_parts(glyphs: &[PlacedGlyph], lines: &[Line], margin: f64) -> Option
             }
             // A third quad over the same piece, which only an overhang
             // reaching past a whole neighbour makes, is left out: its ink
-            // there is filled.
+            // there is filled (#111).
             let mut over = over.into_iter();
             match over.next() {
                 None => blanks.push(part),
@@ -577,14 +577,14 @@ fn part_of(quad: Rect, part: Rect) -> Bounds {
     }
 }
 
-/// The cells of one line: `line_box` gives the anchor's x and the line's
-/// top and bottom; the line is justified about the anchor as
+/// The glyphs' quads of one line: `line_box` gives the anchor's x and
+/// the line's top and bottom; the line is justified about the anchor as
 /// `horizontal` says, the pen moving by `advance` and between two
 /// characters by their `kern`, and each glyph's cell, pen to advance,
 /// pushed to `glyphs` as its quad (the caller widens it by the ink's
 /// overhang and fills the ink in). Spaces and tabs push nothing. Returns
 /// the line's box, from the pen's start to its end.
-fn line_cells(
+fn line_quads(
     line: &str,
     line_box: Rect,
     horizontal: Horizontal,

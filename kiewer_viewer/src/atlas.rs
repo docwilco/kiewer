@@ -134,7 +134,8 @@ pub struct Plan {
 }
 
 /// Where a character's quad samples the atlas, in texels: its cell's
-/// origin and its exact size, which the texel grid rounds up.
+/// origin, and its quad's exact width (the advance and the ink's
+/// overhang) and the line's height, which the texel grid rounds up.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sample {
     pub x: f64,
@@ -298,12 +299,22 @@ pub fn texts_on(board: &Board, layer: LayerId) -> impl Iterator<Item = &Text> {
 #[must_use]
 pub fn chars_in(board: &Board, layer: LayerId, face: &str) -> Vec<char> {
     let mut chars = BTreeSet::from([' ']);
-    for (content, _, text) in placed_texts(board, layer) {
-        if text.font.face.as_deref() == Some(face) {
-            chars.extend(content.chars().filter(|c| !matches!(c, '\n' | '\t')));
-        }
+    for content in contents_in(board, layer, face) {
+        chars.extend(content.chars().filter(|c| !matches!(c, '\n' | '\t')));
     }
     chars.into_iter().collect()
+}
+
+/// What the texts in `face` on `layer` draw, their footprint variables
+/// resolved.
+fn contents_in<'a>(
+    board: &'a Board,
+    layer: LayerId,
+    face: &'a str,
+) -> impl Iterator<Item = String> + 'a {
+    placed_texts(board, layer)
+        .filter(move |(_, _, text)| text.font.face.as_deref() == Some(face))
+        .map(|(content, _, _)| content)
 }
 
 /// The distinct pairs of neighbouring characters the texts in `face` on
@@ -314,10 +325,7 @@ pub fn chars_in(board: &Board, layer: LayerId, face: &str) -> Vec<char> {
 #[must_use]
 pub fn pairs_in(board: &Board, layer: LayerId, face: &str) -> Vec<[char; 2]> {
     let mut pairs = BTreeSet::new();
-    for (content, _, text) in placed_texts(board, layer) {
-        if text.font.face.as_deref() != Some(face) {
-            continue;
-        }
+    for content in contents_in(board, layer, face) {
         for line in content.split('\n') {
             let chars: Vec<char> = line.chars().collect();
             pairs.extend(
@@ -335,12 +343,13 @@ pub fn pairs_in(board: &Board, layer: LayerId, face: &str) -> Vec<[char; 2]> {
 /// face's: a monospace face's pair measures its two advances to within a
 /// few millionths of an em, and the smallest kern a face sets is a few
 /// thousandths.
-pub const KERN_FLOOR: f64 = 1e-3;
+const KERN_FLOOR: f64 = 1e-3;
 
 /// The kern of a pair whose two characters are `first` and `second` em
 /// wide alone and `pair` em wide together, in em: the pair's width less
 /// the two advances, negative for a pair set closer. 0 for a kern under
-/// [`KERN_FLOOR`] either way, or a measurement that is not a number.
+/// a thousandth of an em either way, which is the measurement's
+/// rounding, or a measurement that is not a number.
 #[must_use]
 pub fn kern(pair: f64, first: f64, second: f64) -> f64 {
     let kern = pair - first - second;
@@ -454,30 +463,31 @@ impl Quads {
                 .unwrap_or([pad; 4]);
             self.quad(
                 cell.corners,
-                [uvs(sample, cell.crop), neighbour],
+                uvs(sample, cell.crop),
+                neighbour,
                 origin,
                 color,
                 invert,
             );
         }
         for strip in &text.strips {
-            self.quad(*strip, [[pad; 4]; 2], origin, color, 1.0);
+            self.quad(*strip, [pad; 4], [pad; 4], origin, color, 1.0);
         }
     }
 
-    /// One quad at `corners`, sampling the glyph and the neighbour at
-    /// `uvs`'s two sets of corners.
+    /// One quad at `corners`, sampling the glyph at `glyph_uvs` and the
+    /// neighbour at `neighbour_uvs`, corner for corner.
     fn quad(
         &mut self,
         corners: [Point; 4],
-        uvs: [[[f64; 2]; 4]; 2],
+        glyph_uvs: [[f64; 2]; 4],
+        neighbour_uvs: [[f64; 2]; 4],
         origin: Point,
         color: [f32; 4],
         invert: f32,
     ) {
         let base = u32::try_from(self.vertices.len()).unwrap_or(u32::MAX);
-        let [glyph, neighbour] = uvs;
-        for ((corner, uv), neighbour_uv) in corners.iter().zip(glyph).zip(neighbour) {
+        for ((corner, uv), neighbour_uv) in corners.iter().zip(glyph_uvs).zip(neighbour_uvs) {
             self.vertices.push(TextVertex {
                 position: relative(*corner, origin),
                 uv: uv.map(to_f32),

@@ -414,8 +414,11 @@ function rasterise(face) {
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "left";
   ctx.font = px + "px " + quoted(family);
+  // After the four numbers above, each character's x, y, width, height
+  // and pen (atlas_plan in kiewer_viewer/src/web.rs).
+  const PER_CHAR = 5;
   for (let i = 0; i < chars.length; i++) {
-    const at = 4 + i * 5;
+    const at = 4 + i * PER_CHAR;
     const x = plan[at], y = plan[at + 1], w = plan[at + 2], h = plan[at + 3], pen = plan[at + 4];
     ctx.save();
     ctx.beginPath();
