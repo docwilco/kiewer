@@ -9,9 +9,10 @@
 //!
 //! No test execs a file this process wrote. The stand-in is a tracked file
 //! put on PATH where it lies, and the script's copy in the checkout runs
-//! through `bash`: a file open for writing while any other test thread
-//! forks (git, the browser, other scripts in this one binary) is refused
-//! at exec with "Text file busy" (#108).
+//! through `bash`. A child that another test thread forks (git, the
+//! browser, other scripts in this one binary) while a test holds a file
+//! open for writing keeps that descriptor until its own exec, and until
+//! then an exec of the file fails with "Text file busy" (#108).
 //!
 //! A script's test, in `kiewer_lib`'s binary because the workspace has no
 //! crate for its scripts and this one needs only cargo's scratch directory.
@@ -26,9 +27,9 @@ use test_case::test_case;
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/prune-images.sh");
 const CHECKOUT_SCRIPT: &str = "checkout/scripts/prune-images.sh";
 
-/// Holds the `gcloud` stand-in, which reads the fixture's files from
-/// `PRUNE_FIXTURE_ROOT`.
-const STAND_INS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/it/prune_images/bin");
+/// The directory that holds the `gcloud` stand-in, which reads the
+/// fixture's files from `PRUNE_FIXTURE_ROOT`.
+const STAND_IN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/it/prune_images/bin");
 
 struct Fixture {
     dir: TempDir,
@@ -92,7 +93,7 @@ impl Fixture {
     /// commit being checked, which must reach neither this git nor the
     /// script's.
     fn command(&self, program: &Path) -> Command {
-        let mut path = vec![PathBuf::from(STAND_INS)];
+        let mut path = vec![PathBuf::from(STAND_IN_DIR)];
         path.extend(std::env::split_paths(
             &std::env::var_os("PATH").expect("PATH is set"),
         ));
@@ -124,6 +125,7 @@ impl Fixture {
     fn prune(&self) -> Output {
         self.command(Path::new("bash"))
             .arg(self.dir.path().join(CHECKOUT_SCRIPT))
+            // the project in the stand-in's image name
             .env("GCP_PROJECT_ID", "a-project")
             .env("PRUNE_FIXTURE_ROOT", self.dir.path())
             .current_dir(self.dir.path())
