@@ -19,6 +19,7 @@ mod checks;
 mod collector;
 mod db;
 mod delete;
+mod deploy_kiewer;
 mod design_settings;
 mod designs;
 mod files;

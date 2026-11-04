@@ -3,7 +3,9 @@
 # CI does the routine deploys: main's run deploys its image to
 # kiewer-staging, the run that cuts a Release deploys to kiewer. This is
 # for the cases in between: a rollback to a kept Release, or a candidate
-# put in front of traffic by hand.
+# put in front of traffic by hand. Either way the new revision takes all
+# of the service's traffic, and the last line shows the service's URL,
+# its latest ready revision and its traffic split.
 #
 # Usage: scripts/deploy-kiewer.sh <service> <Version|short-hash>
 #   service: kiewer (production) or kiewer-staging
@@ -29,5 +31,14 @@ esac
 
 gcloud run deploy "$service" --project "$project" --region "$region" \
   --image "$image" --quiet
+# A Release candidate's --no-traffic keeps LATEST out of the production
+# service's traffic until --to-latest puts it back, so without this a
+# deploy made while a candidate is out serves no one (#93). After a plain
+# Release it changes nothing. Staging never takes a candidate.
+if [ "$service" = kiewer ]; then
+  gcloud run services update-traffic "$service" --project "$project" --region "$region" \
+    --to-latest --quiet
+fi
+# The traffic split, so every run shows where the traffic went.
 gcloud run services describe "$service" --project "$project" --region "$region" \
-  --format 'value(status.url, status.latestReadyRevisionName)'
+  --format 'value(status.url, status.latestReadyRevisionName, status.traffic)'
