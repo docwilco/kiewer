@@ -22,10 +22,12 @@ const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/deploy-kie
 /// `DEPLOY_FIXTURE_ROOT`.
 const STAND_IN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/it/deploy_kiewer/bin");
 
-/// The image the script names, with the `GCP_PROJECT_ID` the tests give it.
+/// The image the script names, and the project and region it names on
+/// every call, with the `GCP_PROJECT_ID` the tests give it.
 const IMAGE: &str = "europe-west4-docker.pkg.dev/a-project/kiewer/kiewer";
+const WHERE: &str = "--project a-project --region europe-west4";
 
-/// What the stand-in answers to a describe.
+/// What the stand-in answers to a describe; its printf spells the same.
 const DESCRIBED: &str = "https://kiewer-abc.a.run.app\tkiewer-00012\t\
     {'revisionName': 'kiewer-00012', 'percent': 100, 'latestRevision': True}\n";
 
@@ -50,6 +52,7 @@ impl Fixture {
             .args([service, version])
             .env_clear()
             .env("PATH", std::env::join_paths(path).expect("a joinable PATH"))
+            // the project in IMAGE and WHERE
             .env("GCP_PROJECT_ID", "a-project")
             .env("DEPLOY_FIXTURE_ROOT", self.dir.path())
             .current_dir(self.dir.path())
@@ -79,15 +82,16 @@ fn assert_success(output: &Output) {
 }
 
 fn deploy_call(service: &str, tag: &str) -> String {
-    format!(
-        "run deploy {service} --project a-project --region europe-west4 \
-         --image {IMAGE}:{tag} --quiet"
-    )
+    format!("run deploy {service} {WHERE} --image {IMAGE}:{tag} --quiet")
+}
+
+fn update_traffic_call(service: &str) -> String {
+    format!("run services update-traffic {service} {WHERE} --to-latest --quiet")
 }
 
 fn describe_call(service: &str) -> String {
     format!(
-        "run services describe {service} --project a-project --region europe-west4 \
+        "run services describe {service} {WHERE} \
          --format value(status.url, status.latestReadyRevisionName, status.traffic)"
     )
 }
@@ -106,9 +110,7 @@ fn production_moves_its_traffic_to_the_new_revision() {
         fixture.calls(),
         [
             deploy_call("kiewer", "0.3.2"),
-            "run services update-traffic kiewer --project a-project \
-             --region europe-west4 --to-latest --quiet"
-                .to_owned(),
+            update_traffic_call("kiewer"),
             describe_call("kiewer"),
         ],
     );
@@ -138,8 +140,14 @@ fn a_refused_traffic_move_fails_the_run() {
     let fixture = Fixture::new();
     fs::write(fixture.file("refuse-update-traffic"), "").expect("the refusal");
 
-    let output = fixture.deploy("kiewer", "v0.3.2");
+    let output = fixture.deploy("kiewer", "0.3.2");
 
     assert!(!output.status.success());
-    assert_eq!(fixture.calls().len(), 2, "calls: {:?}", fixture.calls());
+    assert_eq!(
+        fixture.calls(),
+        [
+            deploy_call("kiewer", "0.3.2"),
+            update_traffic_call("kiewer")
+        ],
+    );
 }

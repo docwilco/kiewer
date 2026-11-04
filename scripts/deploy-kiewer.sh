@@ -33,8 +33,10 @@ gcloud run deploy "$service" --project "$project" --region "$region" \
   --image "$image" --quiet
 # A Release candidate's --no-traffic keeps LATEST out of the production
 # service's traffic until --to-latest puts it back, so without this a
-# deploy made while a candidate is out serves no one (#93). After a plain
-# Release it changes nothing. Staging never takes a candidate.
+# deploy made while a candidate is out serves no one (#93). The release
+# job in .github/workflows/ci.yml does the same after a plain Release's
+# deploy. With no candidate out it changes nothing. Staging never takes a
+# candidate.
 if [ "$service" = kiewer ]; then
   gcloud run services update-traffic "$service" --project "$project" --region "$region" \
     --to-latest --quiet

@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 # Cloud Run's stand-in for kiewer_lib/tests/it/deploy_kiewer.rs. Every call
 # is one line in $DEPLOY_FIXTURE_ROOT/calls, which the tests compare with
-# the spellings the script is meant to use. A describe answers with a
-# made-up service; an update-traffic is refused while the fixture holds a
-# file named refuse-update-traffic.
+# the spellings the script is meant to use; a call of any other kind fails
+# the run. A describe answers with the made-up service the tests name
+# DESCRIBED; an update-traffic is refused while the fixture holds a file
+# named refuse-update-traffic.
 # Tracked and put on PATH where it lies; the test file's module doc says
 # why it is never written by a test.
 set -euo pipefail
 root="${DEPLOY_FIXTURE_ROOT:?set DEPLOY_FIXTURE_ROOT}"
 echo "$*" >> "$root/calls"
 case "$*" in
+  "run deploy "*)
+    ;;
   "run services describe "*)
     printf '%s\t%s\t%s\n' https://kiewer-abc.a.run.app kiewer-00012 \
       "{'revisionName': 'kiewer-00012', 'percent': 100, 'latestRevision': True}"
     ;;
   "run services update-traffic "*)
     [ ! -e "$root/refuse-update-traffic" ] || { echo "PERMISSION_DENIED" >&2; exit 1; }
+    ;;
+  *)
+    echo "gcloud stand-in: unexpected call: $*" >&2
+    exit 64
     ;;
 esac
