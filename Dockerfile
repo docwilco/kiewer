@@ -2,9 +2,9 @@
 # push and pull request from what the runner built (scripts/release-build.sh,
 # handed over as a workflow artifact) and, on a push to main, pushed to
 # Artifact Registry as its short hash and deployed to the staging Cloud
-# Run service; a pushed Release tag names that image by Version and
-# deploys it to production, building nothing. A dev box runs the same
-# script, then `docker build`.
+# Run service; the run that cuts a Release names that image by Version
+# and deploys it to production. A dev box runs the same script, then
+# `docker build`.
 #
 # The base and the runner. The binaries link the glibc of the runner that
 # built them and name, per function, the newest version tag that glibc

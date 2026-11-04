@@ -75,7 +75,7 @@ The decisions behind v1, settled in the design grilling of 2026-10-30, grouped b
 
 ## Operations
 
-- GitHub Actions: fmt, clippy, tests and the wasm build on every push; every push to main deploys staging; a tag builds the image to Artifact Registry and deploys production; both via Workload Identity Federation with no stored keys; follows the operator's release conventions. (Q14, Q58)
+- GitHub Actions: fmt, clippy, tests and the wasm build on every push; every push to main pushes the image to Artifact Registry and deploys staging; a green run whose Version has no tag deploys production and tags the commit; both via Workload Identity Federation with no stored keys; follows the operator's release conventions. (Q14, Q58)
 - Region europe-west4 for Cloud Run, Cloud SQL and buckets. (Q16)
 - Terraform in `infra/` for GCP and Fastly, state in a GCS bucket, applied by hand from a workstation; CI deploys only Cloud Run revisions. A deploy switches traffic after a health check; rollback is traffic back. (Q51, Q58)
 - Staging: own Cloud Run service, database `kiewer_staging` on the shared instance with its own migrations, own bucket. A script copies production in on demand: pg_dump and restore, server-side GCS copy of every blob the restored trees name, sessions and OAuth identities dropped, developers granted ownership of copied designs by a one-off grant in the script. (Q59, Q61)

@@ -23,6 +23,7 @@ mod fs_blob_store;
 mod gcs_blob_store;
 mod history;
 mod pending;
+mod prune_images;
 mod roles;
 mod schematic;
 mod sign_in;

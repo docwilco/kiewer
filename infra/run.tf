@@ -8,8 +8,8 @@
 #
 # Terraform owns the service's shape: the account, the environment, the
 # Cloud SQL mount, scaling. CI owns the image: every push to main deploys
-# a new revision to kiewer-staging with `gcloud run deploy --image`, a
-# Release tag's run does the same to kiewer (.github/workflows/ci.yml),
+# a new revision to kiewer-staging with `gcloud run deploy --image`, the
+# run that cuts a Release does the same to kiewer (.github/workflows/ci.yml),
 # and a candidate becomes a no-traffic revision under the Cloud Run tag
 # `rc`. The lifecycle block below ignores what those deploys change, so a
 # plan after a deploy is clean; a new field gcloud starts writing shows up

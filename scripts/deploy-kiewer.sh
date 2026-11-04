@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A hand deploy or a rollback of a Cloud Run service to a named image.
 # CI does the routine deploys: main's run deploys its image to
-# kiewer-staging, a Release tag's run deploys to kiewer. This is for the
+# kiewer-staging, the run that cuts a Release deploys to kiewer. This is for the
 # cases in between: a rollback to a kept Release, or a candidate put in
 # front of traffic by hand.
 #

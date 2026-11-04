@@ -1,7 +1,7 @@
 # The identity CI deploys with, keyless: GitHub Actions presents its OIDC
 # token to a Workload Identity Federation pool, which lets a run from
-# docwilco/kiewer on main or a Release tag impersonate the deploy service
-# account. The account can push to the registry and deploy the two
+# docwilco/kiewer on main impersonate the deploy service account. The
+# account can push to the registry, delete tags there and deploy the two
 # services, nothing else (.github/workflows/ci.yml, the image and release
 # jobs). The three outputs in outputs.tf are what CI reads as repository
 # variables.
@@ -23,11 +23,11 @@ resource "google_iam_workload_identity_pool_provider" "github_actions" {
     "attribute.ref"        = "assertion.ref"
   }
 
-  # Only this repository, and only the refs whose runs ship: a push to
-  # main (the image job) and a pushed Release tag (the release job). A
-  # pull request's run never authenticates (its steps are gated off), and
-  # a token from any other ref is refused here.
-  attribute_condition = "assertion.repository == \"${var.github_repository}\" && (assertion.ref == \"refs/heads/main\" || assertion.ref.startsWith(\"refs/tags/v\"))"
+  # Only this repository, and only the ref whose runs ship: a push to
+  # main (the image and release jobs). A pull request's run never
+  # authenticates (its steps are gated off), and a token from any other
+  # ref is refused here.
+  attribute_condition = "assertion.repository == \"${var.github_repository}\" && assertion.ref == \"refs/heads/main\""
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
@@ -47,11 +47,13 @@ resource "google_service_account_iam_member" "deploy_impersonated_by_github" {
 }
 
 # Push and tag images (the release job adds :<Version> and :latest to a
-# pushed manifest); writer includes read, which imagetools inspect needs.
-resource "google_artifact_registry_repository_iam_member" "deploy_writes_images" {
+# pushed manifest) and delete tags (scripts/prune-images.sh). repoAdmin is
+# writer plus the deletes; read, which imagetools inspect needs, comes
+# with it.
+resource "google_artifact_registry_repository_iam_member" "deploy_manages_images" {
   location   = google_artifact_registry_repository.kiewer.location
   repository = google_artifact_registry_repository.kiewer.name
-  role       = "roles/artifactregistry.writer"
+  role       = "roles/artifactregistry.repoAdmin"
   member     = google_service_account.deploy.member
 }
 
