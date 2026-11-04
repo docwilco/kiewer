@@ -7,11 +7,16 @@
 //! is a stand-in `gcloud` on PATH over a file of tags, answering what
 //! Artifact Registry answers: a refused delete of a tag it does not hold.
 //!
+//! No test execs a file this process wrote. The stand-in is a tracked file
+//! put on PATH where it lies, and the script's copy in the checkout runs
+//! through `bash`: a file open for writing while any other test thread
+//! forks (git, the browser, other scripts in this one binary) is refused
+//! at exec with "Text file busy" (#108).
+//!
 //! A script's test, in `kiewer_lib`'s binary because the workspace has no
 //! crate for its scripts and this one needs only cargo's scratch directory.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -21,30 +26,9 @@ use test_case::test_case;
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/prune-images.sh");
 const CHECKOUT_SCRIPT: &str = "checkout/scripts/prune-images.sh";
 
-/// Takes exactly the two spellings the script is meant to use; anything
-/// else fails the run.
-const GCLOUD: &str = r#"#!/usr/bin/env bash
-set -euo pipefail
-root="$(dirname "$0")/.."
-image=europe-west4-docker.pkg.dev/a-project/kiewer/kiewer
-case "$*" in
-  "artifacts docker tags list $image --format=value(tag.basename())")
-    cat "$root/registry"
-    ;;
-  "artifacts docker tags delete $image:"*" --quiet")
-    tag="${5##*:}"
-    grep -Fxq "$tag" "$root/registry" || { echo "NOT_FOUND: $tag" >&2; exit 1; }
-    [ ! -e "$root/refuse-deletes" ] || { echo "PERMISSION_DENIED: $tag" >&2; exit 1; }
-    { grep -vFx "$tag" "$root/registry" || true; } > "$root/registry.next"
-    mv "$root/registry.next" "$root/registry"
-    echo "$tag" >> "$root/deleted"
-    ;;
-  *)
-    echo "gcloud stand-in: unexpected call: $*" >&2
-    exit 64
-    ;;
-esac
-"#;
+/// Holds the `gcloud` stand-in, which reads the fixture's files from
+/// `PRUNE_FIXTURE_ROOT`.
+const STAND_INS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/it/prune_images/bin");
 
 struct Fixture {
     dir: TempDir,
@@ -57,11 +41,6 @@ impl Fixture {
         let dir = scratch_dir!();
         let root = dir.path().to_owned();
         let root = root.as_path();
-        let bin = root.join("bin");
-        fs::create_dir(&bin).expect("the bin directory");
-        let gcloud = bin.join("gcloud");
-        fs::write(&gcloud, GCLOUD).expect("the gcloud stand-in");
-        fs::set_permissions(&gcloud, fs::Permissions::from_mode(0o755)).expect("its mode");
         fs::write(root.join("registry"), lines(registry_tags)).expect("the registry");
 
         let fixture = Self { dir };
@@ -113,7 +92,7 @@ impl Fixture {
     /// commit being checked, which must reach neither this git nor the
     /// script's.
     fn command(&self, program: &Path) -> Command {
-        let mut path = vec![self.dir.path().join("bin")];
+        let mut path = vec![PathBuf::from(STAND_INS)];
         path.extend(std::env::split_paths(
             &std::env::var_os("PATH").expect("PATH is set"),
         ));
@@ -143,8 +122,10 @@ impl Fixture {
     /// Started from outside the checkout: the script finds its repository
     /// from its own path, as the other scripts do.
     fn prune(&self) -> Output {
-        self.command(&self.dir.path().join(CHECKOUT_SCRIPT))
+        self.command(Path::new("bash"))
+            .arg(self.dir.path().join(CHECKOUT_SCRIPT))
             .env("GCP_PROJECT_ID", "a-project")
+            .env("PRUNE_FIXTURE_ROOT", self.dir.path())
             .current_dir(self.dir.path())
             .output()
             .expect("the script runs")

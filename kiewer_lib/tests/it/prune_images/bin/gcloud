@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# The registry's stand-in for kiewer_lib/tests/it/prune_images.rs, over the
+# fixture's files under PRUNE_FIXTURE_ROOT. It takes exactly the two
+# spellings the script is meant to use; anything else fails the run.
+#
+# A tracked file the tests put on PATH as it is, never a copy the test
+# process writes: a file open for writing while another test thread forks
+# is refused at exec with "Text file busy" (#108).
+set -euo pipefail
+root="${PRUNE_FIXTURE_ROOT:?set PRUNE_FIXTURE_ROOT}"
+image=europe-west4-docker.pkg.dev/a-project/kiewer/kiewer
+case "$*" in
+  "artifacts docker tags list $image --format=value(tag.basename())")
+    cat "$root/registry"
+    ;;
+  "artifacts docker tags delete $image:"*" --quiet")
+    tag="${5##*:}"
+    grep -Fxq "$tag" "$root/registry" || { echo "NOT_FOUND: $tag" >&2; exit 1; }
+    [ ! -e "$root/refuse-deletes" ] || { echo "PERMISSION_DENIED: $tag" >&2; exit 1; }
+    { grep -vFx "$tag" "$root/registry" || true; } > "$root/registry.next"
+    mv "$root/registry.next" "$root/registry"
+    echo "$tag" >> "$root/deleted"
+    ;;
+  *)
+    echo "gcloud stand-in: unexpected call: $*" >&2
+    exit 64
+    ;;
+esac
