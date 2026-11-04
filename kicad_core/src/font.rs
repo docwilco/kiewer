@@ -300,10 +300,17 @@ pub(crate) fn first_baseline(
     }
 }
 
-/// How far a knockout's box grows around its glyphs: half the pen, plus
-/// KiCad's margin, the larger of half the pen and a ninth of the height.
+/// How far a stroke-font knockout's box grows around its strokes'
+/// centrelines: half the pen, which reaches the ink, plus
+/// [`knockout_margin`].
 pub(crate) fn knockout_grow(pen: f64, height: f64) -> f64 {
-    pen / 2.0 + (pen / 2.0).max(height / 9.0)
+    pen / 2.0 + knockout_margin(pen, height)
+}
+
+/// KiCad's knockout margin around a text's ink (`GetKnockoutTextMargin`):
+/// the larger of half the pen and a ninth of the height.
+pub(crate) fn knockout_margin(pen: f64, height: f64) -> f64 {
+    (pen / 2.0).max(height / 9.0)
 }
 
 /// Where the pen is after each character of `line`, from `start`, in a

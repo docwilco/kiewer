@@ -378,18 +378,24 @@ function setup() {
   }
   fontsBox.hidden = missing === 0;
 }
-// Rasterise the face the wasm asks for: measure its characters at
-// MEASURE_PX, take the plan, draw each character at the plan's pixels per
-// em into its cell (clipped to it, so an overhang never reaches the
-// neighbour) with its baseline where the plan says, and hand the alpha
-// channel over.
+// Rasterise the face the wasm asks for: measure each character's advance
+// and ink at MEASURE_PX (the ink sets a knockout's box), take the plan,
+// draw each character at the plan's pixels per em into its cell (clipped
+// to it, so an overhang never reaches the neighbour) with its baseline
+// where the plan says, and hand the alpha channel over.
 function rasterise(face) {
   const family = families.get(face);
   if (!family) return;
   const chars = Array.from(fontsViewer.face_chars(face));
   probeCtx.font = MEASURE_PX + "px " + quoted(family);
-  const advances = new Float64Array(chars.map(function (c) { return probeCtx.measureText(c).width; }));
-  const plan = fontsViewer.atlas_plan(face, MEASURE_PX, advances);
+  const advances = new Float64Array(chars.length);
+  const inks = new Float64Array(chars.length * 4);
+  chars.forEach(function (c, i) {
+    const m = probeCtx.measureText(c);
+    advances[i] = m.width;
+    inks.set([m.actualBoundingBoxLeft, m.actualBoundingBoxRight, m.actualBoundingBoxAscent, m.actualBoundingBoxDescent], i * 4);
+  });
+  const plan = fontsViewer.atlas_plan(face, MEASURE_PX, advances, inks);
   if (plan.length < 4) return;
   const px = plan[0], width = plan[1], height = plan[2], ascent = plan[3];
   atlasCanvas.width = width;

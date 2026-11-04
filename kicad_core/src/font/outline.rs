@@ -1,8 +1,8 @@
 //! KiCad's layout of a text item in an outline face (a system font the
 //! viewer draws through a glyph atlas), with the glyphs themselves left
 //! to whoever has the font: the browser measures each character's
-//! advance and the face's ascent and descent, and [`layout`] places one
-//! cell per character on the board.
+//! advance and ink and the face's ascent and descent, and [`layout`]
+//! places one cell per character on the board.
 //!
 //! The anchor rules are the ones [`super::shape`] follows for Newstroke
 //! (KiCad's `FONT::getLinePositions`: the block's first line counts
@@ -20,12 +20,16 @@
 //! A cell is the character's advance wide, from the face's ascent above
 //! the baseline to its descent below, in the text's frame; its ink is
 //! whatever the browser rasterised into the matching atlas rectangle. A
-//! knockout text is its box with the glyphs cut out; here the box is the
-//! cells' bounds grown by KiCad's margin, and [`OutlineText::strips`]
-//! are the parts of that box no cell covers, so the viewer fills the
-//! strips flat and the cells with their coverage inverted.
+//! knockout text is its knockout box with the glyphs cut out. The box is
+//! KiCad 10's (`PCB_TEXT::buildBoundingHull`): the bounds of the glyph
+//! ink with the text unturned, grown on every side by KiCad's margin and
+//! no pen, since an outline glyph has none. A cell is taller than that
+//! box, so a knockout's cells are cropped to it, and
+//! [`OutlineText::strips`] are the parts of the box no cropped cell
+//! covers: the viewer fills the strips flat and the cells with their
+//! coverage inverted.
 
-use super::{Placement, cursors, first_baseline, knockout_grow};
+use super::{Placement, cursors, first_baseline, knockout_margin};
 use crate::geometry::{Bounds, Transform};
 use crate::model::{Horizontal, Point};
 
@@ -55,16 +59,47 @@ impl FaceMetrics {
     }
 }
 
+/// Where a character's ink reaches from its pen position on the
+/// baseline, in em units, as the browser's `measureText` reports it
+/// (`actualBoundingBoxLeft` and its siblings): each distance is positive
+/// in its own direction, so ink that starts right of the pen has a
+/// negative `left`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Ink {
+    /// How far the ink reaches left of the pen.
+    pub left: f64,
+    /// How far it reaches right of the pen.
+    pub right: f64,
+    /// How far it reaches above the baseline.
+    pub ascent: f64,
+    /// How far it reaches below the baseline.
+    pub descent: f64,
+}
+
+impl Ink {
+    /// Whether there is no ink: no width or no height, as for a space,
+    /// or a measurement that is not a number.
+    fn is_empty(self) -> bool {
+        !(self.left + self.right > 0.0 && self.ascent + self.descent > 0.0)
+    }
+}
+
 /// One character's cell on the board.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
     /// The character.
     pub c: char,
-    /// The cell's corners in board millimetres, in reading order: the
-    /// top left of the glyph, its top right, bottom right, bottom left.
-    /// Mirroring and rotation are applied, so for a mirrored text the
-    /// "top left" is on the right.
+    /// The corners of the part of the cell drawn, in board millimetres,
+    /// in reading order: the top left of the glyph, its top right,
+    /// bottom right, bottom left. Mirroring and rotation are applied, so
+    /// for a mirrored text the "top left" is on the right.
     pub corners: [Point; 4],
+    /// Which part of the cell `corners` covers, as fractions of the
+    /// cell's width and height from its top left in reading order: 0 to
+    /// 1 both ways for a whole cell, less for a knockout's cell cropped
+    /// to its box. The atlas samples the same part of the glyph's
+    /// rectangle.
+    pub crop: Bounds,
 }
 
 /// A text laid out in an outline face.
@@ -73,9 +108,14 @@ pub struct OutlineText {
     /// One cell per character drawn; spaces and tabs advance the pen
     /// and have no cell.
     pub cells: Vec<Cell>,
-    /// For a knockout text, the parts of its box no cell covers, each
-    /// a quadrilateral in board millimetres; empty otherwise.
+    /// For a knockout text, the parts of its knockout box no cell
+    /// covers, each a quadrilateral in board millimetres; empty
+    /// otherwise.
     pub strips: Vec<[Point; 4]>,
+    /// For a knockout text with ink, its knockout box: the corners in
+    /// the order of a cell's, mirrored and turned with the text. `None`
+    /// otherwise.
+    pub knockout_box: Option<[Point; 4]>,
 }
 
 /// An axis-aligned box in the text's unrotated frame.
@@ -104,19 +144,75 @@ impl Rect {
     fn is_empty(self) -> bool {
         self.max.x <= self.min.x || self.max.y <= self.min.y
     }
+
+    /// The part of this box inside `other`, empty when they do not meet.
+    fn crop(self, other: Rect) -> Rect {
+        Rect {
+            min: Point {
+                x: self.min.x.max(other.min.x),
+                y: self.min.y.max(other.min.y),
+            },
+            max: Point {
+                x: self.max.x.min(other.max.x),
+                y: self.max.y.min(other.max.y),
+            },
+        }
+    }
+
+    fn union(self, other: Rect) -> Rect {
+        Rect {
+            min: Point {
+                x: self.min.x.min(other.min.x),
+                y: self.min.y.min(other.min.y),
+            },
+            max: Point {
+                x: self.max.x.max(other.max.x),
+                y: self.max.y.max(other.max.y),
+            },
+        }
+    }
+
+    /// This box grown by `by` on every side.
+    fn grown(self, by: f64) -> Rect {
+        Rect {
+            min: Point {
+                x: self.min.x - by,
+                y: self.min.y - by,
+            },
+            max: Point {
+                x: self.max.x + by,
+                y: self.max.y + by,
+            },
+        }
+    }
+}
+
+/// The whole of a cell, as [`Cell::crop`] gives it.
+const WHOLE: Bounds = Bounds {
+    min: Point { x: 0.0, y: 0.0 },
+    max: Point { x: 1.0, y: 1.0 },
+};
+
+/// A glyph's cell and its ink, in the text's unrotated frame.
+struct PlacedGlyph {
+    c: char,
+    cell: Rect,
+    ink: Option<Rect>,
 }
 
 /// Lays `text` out as `placement` says in a face of `metrics`, each
-/// character `advance` em wide (the browser's measurement; a space is
-/// `advance(' ')`, a tab reaches the next stop as the stroke font places
-/// it). With `knockout`, the strips of the box around the cells are
-/// computed too.
+/// character `advance` em wide with its ink where `ink` says (the
+/// browser's measurements; a space is `advance(' ')`, a tab reaches the
+/// next stop as the stroke font places it). With `knockout`, the
+/// knockout box is the ink's bounds grown by KiCad's margin, the cells
+/// are cropped to it and the strips of it around them are computed too.
 #[must_use]
 pub fn layout(
     text: &str,
     placement: &Placement,
     metrics: FaceMetrics,
     advance: impl Fn(char) -> f64,
+    ink: impl Fn(char) -> Ink,
     knockout: bool,
 ) -> OutlineText {
     let size = placement.size;
@@ -133,7 +229,7 @@ pub fn layout(
         placement.justify.vertical,
     );
     let origin = placement.position;
-    let mut cells: Vec<(char, Rect)> = Vec::new();
+    let mut glyphs: Vec<PlacedGlyph> = Vec::new();
     let mut blanks: Vec<Rect> = Vec::new();
     let mut line_boxes: Vec<Rect> = Vec::new();
     for (index, line) in lines.iter().enumerate() {
@@ -152,26 +248,40 @@ pub fn layout(
                 y: baseline + metrics.descent * em.y,
             },
         };
+        let first = glyphs.len();
         line_boxes.push(line_cells(
             line,
             line_box,
             placement.justify.horizontal,
             em.x,
             &advance,
-            &mut cells,
-            knockout.then_some(&mut blanks),
+            &mut glyphs,
+            &mut blanks,
         ));
+        for glyph in glyphs.get_mut(first..).unwrap_or_default() {
+            glyph.ink = ink_at(ink(glyph.c), glyph.cell.min.x, baseline, em);
+        }
     }
-    if cells.is_empty() {
+    if glyphs.is_empty() {
         // Nothing to draw: no glyph, so no box to cut one out of.
         return OutlineText::default();
     }
-    let strips = if knockout {
-        let mut strips = knockout_strips(&line_boxes, placement.pen, size.height);
-        strips.append(&mut blanks);
-        strips
+    let unplaced = if knockout {
+        let margin = knockout_margin(placement.pen, size.height);
+        let Some(unplaced) = knockout_parts(&glyphs, &blanks, &line_boxes, margin) else {
+            // No ink anywhere: no box, and nothing in a cell to cut out.
+            return OutlineText::default();
+        };
+        unplaced
     } else {
-        Vec::new()
+        Unplaced {
+            cells: glyphs
+                .iter()
+                .map(|glyph| (glyph.c, glyph.cell, WHOLE))
+                .collect(),
+            strips: Vec::new(),
+            knockout_box: None,
+        }
     };
     let mirror = placement.justify.mirror;
     let turn = Transform::new(origin, placement.angle);
@@ -187,33 +297,122 @@ pub fn layout(
         })
     };
     OutlineText {
-        cells: cells
+        cells: unplaced
+            .cells
             .into_iter()
-            .map(|(c, rect)| Cell {
+            .map(|(c, rect, crop)| Cell {
                 c,
                 corners: rect.corners().map(place),
+                crop,
             })
             .collect(),
-        strips: strips
+        strips: unplaced
+            .strips
             .into_iter()
             .map(|rect| rect.corners().map(place))
             .collect(),
+        knockout_box: unplaced.knockout_box.map(|rect| rect.corners().map(place)),
     }
+}
+
+/// A text's cells (each with the part of it drawn), strips and knockout
+/// box in its frame, before mirroring and turning.
+struct Unplaced {
+    cells: Vec<(char, Rect, Bounds)>,
+    strips: Vec<Rect>,
+    knockout_box: Option<Rect>,
+}
+
+/// Where `measured` ink sits for a glyph whose pen is at `pen_x` on
+/// `baseline`, in a face whose em is `em`; `None` for no ink.
+fn ink_at(measured: Ink, pen_x: f64, baseline: f64, em: Point) -> Option<Rect> {
+    (!measured.is_empty()).then_some(Rect {
+        min: Point {
+            x: pen_x - measured.left * em.x,
+            y: baseline - measured.ascent * em.y,
+        },
+        max: Point {
+            x: pen_x + measured.right * em.x,
+            y: baseline + measured.descent * em.y,
+        },
+    })
+}
+
+/// A knockout's parts: the box is the union of the glyphs' ink grown by
+/// `margin`, the cells are cropped to it, and the strips are the box
+/// less the cropped lines plus the cropped blanks. `None` when no glyph
+/// has ink.
+fn knockout_parts(
+    glyphs: &[PlacedGlyph],
+    blanks: &[Rect],
+    line_boxes: &[Rect],
+    margin: f64,
+) -> Option<Unplaced> {
+    let outer = glyphs
+        .iter()
+        .filter_map(|glyph| glyph.ink)
+        .reduce(Rect::union)?
+        .grown(margin);
+    let lines: Vec<Rect> = line_boxes
+        .iter()
+        .map(|line| line.crop(outer))
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut strips = knockout_strips(&lines, outer);
+    strips.extend(
+        blanks
+            .iter()
+            .map(|blank| blank.crop(outer))
+            .filter(|blank| !blank.is_empty()),
+    );
+    Some(Unplaced {
+        cells: glyphs
+            .iter()
+            .filter_map(|glyph| cropped(glyph, outer))
+            .collect(),
+        strips,
+        knockout_box: Some(outer),
+    })
+}
+
+/// The part of `glyph`'s cell inside the knockout box `outer`, with the
+/// fractions of the cell it is; `None` when none of it is.
+fn cropped(glyph: &PlacedGlyph, outer: Rect) -> Option<(char, Rect, Bounds)> {
+    let cell = glyph.cell;
+    let part = cell.crop(outer);
+    if part.is_empty() {
+        return None;
+    }
+    // A part that is not empty comes of a cell that is not, so neither
+    // extent is zero.
+    let (width, height) = (cell.max.x - cell.min.x, cell.max.y - cell.min.y);
+    let fraction = |p: Point| Point {
+        x: (p.x - cell.min.x) / width,
+        y: (p.y - cell.min.y) / height,
+    };
+    Some((
+        glyph.c,
+        part,
+        Bounds {
+            min: fraction(part.min),
+            max: fraction(part.max),
+        },
+    ))
 }
 
 /// The cells of one line: `line_box` gives the anchor's x and the line's
 /// top and bottom; the line is justified about the anchor as
-/// `horizontal` says, each glyph's cell pushed to `cells` and, when
-/// `blanks` is given (a knockout), each space's or tab's to it. Returns
-/// the line's box, anchor to advance.
+/// `horizontal` says, each glyph's cell pushed to `glyphs` (its ink left
+/// for the caller) and each space's or tab's to `blanks`. Returns the
+/// line's box, anchor to advance.
 fn line_cells(
     line: &str,
     line_box: Rect,
     horizontal: Horizontal,
     em: f64,
     advance: &impl Fn(char) -> f64,
-    cells: &mut Vec<(char, Rect)>,
-    mut blanks: Option<&mut Vec<Rect>>,
+    glyphs: &mut Vec<PlacedGlyph>,
+    blanks: &mut Vec<Rect>,
 ) -> Rect {
     let advances = cursors(
         line,
@@ -246,12 +445,14 @@ fn line_cells(
         if matches!(c, ' ' | '\t') {
             // A blank has no glyph; in a knockout it is part of the
             // filled box.
-            if let Some(blanks) = blanks.as_deref_mut() {
-                blanks.push(rect);
-            }
+            blanks.push(rect);
             continue;
         }
-        cells.push((*c, rect));
+        glyphs.push(PlacedGlyph {
+            c: *c,
+            cell: rect,
+            ink: None,
+        });
     }
     Rect {
         min: Point {
@@ -265,28 +466,13 @@ fn line_cells(
     }
 }
 
-/// The knockout box less the lines: the box is the line boxes' bounds
-/// grown by half the pen and KiCad's margin (the larger of half the pen
-/// and a ninth of the height); the strips are the bands above the first
-/// line, between lines and below the last, full box width, and each
-/// line's left and right bands. A band a line's box swallows is left
-/// out. A line's cells and blanks tile its box, so the box is exactly
-/// the cells, the blanks and these strips.
-fn knockout_strips(lines: &[Rect], pen: f64, height: f64) -> Vec<Rect> {
-    let Some(bounds) = Bounds::around(lines.iter().flat_map(|rect| [rect.min, rect.max])) else {
-        return Vec::new();
-    };
-    let grow = knockout_grow(pen, height);
-    let outer = Rect {
-        min: Point {
-            x: bounds.min.x - grow,
-            y: bounds.min.y - grow,
-        },
-        max: Point {
-            x: bounds.max.x + grow,
-            y: bounds.max.y + grow,
-        },
-    };
+/// The knockout box `outer` less the `lines` (each already cropped to
+/// it, top to bottom): the strips are the bands above the first line,
+/// between lines and below the last, full box width, and each line's
+/// left and right bands. A band a line swallows is left out. A line's
+/// cropped cells and blanks tile it, so the box is exactly the cells,
+/// the blanks and these strips.
+fn knockout_strips(lines: &[Rect], outer: Rect) -> Vec<Rect> {
     let mut strips = Vec::new();
     let mut band_top = outer.min.y;
     for line in lines {
@@ -353,6 +539,28 @@ mod tests {
         ADVANCE
     }
 
+    /// Ink that fills the whole of a [`CONSOLAS`] cell.
+    fn whole_cell(_: char) -> Ink {
+        Ink {
+            left: 0.0,
+            right: ADVANCE,
+            ascent: CONSOLAS.ascent,
+            descent: CONSOLAS.descent,
+        }
+    }
+
+    /// Ink as a capital has it: 0.05 em in from each side of the cell,
+    /// from the baseline up to 0.64 em, so the cell stands 0.1 em above
+    /// it and 0.26 em below.
+    fn capital(_: char) -> Ink {
+        Ink {
+            left: -0.05,
+            right: ADVANCE - 0.05,
+            ascent: 0.64,
+            descent: 0.0,
+        }
+    }
+
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
     }
@@ -391,6 +599,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             monospace,
+            whole_cell,
             false,
         );
         assert_eq!(text.cells.len(), 2);
@@ -428,6 +637,7 @@ mod tests {
             ),
             CONSOLAS,
             monospace,
+            whole_cell,
             false,
         );
         let corners = cell(&text, 0).corners;
@@ -443,7 +653,7 @@ mod tests {
             width: 2.0,
             height: 1.0,
         };
-        let text = layout("I", &wide, CONSOLAS, monospace, false);
+        let text = layout("I", &wide, CONSOLAS, monospace, whole_cell, false);
         let corners = cell(&text, 0).corners;
         assert!(close(corners[1].x - corners[0].x, ADVANCE * 1.4 * 2.0));
         assert!(close(corners[3].y - corners[0].y, 1.4));
@@ -460,6 +670,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             tall,
             monospace,
+            whole_cell,
             false,
         );
         let dy = cell(&text, 1).corners[0].y - cell(&text, 0).corners[0].y;
@@ -481,7 +692,14 @@ mod tests {
             vertical: Vertical::Center,
             mirror: false,
         };
-        let laid = layout(text, &placement(left, 0.0), CONSOLAS, monospace, false);
+        let laid = layout(
+            text,
+            &placement(left, 0.0),
+            CONSOLAS,
+            monospace,
+            whole_cell,
+            false,
+        );
         assert_eq!(laid.cells.len(), 2);
         let dx = cell(&laid, 1).corners[0].x - cell(&laid, 0).corners[0].x;
         assert!(close(dx, expected_dx), "{dx}");
@@ -494,6 +712,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             |c| if c == 'W' { 0.9 } else { 0.3 },
+            whole_cell,
             false,
         );
         let i = cell(&text, 0).corners;
@@ -510,13 +729,21 @@ mod tests {
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             monospace,
+            whole_cell,
             false,
         );
         let mirror = Justify {
             mirror: true,
             ..Justify::default()
         };
-        let mirrored = layout("I", &placement(mirror, 0.0), CONSOLAS, monospace, false);
+        let mirrored = layout(
+            "I",
+            &placement(mirror, 0.0),
+            CONSOLAS,
+            monospace,
+            whole_cell,
+            false,
+        );
         let (a, b) = (cell(&plain, 0).corners, cell(&mirrored, 0).corners);
         // The glyph's top left lands where its top right was, so a quad
         // textured by corner order reads mirrored.
@@ -531,6 +758,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             monospace,
+            whole_cell,
             false,
         );
         let turned = layout(
@@ -538,6 +766,7 @@ mod tests {
             &placement(Justify::default(), 90.0),
             CONSOLAS,
             monospace,
+            whole_cell,
             false,
         );
         let (a, b) = (cell(&flat, 0).corners, cell(&turned, 0).corners);
@@ -553,6 +782,7 @@ mod tests {
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             monospace,
+            whole_cell,
             true,
         );
         assert_eq!(text, OutlineText::default());
@@ -567,41 +797,64 @@ mod tests {
         Bounds::around(quads.flatten()).expect("some quads")
     }
 
+    fn knockout_box(text: &OutlineText) -> [Point; 4] {
+        text.knockout_box
+            .unwrap_or_else(|| panic!("no knockout box in {text:?}"))
+    }
+
     #[test]
-    fn a_knockout_is_the_grown_box_tiled_by_the_cells_and_the_strips() {
+    fn a_knockout_is_the_ink_grown_by_the_margin_tiled_by_the_cropped_cells_and_the_strips() {
         let text = layout(
             "I I\nII",
             &placement(Justify::default(), 0.0),
             CONSOLAS,
             monospace,
+            capital,
             true,
         );
         assert_eq!(text.cells.len(), 4);
         assert_is_not_empty!(text.strips);
-        let cells = text.cells.iter().map(|cell| cell.corners);
-        let outer = bounds_of(cells.clone().chain(text.strips.iter().copied()));
-        // Pen 0.15: half is 0.075; the margin is a ninth of the height,
-        // which beats half the pen. The box grows by both around the
-        // cells (the first line's three cells span its box).
-        let inner = bounds_of(cells.clone());
-        let grow = 0.075 + 1.0 / 9.0;
-        assert!(
-            close(outer.min.x, inner.min.x - grow),
-            "{outer:?} {inner:?}"
-        );
-        assert!(
-            close(outer.max.y, inner.max.y + grow),
-            "{outer:?} {inner:?}"
-        );
+        // Pen 0.15: the margin is a ninth of the height, which beats half
+        // the pen, and the box grows by the margin alone around the ink.
+        // The lines' baselines are 19.575 and 21.255 (the block of 1.17
+        // and one interline of 1.68 centred on 20); the first line's
+        // three cells start at 8.845, its I's ink 0.07 in from that.
+        let margin = 1.0 / 9.0;
+        let outer = knockout_box(&text);
+        assert_point(outer[0], 8.845 + 0.07 - margin, 19.575 - 0.896 - margin);
+        assert_point(outer[2], 11.155 - 0.07 + margin, 21.255 + margin);
+        // No cell reaches outside the box: the cells are cropped to it.
+        // The first line's cells lose their tops, the second line's their
+        // bottoms, and each samples the same part of its glyph.
+        for cell in &text.cells {
+            for corner in cell.corners {
+                assert!(
+                    corner.x >= outer[0].x - 1e-9
+                        && corner.x <= outer[2].x + 1e-9
+                        && corner.y >= outer[0].y - 1e-9
+                        && corner.y <= outer[2].y + 1e-9,
+                    "{cell:?} reaches outside {outer:?}"
+                );
+            }
+        }
+        let first = cell(&text, 0);
+        assert!(close(first.corners[0].y, outer[0].y), "{first:?}");
+        assert!(close(first.crop.min.y, 0.1 - margin / 1.4), "{first:?}");
+        assert!(close(first.crop.max.y, 1.0) && close(first.crop.min.x, 0.0));
+        let last = cell(&text, 3);
+        assert!(close(last.corners[3].y, outer[2].y), "{last:?}");
+        assert!(close(last.crop.max.y, 0.74 + margin / 1.4), "{last:?}");
         // The cells and the strips tile the box: their areas sum to it,
         // and no strip overlaps a cell.
+        let cells = text.cells.iter().map(|cell| cell.corners);
+        let box_area = area(&outer);
         let tiled: f64 = cells.clone().map(|c| area(&c)).sum::<f64>()
             + text.strips.iter().map(area).sum::<f64>();
-        assert!(
-            close(tiled, outer.width() * outer.height()),
-            "{tiled} vs {}",
-            outer.width() * outer.height()
-        );
+        assert!(close(tiled, box_area), "{tiled} vs {box_area}");
+        assert!(close(
+            bounds_of(cells.clone().chain(text.strips.iter().copied())).width(),
+            outer[1].x - outer[0].x
+        ));
         for strip in &text.strips {
             for cell in cells.clone() {
                 let overlap_x = strip[1].x.min(cell[1].x) - strip[0].x.max(cell[0].x);
@@ -623,5 +876,163 @@ mod tests {
         assert!(text.strips.iter().any(|s| {
             s[0].x < space_x && s[1].x > space_x && s[0].y < space_y && s[3].y > space_y
         }));
+    }
+
+    #[test_case("I"; "no spaces")]
+    #[test_case(" I"; "a leading space")]
+    #[test_case("I \t"; "a trailing space and tab")]
+    #[test_case("  \nI"; "a line of spaces alone above")]
+    #[test_case("I\n   "; "a line of spaces alone below")]
+    fn spaces_at_the_ends_of_a_knockout_line_do_not_widen_its_box(text: &str) {
+        let laid = layout(
+            text,
+            &placement(Justify::default(), 0.0),
+            CONSOLAS,
+            monospace,
+            capital,
+            true,
+        );
+        // The I's ink, 0.45 em by 0.64 em, and the margin around it.
+        let outer = knockout_box(&laid);
+        let margin = 2.0 / 9.0;
+        let (width, height) = (outer[1].x - outer[0].x, outer[3].y - outer[0].y);
+        assert!(close(width, 0.45 * 1.4 + margin), "{width}");
+        assert!(close(height, 0.64 * 1.4 + margin), "{height}");
+        let tiled: f64 = laid
+            .cells
+            .iter()
+            .map(|cell| area(&cell.corners))
+            .sum::<f64>()
+            + laid.strips.iter().map(area).sum::<f64>();
+        assert!(close(tiled, width * height), "{tiled}");
+    }
+
+    #[test_case("   "; "spaces alone")]
+    #[test_case("I"; "a glyph without ink")]
+    fn a_knockout_without_ink_has_no_box(text: &str) {
+        let laid = layout(
+            text,
+            &placement(Justify::default(), 0.0),
+            CONSOLAS,
+            monospace,
+            |_| Ink::default(),
+            true,
+        );
+        assert_eq!(laid, OutlineText::default());
+    }
+
+    #[test]
+    fn a_plain_texts_cells_are_whole() {
+        let laid = layout(
+            "I",
+            &placement(Justify::default(), 0.0),
+            CONSOLAS,
+            monospace,
+            capital,
+            false,
+        );
+        assert_eq!(cell(&laid, 0).crop, WHOLE);
+        assert_eq!(laid.knockout_box, None);
+    }
+
+    const BOARD_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../viewer-drop/board/midi8knob.kicad_pcb"
+    );
+
+    /// The points of each `render_cache` polygon of the footprint
+    /// reference `reference` in the hand-off board's source.
+    fn render_cache(source: &str, reference: &str) -> Vec<Vec<Point>> {
+        let root = crate::sexpr::read(source).expect("reads");
+        let property = root
+            .children("footprint")
+            .flat_map(|footprint| footprint.children("property"))
+            .find(|property| {
+                property.atom_opt(0) == Some("Reference") && property.atom_opt(1) == Some(reference)
+            })
+            .unwrap_or_else(|| panic!("no reference {reference}"));
+        property
+            .require("render_cache")
+            .expect("a render cache")
+            .children("polygon")
+            .map(|polygon| {
+                polygon
+                    .require("pts")
+                    .expect("points")
+                    .children("xy")
+                    .map(|xy| Point {
+                        x: xy.number(0).expect("x"),
+                        y: xy.number(1).expect("y"),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_turned_knockouts_box_is_where_kicads_plot_draws_it() {
+        // C7 on the hand-off board: Consolas, size 1, pen 0.15, centred,
+        // turned 45 degrees, and the one turned knockout whose plotted
+        // box touches no other silkscreen.
+        let source = std::fs::read_to_string(BOARD_PATH).expect("the hand-off board");
+        let board = crate::parse_board(&source).expect("parses");
+        let silk = board.layer_named("F.SilkS").expect("a silkscreen");
+        let (content, placement, _) = super::super::placed_texts(&board, silk)
+            .find(|(content, _, text)| content == "C7" && text.knockout)
+            .expect("C7's reference");
+        assert!(close(placement.angle, 45.0), "{placement:?}");
+        // Each glyph's ink is its render_cache polygon, turned back into
+        // the text's frame, from its pen position on the baseline: two
+        // cells of ADVANCE em centred on the anchor, the baseline 0.415
+        // below it. The layout puts each ink back where its polygon was,
+        // so the advance used here cancels out.
+        let polygons = render_cache(&source, "C7");
+        assert_eq!(polygons.len(), 2, "one polygon per glyph");
+        let unturn = Transform::new(Point::default(), -placement.angle);
+        let em = EM_PER_HEIGHT;
+        let baseline = 1.0 - 1.17 / 2.0;
+        let inks: Vec<Ink> = [-1.0, 0.0]
+            .into_iter()
+            .zip(&polygons)
+            .map(|(cells_from_anchor, polygon)| {
+                let local = Bounds::around(polygon.iter().map(|p| {
+                    unturn.rotate(Point {
+                        x: p.x - placement.position.x,
+                        y: p.y - placement.position.y,
+                    })
+                }))
+                .expect("points");
+                let pen = cells_from_anchor * ADVANCE * em;
+                Ink {
+                    left: (pen - local.min.x) / em,
+                    right: (local.max.x - pen) / em,
+                    ascent: (baseline - local.min.y) / em,
+                    descent: (local.max.y - baseline) / em,
+                }
+            })
+            .collect();
+        let ink = |c: char| match c {
+            'C' => inks.first().copied().unwrap_or_default(),
+            '7' => inks.get(1).copied().unwrap_or_default(),
+            _ => Ink::default(),
+        };
+        let laid = layout(&content, &placement, CONSOLAS, monospace, ink, true);
+        // KiCad's plot viewer-drop/exports/midi8knob-F_Silkscreen.svg
+        // draws the box with these corners, 50 mm short of the board's
+        // in both axes and rounded to 0.1 um: the text's top left, top
+        // right, bottom right and bottom left.
+        let plotted = [
+            (49.4237, 26.0044),
+            (50.5637, 24.8645),
+            (51.3674, 25.6682),
+            (50.2275, 26.8081),
+        ];
+        let outer = knockout_box(&laid);
+        for (corner, (x, y)) in outer.iter().zip(plotted) {
+            assert!(
+                (corner.x - 50.0 - x).abs() <= 0.5e-4 && (corner.y - 50.0 - y).abs() <= 0.5e-4,
+                "{outer:?} is not the plot's {plotted:?}"
+            );
+        }
     }
 }

@@ -6,7 +6,7 @@
 //! size they are rasterised at for the current zoom, and the quads.
 //!
 //! The split with the page: the page measures each character's advance
-//! and the face's ascent and descent with `measureText`, this module
+//! and ink and the face's ascent and descent with `measureText`, this module
 //! plans the atlas ([`plan`]), the page draws every glyph into its
 //! planned rectangle and hands back the alpha channel, and [`Quads::add`]
 //! places the cells `kicad_core::font::outline` laid out on the board
@@ -360,11 +360,12 @@ pub struct Quads {
 }
 
 impl Quads {
-    /// Append `text`'s cells, each sampling its character's glyph of
-    /// `glyphs`, and its knockout strips, sampling the empty corner texel
-    /// with the coverage inverted; `knockout` inverts the cells too.
-    /// Positions are made relative to `origin`. A character the atlas
-    /// lacks is skipped.
+    /// Append `text`'s cells, each sampling the part of its character's
+    /// glyph of `glyphs` its crop names (a knockout's cell is cropped to
+    /// the knockout box, so the inverted coverage never fills past it),
+    /// and its knockout strips, sampling the empty corner texel with the
+    /// coverage inverted; `knockout` inverts the cells too. Positions are
+    /// made relative to `origin`. A character the atlas lacks is skipped.
     pub fn add(
         &mut self,
         text: &OutlineText,
@@ -379,11 +380,11 @@ impl Quads {
             let Some(sample) = glyphs.by_char.get(&cell.c) else {
                 continue;
             };
-            let (x0, y0) = (sample.x / width, sample.y / height);
-            let (x1, y1) = (
-                (sample.x + sample.width) / width,
-                (sample.y + sample.height) / height,
-            );
+            let crop = cell.crop;
+            let u = |fraction: f64| (sample.x + fraction * sample.width) / width;
+            let v = |fraction: f64| (sample.y + fraction * sample.height) / height;
+            let (x0, y0) = (u(crop.min.x), v(crop.min.y));
+            let (x1, y1) = (u(crop.max.x), v(crop.max.y));
             self.quad(
                 cell.corners,
                 [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
@@ -438,7 +439,8 @@ fn to_f32(value: f64) -> f32 {
 #[cfg(test)]
 mod tests {
     use kicad_core::font::Placement;
-    use kicad_core::font::outline::{Cell, FaceMetrics, layout};
+    use kicad_core::font::outline::{Cell, FaceMetrics, Ink, layout};
+    use kicad_core::geometry::Bounds;
     use kicad_core::model::{Justify, Size};
     use kiewer_assert::assert_is_empty;
     use test_case::test_case;
@@ -628,6 +630,16 @@ mod tests {
         descent: 0.25,
     };
 
+    /// Ink that fills the whole of a cell 0.5 em wide in [`METRICS`].
+    fn whole_cell(_: char) -> Ink {
+        Ink {
+            left: 0.0,
+            right: 0.5,
+            ascent: 0.75,
+            descent: 0.25,
+        }
+    }
+
     /// Two glyphs 0.5 em wide in a 256 texel atlas at 64 px per em: cells
     /// of 32 by 64 at (1, 1) and (34, 1).
     fn glyphs() -> Glyphs {
@@ -658,7 +670,14 @@ mod tests {
 
     #[test]
     fn a_knockouts_quads_sample_each_cell_inverted_and_strips_the_empty_corner() {
-        let text = layout("A B", &placement_at_anchor(), METRICS, |_| 0.5, true);
+        let text = layout(
+            "A B",
+            &placement_at_anchor(),
+            METRICS,
+            |_| 0.5,
+            whole_cell,
+            true,
+        );
         let mut quads = Quads::default();
         let color = [0.5, 0.6, 0.7, 1.0];
         quads.add(&text, &glyphs(), Point { x: 10.0, y: 20.0 }, color, true);
@@ -685,8 +704,45 @@ mod tests {
     }
 
     #[test]
+    fn a_knockouts_cell_cropped_to_its_box_samples_the_same_part_of_its_glyph() {
+        // The ink stands 0.25 em above the baseline and nothing below it,
+        // 0.05 em in from either side of the cell: the box reaches a ninth
+        // of a millimetre past it, so the cell is cropped above and below
+        // and its quad samples only those rows of the glyph's rectangle.
+        let ink = |_| Ink {
+            left: -0.05,
+            right: 0.45,
+            ascent: 0.25,
+            descent: 0.0,
+        };
+        let text = layout("A", &placement_at_anchor(), METRICS, |_| 0.5, ink, true);
+        let mut quads = Quads::default();
+        quads.add(&text, &glyphs(), Point::default(), [1.0; 4], true);
+        let top_left = quads.vertices.first().expect("a vertex");
+        let bottom_right = quads.vertices.get(2).expect("a vertex");
+        // The cell is 1.4 mm tall, its baseline 0.75 of it down; the box
+        // runs from a ninth above the ink's 0.35 mm to a ninth below the
+        // baseline.
+        let margin = 1.0 / 9.0 / 1.4;
+        let (top, bottom) = (0.5 - margin, 0.75 + margin);
+        assert!((f64::from(top_left.uv[1]) - (1.0 + top * 64.0) / 256.0).abs() < 1e-6);
+        assert!((f64::from(bottom_right.uv[1]) - (1.0 + bottom * 64.0) / 256.0).abs() < 1e-6);
+        // Across, the margin reaches past what the ink leaves of the cell,
+        // so the whole width is kept.
+        assert!((top_left.uv[0] - 1.0 / 256.0).abs() < 1e-6);
+        assert!((bottom_right.uv[0] - 33.0 / 256.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn a_plain_texts_quads_are_its_cells_upright() {
-        let plain = layout("A", &placement_at_anchor(), METRICS, |_| 0.5, false);
+        let plain = layout(
+            "A",
+            &placement_at_anchor(),
+            METRICS,
+            |_| 0.5,
+            whole_cell,
+            false,
+        );
         let mut quads = Quads::default();
         quads.add(&plain, &glyphs(), Point::default(), [1.0; 4], false);
         assert_eq!(quads.vertices.len(), 4);
@@ -699,8 +755,13 @@ mod tests {
             cells: vec![Cell {
                 c: 'Z',
                 corners: [Point::default(); 4],
+                crop: Bounds {
+                    min: Point { x: 0.0, y: 0.0 },
+                    max: Point { x: 1.0, y: 1.0 },
+                },
             }],
             strips: Vec::new(),
+            knockout_box: None,
         };
         let mut quads = Quads::default();
         quads.add(&missing, &glyphs(), Point::default(), [1.0; 4], false);
