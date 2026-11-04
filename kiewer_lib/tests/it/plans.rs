@@ -128,25 +128,27 @@ fn postgres_type(sqlx_name: &str) -> String {
     }
 }
 
+/// `items` as a parenthesised list, or nothing when there are none.
+fn parenthesised(items: &[impl AsRef<str>]) -> String {
+    if items.is_empty() {
+        String::new()
+    } else {
+        let items: Vec<&str> = items.iter().map(AsRef::as_ref).collect();
+        format!("({})", items.join(", "))
+    }
+}
+
 /// The generic plan of `query`, whose parameters have `types`, as
 /// `EXPLAIN (FORMAT JSON)` writes it. A NULL of each type stands in for
 /// the parameters, and the generic plan is forced: a custom plan would
 /// fold `id = NULL` to false and plan no scan at all.
 async fn plan(db: &mut PgConnection, query: &str, types: &[String]) -> Value {
-    let declared = if types.is_empty() {
-        String::new()
-    } else {
-        format!("({})", types.join(", "))
-    };
+    let declared = parenthesised(types);
     sqlx::raw_sql(&format!("PREPARE planned{declared} AS {query}"))
         .execute(&mut *db)
         .await
         .unwrap_or_else(|error| panic!("preparing {query}: {error}"));
-    let nulls = if types.is_empty() {
-        String::new()
-    } else {
-        format!("({})", vec!["NULL"; types.len()].join(", "))
-    };
+    let nulls = parenthesised(&vec!["NULL"; types.len()]);
     // Not kept prepared: the statement it executes is a new one each time.
     let row = sqlx::query(&format!("EXPLAIN (FORMAT JSON) EXECUTE planned{nulls}"))
         .persistent(false)
@@ -182,7 +184,7 @@ fn nodes(plan: &Value) -> Vec<&Value> {
 }
 
 /// The growing tables a plan reads by a Seq Scan.
-fn scanned(plan: &Value) -> Vec<String> {
+fn seq_scanned(plan: &Value) -> Vec<String> {
     nodes(plan)
         .into_iter()
         .filter(|node| node["Node Type"] == "Seq Scan")
@@ -192,19 +194,25 @@ fn scanned(plan: &Value) -> Vec<String> {
         .collect()
 }
 
-/// The tables a plan deletes from or updates, each with whether it
-/// deletes.
-fn modified(plan: &Value) -> Vec<(String, bool)> {
+/// How a statement changes a table whose rows a foreign key references.
+#[derive(Clone, Copy)]
+enum Change {
+    Delete,
+    Update,
+}
+
+/// The tables a plan deletes from or updates, each with how.
+fn modified(plan: &Value) -> Vec<(String, Change)> {
     nodes(plan)
         .into_iter()
         .filter(|node| node["Node Type"] == "ModifyTable")
         .filter_map(|node| {
-            let deletes = match node["Operation"].as_str() {
-                Some("Delete") => true,
-                Some("Update") => false,
+            let change = match node["Operation"].as_str() {
+                Some("Delete") => Change::Delete,
+                Some("Update") => Change::Update,
                 _ => return None,
             };
-            Some((node["Relation Name"].as_str()?.to_owned(), deletes))
+            Some((node["Relation Name"].as_str()?.to_owned(), change))
         })
         .collect()
 }
@@ -213,7 +221,7 @@ fn modified(plan: &Value) -> Vec<(String, bool)> {
 /// for the referencing rows when a referenced row goes or changes.
 struct Reference {
     name: String,
-    table: String,
+    referencing: String,
     cascades: bool,
     lookup: String,
     types: Vec<String>,
@@ -242,7 +250,7 @@ async fn references(db: &mut PgConnection, table: &str) -> Vec<Reference> {
     .iter()
     .map(|row| Reference {
         name: row.get("name"),
-        table: row.get("referencing"),
+        referencing: row.get("referencing"),
         cascades: row.get("cascades"),
         lookup: row.get("lookup"),
         types: row.get("types"),
@@ -267,31 +275,32 @@ async fn scans_of(db: &mut PgConnection, statement: &Statement) -> Vec<Scan> {
         .map(|name| postgres_type(name))
         .collect();
     let planned = plan(db, &statement.query, &types).await;
-    let mut found: Vec<Scan> = scanned(&planned)
+    let mut found: Vec<Scan> = seq_scanned(&planned)
         .into_iter()
         .map(|table| Scan {
             table,
             through: None,
         })
         .collect();
-    // The lookups of the foreign keys, through every cascade.
+    // The lookups of the foreign keys, through every cascade. A
+    // constraint's name is unique only within its table.
     let mut seen = HashSet::new();
     let mut pending = modified(&planned);
-    while let Some((table, deletes)) = pending.pop() {
+    while let Some((table, change)) = pending.pop() {
         for reference in references(db, &table).await {
-            if !seen.insert(reference.name.clone()) {
+            if !seen.insert((reference.referencing.clone(), reference.name.clone())) {
                 continue;
             }
             let lookup = plan(db, &reference.lookup, &reference.types).await;
-            found.extend(scanned(&lookup).into_iter().map(|scanned| Scan {
+            found.extend(seq_scanned(&lookup).into_iter().map(|scanned| Scan {
                 table: scanned,
                 through: Some(format!(
                     "{} ({}) as {table} changes",
-                    reference.name, reference.table
+                    reference.name, reference.referencing
                 )),
             }));
-            if deletes && reference.cascades {
-                pending.push((reference.table, true));
+            if matches!(change, Change::Delete) && reference.cascades {
+                pending.push((reference.referencing, Change::Delete));
             }
         }
     }
@@ -319,8 +328,10 @@ impl fmt::Debug for Report {
 
 /// Every Seq Scan of a growing table that a statement of `.sqlx/` makes
 /// and [`WHOLE_READS`] does not allow, and every allowance that matches
-/// no scan.
-async fn scans(db: &mut PgConnection) -> Report {
+/// no scan. One test over every statement, not a `#[test_case]` each: the
+/// statements are found at run time, and a stale allowance shows only
+/// against the whole set.
+async fn check(db: &mut PgConnection) -> Report {
     sqlx::raw_sql("SET LOCAL enable_seqscan = off; SET LOCAL plan_cache_mode = force_generic_plan")
         .execute(&mut *db)
         .await
@@ -361,7 +372,7 @@ async fn no_statement_reads_a_growing_table_whole() {
         return;
     };
     let mut tx = db.begin().await.expect("a transaction");
-    assert_is_empty!(scans(&mut tx).await);
+    assert_is_empty!(check(&mut tx).await);
 }
 
 /// The check fails when an index goes: without the one behind
@@ -378,7 +389,7 @@ async fn a_missing_index_names_the_statement() {
         .execute(&mut *tx)
         .await
         .expect("dropped, until the rollback");
-    let report = scans(&mut tx).await;
+    let report = check(&mut tx).await;
     assert!(
         report.0.iter().any(|line| {
             line.contains("a Seq Scan on revision through revision_author_id_fkey")

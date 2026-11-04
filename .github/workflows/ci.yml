@@ -97,8 +97,9 @@ jobs:
     # DATABASE_URL below is .env.example's. The tests gated on DATABASE_URL
     # (kiewer_lib/tests/it/db.rs) run here; scripts/checks.sh test fails
     # without it and refuses its opt-out on CI (#68).
-    # POSTGRES_USER is the image's superuser, so the collector's tests may
-    # create the database of their own, kiewer_collector (#107).
+    # POSTGRES_USER is the image's superuser, so the test modules with a
+    # database of their own (kiewer_collector, kiewer_plans) may create
+    # it (#107).
     services:
       postgres:
         image: postgres:16

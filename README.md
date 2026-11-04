@@ -53,10 +53,11 @@ line names them before the stages and again after the last. CI refuses
 the opt-out. The hook reads the variable from the shell that runs
 `git commit`, never from `.env`: each worktree needs a database of its
 own, since on a shared one sqlx refuses a worktree that lacks a
-migration another applied (`VersionMissing`). The collector's tests
-create and use a database of their own beside it, the URL's name plus
-`_collector`, so the role needs CREATEDB (compose's and CI's `kiewer` is
-the image's superuser). The schema is `migrations/` (its README has the
+migration another applied (`VersionMissing`). Some test modules create
+and use a database of their own beside it, the URL's name plus a suffix
+(`kiewer_test_support::db::pool_of_its_own`: `_collector`, `_plans`), so
+the role needs CREATEDB (compose's and CI's `kiewer` is the image's
+superuser). The schema is `migrations/` (its README has the
 naming rule).
 
 Every statement in `kiewer_lib` is a `sqlx::query!`, `query_as!` or
