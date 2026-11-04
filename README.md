@@ -42,8 +42,10 @@ after the requests in flight.
 The tests that need Postgres (`kiewer_lib/tests/it/db.rs`, `accounts.rs`,
 `sign_in.rs`) run when `DATABASE_URL` is exported and skip when it is not,
 in the hook as in a shell; CI sets it against a service container that
-matches `compose.yaml`. The schema is `migrations/` (its README has the
-naming rule).
+matches `compose.yaml`. The collector's tests create and use a database of
+their own beside it, the URL's name plus `_collector`, so the role needs
+CREATEDB (compose's and CI's `kiewer` is the image's superuser). The
+schema is `migrations/` (its README has the naming rule).
 
 Sign-in needs an OAuth app of your own at each provider you want, one per
 environment (docs/v1-scope.md, Q57). The callback URL to register is

@@ -383,7 +383,9 @@ async fn an_upload_nobody_decides_on_expires_and_the_expiry_leaves_the_rest() {
     .unwrap();
     assert!(late.is_none(), "too late to decide");
 
-    assert!(pending::expire(&db).await.unwrap() >= 1);
+    // The sweep takes every lapsed row in the shared database, so its
+    // count says nothing of this test's; the rows below do (#107).
+    pending::expire(&db).await.unwrap();
     let rows: Vec<pending::PendingId> =
         sqlx::query_scalar("SELECT id FROM pending_revision WHERE id = ANY($1)")
             .bind([lapsed, live])

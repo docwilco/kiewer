@@ -4,9 +4,11 @@
 //! next one finds, and a concurrent upload of the same bytes survives.
 //! After those, expired sessions and day-old accounts with no handle go
 //! (#31), each by an index range.
-//! A run acts on the whole database, so the tests here take turns, and
-//! each ages only its own rows to bring them inside what a run removes.
-//! The Postgres tests skip without `DATABASE_URL`, like `tests/it/db.rs`.
+//! A run acts on the whole database, so the tests here run on a database
+//! of their own, `DATABASE_URL`'s name plus `_collector`, which no other
+//! module writes to (#107); there they take turns, and each ages only its
+//! own rows to bring them inside what a run removes. The Postgres tests
+//! skip without `DATABASE_URL`, like `tests/it/db.rs`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -30,7 +32,7 @@ use kiewer_lib::session::{self, SessionId};
 use kiewer_lib::thumbnail::{NoTasks, TaskAuth, Thumbnails};
 use kiewer_lib::web::AppState;
 use kiewer_lib::{Error, Result, design};
-use kiewer_test_support::db::{fresh, pool_from_env};
+use kiewer_test_support::db::{fresh, pool_of_its_own};
 use kiewer_test_support::http::{self, Part};
 use kiewer_test_support::{TempDir, scratch_dir};
 use sqlx::PgPool;
@@ -247,7 +249,7 @@ async fn delete_design(browser: &mut http::Browser, handle: &Handle, slug: &str,
 #[tokio::test]
 async fn deleting_a_design_a_fork_shares_keeps_the_shared_revisions_and_removes_the_rest() {
     let _turn = TURN.lock().await;
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let (addr, blobs, _dir) = server(db.clone()).await;
@@ -323,7 +325,7 @@ async fn deleting_a_design_a_fork_shares_keeps_the_shared_revisions_and_removes_
 #[tokio::test]
 async fn anything_younger_than_a_day_stays_with_the_chain_under_it() {
     let _turn = TURN.lock().await;
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let (addr, blobs, _dir) = server(db.clone()).await;
@@ -363,7 +365,7 @@ async fn anything_younger_than_a_day_stays_with_the_chain_under_it() {
 #[tokio::test]
 async fn a_second_run_finds_nothing() {
     let _turn = TURN.lock().await;
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let (addr, blobs, _dir) = server(db.clone()).await;
@@ -388,7 +390,7 @@ async fn a_second_run_finds_nothing() {
 #[tokio::test]
 async fn an_expired_session_goes_though_its_account_never_signs_in_again() {
     let _turn = TURN.lock().await;
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let dir = scratch_dir!();
@@ -413,7 +415,7 @@ async fn an_expired_session_goes_though_its_account_never_signs_in_again() {
 #[tokio::test]
 async fn a_sign_up_with_no_handle_goes_after_a_day_with_its_identities() {
     let _turn = TURN.lock().await;
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let dir = scratch_dir!();
@@ -453,7 +455,7 @@ async fn a_sign_up_with_no_handle_goes_after_a_day_with_its_identities() {
 #[test_case(collector::OLD_SIGN_UPS, Some(collector::GRACE_HOURS), "account_handle_key" ; "old sign-ups")]
 #[tokio::test]
 async fn a_sweep_reads_its_index(statement: &str, grace: Option<i32>, index: &str) {
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let mut tx = db.begin().await.expect("a transaction");
@@ -484,7 +486,7 @@ fn entry(path: &str, content: &[u8]) -> TreeEntry {
 #[tokio::test]
 async fn a_blob_a_thumbnail_names_stays_until_the_revision_goes() {
     let _turn = TURN.lock().await;
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let (addr, blobs, _dir) = server(db.clone()).await;
@@ -552,7 +554,7 @@ async fn old_tree(db: &PgPool, blobs: &dyn BlobStore) -> (Vec<u8>, BlobHash) {
 #[tokio::test]
 async fn a_pending_revision_keeps_its_tree_and_blobs_until_its_hour_is_up() {
     let _turn = TURN.lock().await;
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let (addr, blobs, _dir) = server(db.clone()).await;
@@ -657,7 +659,7 @@ async fn orphan(db: &PgPool, blobs: &dyn BlobStore, bytes: &[u8]) -> BlobHash {
 #[tokio::test]
 async fn a_failed_delete_leaves_the_object_for_the_next_run() {
     let _turn = TURN.lock().await;
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let (_addr, blobs, _dir) = server(db.clone()).await;
@@ -681,7 +683,7 @@ async fn a_failed_delete_leaves_the_object_for_the_next_run() {
 #[tokio::test]
 async fn an_upload_of_the_same_bytes_before_the_run_keeps_the_blob() {
     let _turn = TURN.lock().await;
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let (_addr, blobs, _dir) = server(db.clone()).await;
@@ -699,7 +701,7 @@ async fn an_upload_of_the_same_bytes_before_the_run_keeps_the_blob() {
 #[tokio::test]
 async fn an_upload_after_the_row_went_takes_the_removal_back() {
     let _turn = TURN.lock().await;
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let (_addr, blobs, _dir) = server(db.clone()).await;
@@ -727,7 +729,7 @@ async fn an_upload_after_the_row_went_takes_the_removal_back() {
 #[tokio::test]
 async fn an_upload_of_bytes_being_deleted_waits_and_writes_them_again() {
     let _turn = TURN.lock().await;
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let (_addr, blobs, _dir) = server(db.clone()).await;
@@ -775,7 +777,7 @@ async fn an_upload_of_bytes_being_deleted_waits_and_writes_them_again() {
 #[tokio::test]
 async fn a_tree_an_upload_names_again_is_left_alone() {
     let _turn = TURN.lock().await;
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let (_addr, blobs, _dir) = server(db.clone()).await;
@@ -852,7 +854,7 @@ fn state_behind(db: PgPool, blobs: Arc<dyn BlobStore>, auth: TaskAuth) -> AppSta
 #[tokio::test]
 async fn the_route_runs_for_the_tasks_token_and_refuses_anyone_else() {
     let _turn = TURN.lock().await;
-    let Some(db) = pool_from_env().await else {
+    let Some(db) = pool_of_its_own("collector").await else {
         return;
     };
     let dir = scratch_dir!();
