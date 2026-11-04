@@ -392,15 +392,18 @@ impl Session {
         let answered = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&answered);
         let page = self.page.clone();
-        // Ends with the browser, when the event stream does.
+        // Ends with the browser, when the event stream does. A request it
+        // fails to answer stays paused, so the failure is said here.
         tokio::spawn(async move {
             while let Some(event) = paused.next().await {
-                if page
+                match page
                     .execute(FulfillRequestParams::new(event.request_id.clone(), 404))
                     .await
-                    .is_ok()
                 {
-                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(_) => {
+                        count.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(error) => eprintln!("answering {} with a 404: {error}", event.request.url),
                 }
             }
         });
@@ -725,15 +728,13 @@ async fn a_viewer_script_that_answers_404_shows_and_sends_its_beacon(viewed: Vie
         .await;
     tokio::time::sleep(SETTLE).await;
     let shown = session.shown().await;
+    let answered = answered.load(Ordering::SeqCst);
     assert!(
         failed,
-        "no error within {DEADLINE:?}; the page shows {shown:?}"
+        "no error within {DEADLINE:?}; the page shows {shown:?}, {answered} requests answered 404"
     );
 
-    assert!(
-        answered.load(Ordering::SeqCst) > 0,
-        "the browser answered {script} with a 404"
-    );
+    assert!(answered > 0, "the browser answered {script} with a 404");
     let error = shown.error.expect("the error box shows");
     assert!(
         error.starts_with("import: ") && error.contains(&script),

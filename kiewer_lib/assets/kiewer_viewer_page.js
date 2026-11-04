@@ -97,13 +97,18 @@ export function fail(message) {
 // stops this whole module before any of it runs, and the page stays
 // blank with no beacon. A failure is thrown on as `import: <message>`,
 // so the error box and the failed beacon say what broke. The panic hook
-// above is set before this runs, as before.
+// above is set before this runs.
 async function importViewer() {
   try {
     return await import("./kiewer_viewer.js");
   } catch (e) {
-    throw new Error("import: " + (e && e.message ? e.message : e));
+    throw new Error("import: " + messageOf(e));
   }
+}
+
+// What a caught `e` says: an Error's message, or the value itself.
+function messageOf(e) {
+  return e && e.message ? e.message : e;
 }
 
 // Device pixels for the pointer event `e` over `canvas`: its offset from
@@ -298,7 +303,7 @@ export async function start(canvas, load) {
     await load(viewer, schedule);
     schedule();
   } catch (e) {
-    fail(e && e.message ? e.message : e);
+    fail(messageOf(e));
   }
 
   // A panic sent its own beacon when it happened.
