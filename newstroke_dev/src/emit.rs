@@ -6,7 +6,9 @@ use crate::compose::Table;
 use crate::error::{Error, Result};
 
 /// The code point the file's first line is: the space, where KiCad's
-/// stroke font starts its table and where `kicad_core::font` counts from.
+/// stroke font starts its table and where `kicad_core::font` counts from
+/// (its own `FIRST`; the converter does not depend on `kicad_core`, so
+/// the two are kept equal by hand).
 const FIRST: u32 = 0x20;
 
 /// The text of the glyph table file: each glyph on a line of its own, in

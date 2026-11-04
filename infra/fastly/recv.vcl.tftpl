@@ -43,7 +43,7 @@ set req.http.X-Forwarded-Host = req.http.host;
 # cache. A `br;q=0` does not match, and those paths alone change (the
 # scripts, the wasm and the Newstroke glyph table), so a page keeps
 # Fastly's own handling.
-if (req.url.path ~ "^/viewer/kiewer_viewer[^/]*\.[0-9a-f]{16}\.(js|wasm|txt)$" &&req.http.Fastly-Orig-Accept-Encoding ~ "(^|[ ,])br *(,|$)") {
+if (req.url.path ~ "^/viewer/kiewer_viewer[^/]*\.[0-9a-f]{16}\.(js|wasm|txt)$" && req.http.Fastly-Orig-Accept-Encoding ~ "(^|[ ,])br *(,|$)") {
   set req.http.Accept-Encoding = "br";
 }
 

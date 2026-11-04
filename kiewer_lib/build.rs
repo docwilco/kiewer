@@ -101,11 +101,10 @@ fn main() {
     let page_script = manifest.join("assets").join("kiewer_viewer_page.js");
     println!("cargo::rerun-if-changed={}", page_script.display());
     let page_text = fs::read_to_string(&page_script).expect("the page script is UTF-8");
-    let page_mentions = page_text.matches(PAGE_SCRIPT_IMPORT).count();
-    assert_eq!(
-        page_mentions, 1,
-        "the page script imports the viewer's script once, by {PAGE_SCRIPT_IMPORT}; this one \
-         names it {page_mentions} times, so the rewrite to the hashed name needs a look"
+    named_once(
+        &page_text,
+        PAGE_SCRIPT_IMPORT,
+        "the page script imports the viewer's script",
     );
     let page_text = if script.is_file() && wasm.is_file() {
         println!("cargo::rustc-cfg=kiewer_viewer_embedded");
@@ -114,11 +113,10 @@ fn main() {
         let wasm_bytes = fs::read(&wasm).expect("the wasm is readable");
         let wasm_name = hashed_name("kiewer_viewer_bg", &wasm_bytes, "wasm");
         let script_text = fs::read_to_string(&script).expect("the script is UTF-8");
-        let mentions = script_text.matches("kiewer_viewer_bg.wasm").count();
-        assert_eq!(
-            mentions, 1,
-            "the script names the wasm once, where it fetches it; this one names it {mentions} \
-             times, so the rewrite to the hashed name needs a look"
+        named_once(
+            &script_text,
+            "kiewer_viewer_bg.wasm",
+            "the script fetches the wasm",
         );
         let script_text = script_text.replace("kiewer_viewer_bg.wasm", &wasm_name);
         let script_name = hashed_name("kiewer_viewer", script_text.as_bytes(), "js");
@@ -163,15 +161,27 @@ fn main() {
         &newstroke_name,
         &newstroke_bytes,
     );
-    let table_mentions = page_text.matches(PAGE_SCRIPT_NEWSTROKE).count();
-    assert_eq!(
-        table_mentions, 1,
-        "the page script fetches the glyph table once, by {PAGE_SCRIPT_NEWSTROKE}; this one \
-         names it {table_mentions} times, so the rewrite to the hashed name needs a look"
+    named_once(
+        &page_text,
+        PAGE_SCRIPT_NEWSTROKE,
+        "the page script fetches the glyph table",
     );
     let page_text = page_text.replace(PAGE_SCRIPT_NEWSTROKE, &format!("\"./{newstroke_name}\""));
     let page_name = hashed_name("kiewer_viewer_page", page_text.as_bytes(), "js");
     emit("KIEWER_VIEWER_PAGE", &out, &page_name, page_text.as_bytes());
+}
+
+/// Panics unless `text` names `name` exactly once, at the place where it
+/// `does` what the message says (the import, the fetch), which the
+/// rewrite to the hashed name replaces. Another count means the file
+/// changed shape and the rewrite needs a look.
+fn named_once(text: &str, name: &str, does: &str) {
+    let mentions = text.matches(name).count();
+    assert_eq!(
+        mentions, 1,
+        "{does} once, by {name}; this one names it {mentions} times, so the rewrite to the \
+         hashed name needs a look"
+    );
 }
 
 /// `<stem>.<hash prefix>.<extension>` for `bytes`.

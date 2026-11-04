@@ -444,6 +444,8 @@ mod tests {
             hashed(&url, "/viewer/kiewer_viewer_newstroke.", ".txt"),
             "{url}"
         );
+        // assert! and not assert_eq!: a mismatch would print both tables,
+        // some 200 KB each.
         assert!(
             NEWSTROKE.bytes(Encoding::Identity) == kicad_core::font::NEWSTROKE.as_bytes(),
             "the served table is the one kicad_core includes"

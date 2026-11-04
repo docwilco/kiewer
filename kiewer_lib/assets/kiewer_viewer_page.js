@@ -24,10 +24,10 @@
 // before the first frame is scheduled. The outcome is the adapter's: a
 // board or sheet that fails to fetch or parse after a working adapter is
 // still "ok". A viewer script that fails to import is "failed" with
-// backend "none" and the reason `import: <message>` (importViewer), and
-// a glyph table that fails to fetch the same with `glyph table:
-// <message>` (fetchNewstroke). No
-// identifiers, no cookie: the body is the five fields below.
+// backend "none" and the reason `import: <message>` (importViewer); a
+// glyph table that fails to fetch is "failed" the same way, with the
+// reason `glyph table: <message>` (fetchNewstroke). No identifiers, no
+// cookie: the body is the five fields below.
 const BEACON_PATH = "/api/beacon";
 const MAX_REASON = 1024;
 const MAX_VENDOR = 64;

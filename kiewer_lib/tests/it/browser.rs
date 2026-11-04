@@ -13,7 +13,9 @@
 //! page; those cases need Postgres too, as does the upload form's
 //! design dropdown (#62), which reloads the form with the branches of the
 //! design picked. The glyph table's cases (#41) read the page's resource
-//! timing for its one fetch, and the beacons of a fetch that fails.
+//! timing for its one fetch, compare a screenshot against one drawn with
+//! a table of the space alone, and read the beacons of a fetch that
+//! fails.
 //!
 //! Runs when `KIEWER_BROWSER` names the browser's executable, which the
 //! browser stage of `scripts/checks.sh` sets, along with
@@ -38,6 +40,7 @@ use chromiumoxide::cdp::browser_protocol::network::{
     CookieParam, EventRequestWillBeSent, EventResponseReceived, GetRequestPostDataParams, RequestId,
 };
 use chromiumoxide::listeners::EventStream;
+use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::{Browser, BrowserConfig, Page};
 use flate2::write::DeflateEncoder;
 use flate2::{Compression, Crc};
@@ -390,6 +393,19 @@ impl Session {
     /// body, before it reaches the server. The count is how many it
     /// answered so.
     async fn answer_not_found(&self, path: &str) -> Arc<AtomicUsize> {
+        self.answer(path, 404, None).await
+    }
+
+    /// Has the browser answer every request for `path` with `status` and
+    /// `body` (base64, as the protocol carries it; `None` for none),
+    /// before it reaches the server. The count is how many it answered
+    /// so.
+    async fn answer(
+        &self,
+        path: &str,
+        status: i64,
+        body: Option<&'static str>,
+    ) -> Arc<AtomicUsize> {
         let mut paused = self
             .page
             .event_listener::<EventRequestPaused>()
@@ -414,14 +430,15 @@ impl Session {
         // fails to answer stays paused, so the failure is said here.
         tokio::spawn(async move {
             while let Some(event) = paused.next().await {
-                match page
-                    .execute(FulfillRequestParams::new(event.request_id.clone(), 404))
-                    .await
-                {
+                let mut params = FulfillRequestParams::new(event.request_id.clone(), status);
+                params.body = body.map(|body| body.to_owned().into());
+                match page.execute(params).await {
                     Ok(_) => {
                         count.fetch_add(1, Ordering::SeqCst);
                     }
-                    Err(error) => eprintln!("answering {} with a 404: {error}", event.request.url),
+                    Err(error) => {
+                        eprintln!("answering {} with a {status}: {error}", event.request.url);
+                    }
                 }
             }
         });
@@ -815,6 +832,52 @@ async fn a_page_fetches_the_glyph_table_once_and_starts(viewed: Viewed) {
     session.close().await;
 }
 
+/// A glyph table of the space alone, `JZ\n` in base64: every other
+/// character finds no line and draws nothing.
+const SPACE_ONLY_TABLE: &str = "SloK";
+
+#[test_case(Viewed::Board; "the board page")]
+#[test_case(Viewed::Schematic; "the schematic page")]
+#[tokio::test]
+async fn a_page_draws_its_text_from_the_fetched_table(viewed: Viewed) {
+    let Some(executable) = executable() else {
+        return;
+    };
+    let drawn = drawn_with(executable.clone(), viewed, None).await;
+    let space_only = drawn_with(executable, viewed, Some(SPACE_ONLY_TABLE)).await;
+    assert!(
+        drawn != space_only,
+        "the page draws the same with a table of the space alone, so its text is not the \
+         fetched table's"
+    );
+}
+
+/// `viewed`'s page as it shows once started, as a PNG, with the glyph
+/// table the server's or, when `table` names one (base64), that.
+async fn drawn_with(executable: PathBuf, viewed: Viewed, table: Option<&'static str>) -> Vec<u8> {
+    let session = Session::new(executable).await;
+    if let Some(table) = table {
+        session.answer(&newstroke_url(), 200, Some(table)).await;
+    }
+    session.viewport(1000, 700, 1).await;
+    session.goto(viewed).await;
+    let sent = session.sent_within_deadline(1).await;
+    tokio::time::sleep(SETTLE).await;
+    let shown = session.shown().await;
+    assert!(
+        sent,
+        "no beacon within {DEADLINE:?}; the page shows {shown:?}"
+    );
+    assert_eq!(shown.error, None, "the error box stays hidden");
+    let png = session
+        .page
+        .screenshot(ScreenshotParams::builder().build())
+        .await
+        .expect("a screenshot");
+    session.close().await;
+    png
+}
+
 #[test_case(Viewed::Board; "the board page")]
 #[test_case(Viewed::Schematic; "the schematic page")]
 #[tokio::test]
@@ -847,6 +910,11 @@ async fn a_glyph_table_that_answers_404_shows_and_sends_its_beacon(viewed: Viewe
     assert_eq!(
         beacons[0].reason, error,
         "the beacon carries what the box shows"
+    );
+    assert_eq!(
+        session.net_display().await,
+        "none",
+        "the net block stays hidden with no viewer (#95)"
     );
     session.close().await;
 }
