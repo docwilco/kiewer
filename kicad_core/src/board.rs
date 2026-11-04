@@ -8,7 +8,6 @@
 //! resolve.
 
 use std::collections::BTreeMap;
-use std::time::Instant;
 
 use crate::error::{Error, MIN_BOARD_VERSION, Result};
 use crate::model::{
@@ -37,16 +36,17 @@ pub fn parse_board(source: &str) -> Result<Board> {
 /// `deadline`: the reader looks at the clock every thousand or so items
 /// and the walk once per top-level element. For a caller that stops
 /// waiting at a deadline (the server's upload) and wants the parse to stop
-/// with it. Not for wasm32-unknown-unknown, where the clock panics.
+/// with it. Not built for wasm32, where the clock panics.
 ///
 /// # Errors
 /// Those of [`parse_board`], and [`Error::DeadlinePassed`].
-pub fn parse_board_before(source: &str, deadline: Instant) -> Result<Board> {
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_board_before(source: &str, deadline: std::time::Instant) -> Result<Board> {
     parse(source, Deadline::at(deadline))
 }
 
 fn parse(source: &str, deadline: Deadline) -> Result<Board> {
-    let root = sexpr::read_by(source, deadline)?;
+    let root = sexpr::read_before(source, deadline)?;
     let head = root.head()?;
     if head != "kicad_pcb" {
         return Err(root.error(format!("expected (kicad_pcb ...), found ({head} ...)")));

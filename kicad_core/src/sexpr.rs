@@ -20,7 +20,9 @@ impl Deadline {
     /// A parse that runs to the end.
     pub(crate) const NONE: Self = Self(None);
 
-    /// A parse that gives up once the clock passes `instant`.
+    /// A parse that gives up once the clock passes `instant`. Not built
+    /// for wasm32, where the clock panics.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub(crate) fn at(instant: Instant) -> Self {
         Self(Some(instant))
@@ -247,14 +249,14 @@ impl Node {
 /// The text is empty, has an unterminated string, has unbalanced
 /// parentheses, or holds anything after the one top-level list.
 pub fn read(source: &str) -> Result<Node> {
-    read_by(source, Deadline::NONE)
+    read_before(source, Deadline::NONE)
 }
 
 /// [`read`], giving up with [`Error::DeadlinePassed`] once `deadline`
 /// passes. The clock is read at the first item and once every
 /// [`CHECK_EVERY`] items after, at any depth, so a file that is one huge
 /// list stops as soon as a file of many small ones.
-pub(crate) fn read_by(source: &str, deadline: Deadline) -> Result<Node> {
+pub(crate) fn read_before(source: &str, deadline: Deadline) -> Result<Node> {
     Reader::new(source, deadline).read_document()
 }
 

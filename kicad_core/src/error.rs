@@ -52,9 +52,9 @@ pub enum Error {
         /// The `(version N)` the file carries.
         version: u32,
     },
-    /// The parse was given a deadline ([`crate::parse_board_before`],
-    /// [`crate::parse_schematic_before`]) and ran past it; it stopped there
-    /// rather than run to the end.
+    /// The parse was given a deadline (`parse_board_before`,
+    /// `parse_schematic_before`) and ran past it; it stopped there rather
+    /// than run to the end.
     #[display("the parse ran past its deadline")]
     DeadlinePassed,
 }

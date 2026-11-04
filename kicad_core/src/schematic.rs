@@ -15,7 +15,6 @@ pub mod model;
 pub mod sheet_tree;
 
 use std::collections::BTreeMap;
-use std::time::Instant;
 
 use crate::board::{at, flag, optional_number, optional_text, point, size};
 use crate::error::{Error, MIN_SCHEMATIC_VERSION, Result};
@@ -50,17 +49,18 @@ pub fn parse_schematic(source: &str) -> Result<Sheet> {
 /// after `deadline`: the reader looks at the clock every thousand or so
 /// items and the walk once per library symbol and top-level element. For
 /// a caller that stops waiting at a deadline (the server's upload) and
-/// wants the parse to stop with it. Not for wasm32-unknown-unknown, where
-/// the clock panics.
+/// wants the parse to stop with it. Not built for wasm32, where the clock
+/// panics.
 ///
 /// # Errors
 /// Those of [`parse_schematic`], and [`Error::DeadlinePassed`].
-pub fn parse_schematic_before(source: &str, deadline: Instant) -> Result<Sheet> {
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_schematic_before(source: &str, deadline: std::time::Instant) -> Result<Sheet> {
     parse(source, Deadline::at(deadline))
 }
 
 fn parse(source: &str, deadline: Deadline) -> Result<Sheet> {
-    let root = sexpr::read_by(source, deadline)?;
+    let root = sexpr::read_before(source, deadline)?;
     let head = root.head()?;
     if head != "kicad_sch" {
         return Err(root.error(format!("expected (kicad_sch ...), found ({head} ...)")));

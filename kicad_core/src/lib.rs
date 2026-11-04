@@ -10,8 +10,9 @@
 //! (groups, dimensions, 3D models, plot settings, images) are skipped; a
 //! known element with a missing or malformed field, an unknown layer name,
 //! or a format older than KiCad 9 is an [`Error`], never a panic.
-//! [`parse_board_before`] and [`parse_schematic_before`] take a deadline
-//! and stop with [`Error::DeadlinePassed`] shortly after it.
+//! Natively, `parse_board_before` and `parse_schematic_before` take a
+//! deadline and stop with [`Error::DeadlinePassed`] shortly after it; they
+//! are not built for wasm32, where the clock panics.
 
 // A parser of untrusted input: an index the input puts out of bounds must
 // fail as a parse error and never as a panic, so slicing and indexing are
@@ -29,6 +30,10 @@ pub mod schematic;
 pub mod sexpr;
 pub mod tessellate;
 
-pub use board::{parse_board, parse_board_before};
+pub use board::parse_board;
+#[cfg(not(target_arch = "wasm32"))]
+pub use board::parse_board_before;
 pub use error::{Error, MIN_BOARD_VERSION, MIN_SCHEMATIC_VERSION, Result};
-pub use schematic::{parse_schematic, parse_schematic_before};
+pub use schematic::parse_schematic;
+#[cfg(not(target_arch = "wasm32"))]
+pub use schematic::parse_schematic_before;
