@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use kiewer_test_support::{TempDir, scratch_dir};
+use test_case::test_case;
 
 const HOOKS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../.githooks");
 
@@ -61,11 +62,11 @@ impl Fixture {
         self.dir.path().join("checks-ran")
     }
 
-    /// The hook's environment holds `GIT_DIR` and `GIT_INDEX_FILE` for the
-    /// commit being checked, which must reach neither this git nor the
-    /// hook it runs.
-    fn command(&self, args: &[&str]) -> Output {
-        Command::new("git")
+    /// Git with the hook's environment left behind: `GIT_DIR` and
+    /// `GIT_INDEX_FILE` for the commit being checked must reach neither
+    /// this git nor the hook it runs. Asserts that git succeeded.
+    fn git(&self, args: &[&str]) -> Output {
+        let output = Command::new("git")
             .args(args)
             .current_dir(self.repo())
             .env_clear()
@@ -75,16 +76,13 @@ impl Fixture {
             .env("KIEWER_TEST_CHECKS_RAN", self.checks_ran())
             .env("BASH_FUNC_cargo%%", "() { [ \"$1\" != metadata ]; }")
             .output()
-            .expect("git runs")
-    }
-
-    fn git(&self, args: &[&str]) {
-        let output = self.command(args);
+            .expect("git runs");
         assert!(
             output.status.success(),
             "git {args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        output
     }
 
     /// What the stand-in checks script was asked to run, one line a run.
@@ -92,41 +90,52 @@ impl Fixture {
         fs::read_to_string(self.checks_ran()).unwrap_or_default()
     }
 
-    fn write(&self, path: &str, contents: &str) {
-        fs::write(self.repo().join(Path::new(path)), contents).expect("a file in the repository");
+    fn write(&self, path: &str) {
+        let path = self.repo().join(Path::new(path));
+        fs::create_dir_all(path.parent().expect("a path in the repository"))
+            .expect("its directory");
+        fs::write(path, "changed\n").expect("a file in the repository");
     }
+}
+
+/// Git sends a hook's output to its own stderr.
+fn hook_output(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
 #[test]
 fn an_amend_with_nothing_staged_runs_every_check() {
     let fixture = Fixture::new();
-    fixture.git(&["commit", "--quiet", "--amend", "--no-edit"]);
+    let output = fixture.git(&["commit", "--amend", "--no-edit"]);
     assert_eq!(fixture.runs(), "all\n");
-}
-
-#[test]
-fn a_commit_of_prose_alone_skips_the_checks() {
-    let fixture = Fixture::new();
-    fixture.write("README.md", "# prose\n");
-    fixture.git(&["add", "README.md"]);
-    let output = fixture.command(&["commit", "--message", "prose"]);
     assert!(
-        output.status.success(),
+        hook_output(&output).contains("==> fmt"),
         "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fixture.runs(), "");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("prose only"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        hook_output(&output)
     );
 }
 
-#[test]
-fn a_commit_of_code_runs_every_check() {
+#[test_case(&["README.md"], false ; "markdown at the root")]
+#[test_case(&["docs/notes.md"], false ; "under docs")]
+#[test_case(&["viewer-drop/board.txt"], false ; "under viewer-drop")]
+#[test_case(&["main.rs"], true ; "code")]
+#[test_case(&["README.md", "main.rs"], true ; "prose with code")]
+#[test_case(&["notes/README.md"], true ; "markdown below the root")]
+fn a_commit_runs_every_check_unless_it_is_prose_alone(paths: &[&str], checked: bool) {
     let fixture = Fixture::new();
-    fixture.write("main.rs", "fn main() { println!(); }\n");
-    fixture.git(&["commit", "--quiet", "--all", "--message", "code"]);
-    assert_eq!(fixture.runs(), "all\n");
+    for path in paths {
+        fixture.write(path);
+    }
+    fixture.git(&["add", "--all"]);
+    let output = fixture.git(&["commit", "--message", "change"]);
+    if checked {
+        assert_eq!(fixture.runs(), "all\n");
+    } else {
+        assert_eq!(fixture.runs(), "");
+        assert!(
+            hook_output(&output).contains("prose only"),
+            "{}",
+            hook_output(&output)
+        );
+    }
 }

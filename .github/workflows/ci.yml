@@ -98,6 +98,10 @@ jobs:
       #
       # scripts/browser.sh packages: the shared libraries
       # chrome-headless-shell links against, for the browser stage.
+      #
+      # Not installed here: git, rsync and flock, which the pre-commit
+      # hook's test (kiewer_lib/tests/it/pre_commit.rs) runs through the
+      # hook, come with the runner image.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers $(scripts/browser.sh packages)
       # chrome-headless-shell at the version and checksum scripts/browser.sh
       # pins, for the browser stage below, which fails here without it.
