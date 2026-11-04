@@ -68,6 +68,7 @@ What `run.tf` gives each service, the names `kiewer_lib::config` reads. Secret-b
 | `THUMBNAIL_TASK_ACCOUNT` | the runtime service account's email: the queue's tasks and the scheduler's collector job carry an OIDC token minted as it, which the server's internal routes check; without it they refuse everyone |
 | `FASTLY_SERVICE_ID` | the service to purge on |
 | `FASTLY_API_TOKEN` | secret: the token to purge with; only once given |
+| `SURROGATE_KEY_PREFIX` | kiewer-staging only, `staging-`: in front of every Surrogate-Key the server names and purges, since both environments share the Fastly service and a purge by key acts on all of it |
 | `OAUTH_<GITHUB,DISCORD,GOOGLE>_CLIENT_ID` | the registration's client id; only once registered |
 | `OAUTH_<GITHUB,DISCORD,GOOGLE>_CLIENT_SECRET` | secret: the registration's client secret; only once registered |
 

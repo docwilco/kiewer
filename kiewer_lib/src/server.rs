@@ -60,15 +60,19 @@ fn thumbnails(config: &Config) -> Result<Thumbnails> {
 
 /// The purge client the configuration names: Fastly with the pair, else
 /// none, which the log says once at startup so a deployment without its
-/// token is seen.
+/// token is seen. Fastly purges with the key prefix the pages' headers
+/// carry ([`run`] gives the state the same one).
 ///
 /// # Errors
 ///
 /// When the HTTP client cannot be built.
 fn purge(config: &Config) -> Result<Arc<dyn Purge>> {
     Ok(if let Some(fastly) = &config.fastly {
-        tracing::info!(service_id = %fastly.service_id, "purging on Fastly");
-        Arc::new(Fastly::new(&fastly.service_id, &fastly.api_token)?)
+        let prefix = &config.surrogate_key_prefix;
+        tracing::info!(service_id = %fastly.service_id, ?prefix, "purging on Fastly");
+        Arc::new(
+            Fastly::new(&fastly.service_id, &fastly.api_token)?.with_key_prefix(prefix.clone()),
+        )
     } else {
         tracing::info!("no edge to purge: FASTLY_SERVICE_ID and FASTLY_API_TOKEN are not both set");
         Arc::new(NoPurge)
@@ -92,7 +96,8 @@ pub async fn run(config: Config) -> Result<()> {
         Arc::new(auth(&config)?),
         Arc::new(thumbnails(&config)?),
         purge(&config)?,
-    );
+    )
+    .with_key_prefix(config.surrogate_key_prefix.clone());
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
     tracing::info!(
         addr = %listener.local_addr()?,

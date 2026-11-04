@@ -44,13 +44,14 @@ use askama::Template;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
+use axum::middleware::map_response_with_state;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use sqlx::PgPool;
 use tokio::net::TcpListener;
 
 use crate::blob::BlobStore;
-use crate::cache::{self, Key, Policy, Purge};
+use crate::cache::{self, Key, KeyPrefix, Policy, Purge};
 use crate::error::{Error, Result};
 use crate::thumbnail::Thumbnails;
 
@@ -66,6 +67,10 @@ pub struct AppState {
     /// What a write purges at the edge (`crate::cache`): Fastly in
     /// production, nothing on a dev box, a recorder in a test.
     pub purge: Arc<dyn Purge>,
+    /// What goes in front of every key a response carries
+    /// (`cache::KeyPrefix`): `staging-` on kiewer-staging, nothing
+    /// elsewhere. The purge client carries the same one.
+    pub key_prefix: KeyPrefix,
 }
 
 impl AppState {
@@ -86,6 +91,17 @@ impl AppState {
             auth,
             thumbnails,
             purge,
+            key_prefix: KeyPrefix::default(),
+        }
+    }
+
+    /// The same state with `prefix` in front of every key a response
+    /// carries.
+    #[must_use]
+    pub fn with_key_prefix(self, prefix: KeyPrefix) -> Self {
+        Self {
+            key_prefix: prefix,
+            ..self
         }
     }
 }
@@ -135,6 +151,12 @@ pub fn router(state: AppState) -> Router {
         .route("/{handle}", get(person::page))
         .route("/{handle}/{slug}", get(design::page))
         .fallback(no_route)
+        // Over every route and the fallback: the keys a handler names
+        // get the environment's prefix on the way out.
+        .layer(map_response_with_state(
+            state.key_prefix.clone(),
+            cache::prefixed,
+        ))
         .with_state(state)
 }
 

@@ -102,6 +102,7 @@ locals {
         THUMBNAIL_TASK_ACCOUNT = google_service_account.run[env].email
         FASTLY_SERVICE_ID      = fastly_service_vcl.kiewer.id
       },
+      e.surrogate_key_prefix != "" ? { SURROGATE_KEY_PREFIX = e.surrogate_key_prefix } : {},
       {
         for provider in local.oauth_registered[env] :
         "OAUTH_${upper(provider)}_CLIENT_ID" => var.oauth_clients[env][provider].client_id

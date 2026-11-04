@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use crate::auth::{Credentials, Provider};
+use crate::cache::KeyPrefix;
 use crate::error::{Error, Result};
 
 /// The port when `PORT` is unset: Cloud Run's default, so a dev box and
@@ -103,6 +104,13 @@ pub struct Config {
     /// deployment has before its token is given, means no purges, never
     /// an error; a token without the service id is an error naming it.
     pub fastly: Option<FastlyConfig>,
+    /// `SURROGATE_KEY_PREFIX`: what goes in front of every surrogate key
+    /// the server names, in its pages' headers and its purges
+    /// ([`KeyPrefix`]). The Terraform in `infra/` sets `staging-` on
+    /// kiewer-staging alone, since both environments share one Fastly
+    /// service (ADR 0003); unset is no prefix, production's and a dev
+    /// box's.
+    pub surrogate_key_prefix: KeyPrefix,
     /// `THUMBNAIL_QUEUE` and `THUMBNAIL_TASK_ACCOUNT`: where a thumbnail
     /// render past its budget is retried from. The queue alone, which a
     /// deployment has until the account's variable is applied, means no
@@ -239,6 +247,15 @@ impl Config {
             public_url,
             oauth,
             fastly: fastly(&var)?,
+            surrogate_key_prefix: set("SURROGATE_KEY_PREFIX")
+                .map(|text| {
+                    text.parse().map_err(|_| Error::Env {
+                        name: "SURROGATE_KEY_PREFIX",
+                        reason: format!("is {text:?}, not visible ASCII without spaces"),
+                    })
+                })
+                .transpose()?
+                .unwrap_or_default(),
             thumbnail_tasks: thumbnail_tasks(&var)?,
         })
     }
@@ -343,6 +360,39 @@ mod tests {
         assert!(config.oauth.is_empty(), "sign-in is off without an app");
         assert_eq!(config.fastly, None, "no edge to purge without the pair");
         assert_eq!(config.thumbnail_tasks, None, "no retries without a queue");
+        assert_eq!(
+            config.surrogate_key_prefix,
+            KeyPrefix::default(),
+            "production's keys carry no prefix"
+        );
+    }
+
+    #[test]
+    fn the_surrogate_key_prefix_is_read_and_refused_with_a_space() {
+        let config = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("SURROGATE_KEY_PREFIX", "staging-"),
+        ]))
+        .expect("valid");
+        assert_eq!(
+            config.surrogate_key_prefix,
+            "staging-".parse().expect("a prefix")
+        );
+        let err = Config::from_vars(vars(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("SURROGATE_KEY_PREFIX", "staging "),
+        ]))
+        .expect_err("a space would split every key in two");
+        assert!(
+            matches!(
+                err,
+                Error::Env {
+                    name: "SURROGATE_KEY_PREFIX",
+                    ..
+                }
+            ),
+            "{err}"
+        );
     }
 
     #[test]

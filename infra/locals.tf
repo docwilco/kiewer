@@ -5,15 +5,21 @@
 # never drift apart in shape.
 locals {
   environments = {
+    # surrogate_key_prefix goes in front of every Surrogate-Key the
+    # service names and purges (kiewer_lib::cache::KeyPrefix): both
+    # environments share one Fastly service, whose purge by key acts on
+    # all of it, so staging's keys carry a prefix and production's none.
     production = {
-      service  = "kiewer"
-      hostname = var.production_hostname
-      database = "kiewer"
+      service              = "kiewer"
+      hostname             = var.production_hostname
+      database             = "kiewer"
+      surrogate_key_prefix = ""
     }
     staging = {
-      service  = "kiewer-staging"
-      hostname = var.staging_hostname
-      database = "kiewer_staging"
+      service              = "kiewer-staging"
+      hostname             = var.staging_hostname
+      database             = "kiewer_staging"
+      surrogate_key_prefix = "staging-"
     }
   }
 

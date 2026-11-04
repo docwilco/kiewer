@@ -33,7 +33,10 @@ defaults; the blob store writes under `blobs/` (git-ignored) unless
 `BLOB_BUCKET` names a GCS bucket, which makes it the GCS store (with
 `KIEWER_GCS_EMULATOR` beside it, on the emulator below). `FASTLY_SERVICE_ID`
 and `FASTLY_API_TOKEN` stay unset here: nothing is in front of the server,
-so a write purges nothing. The log is text
+so a write purges nothing. `SURROGATE_KEY_PREFIX` goes in front of every
+cache key the server names and purges; `infra/` sets `staging-` on
+kiewer-staging, which shares production's Fastly service, and a dev box
+leaves it unset. The log is text
 on a terminal and JSON lines anywhere else (Cloud Run reads those into
 `jsonPayload`; the renderer beacon's metric in `infra/logging.tf` counts
 them); `LOG_FORMAT=json` or `text` overrides. Ctrl-c or SIGTERM stops it

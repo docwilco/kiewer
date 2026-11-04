@@ -2,7 +2,8 @@
 //! renders the same bytes with a session as without one, the Fastly
 //! purge client sends the keys to the API's purge-by-key call (a fake
 //! of it on loopback, so no network is touched), every kind of route
-//! names its policy and its keys, and each write purges the keys of the
+//! names its policy and its keys, staging's prefix is in front of every
+//! key in a header and in a purge, and each write purges the keys of the
 //! pages it changed. The Postgres tests skip without `DATABASE_URL`, like
 //! `tests/it/db.rs`; the Fastly fake needs none.
 
@@ -19,7 +20,7 @@ use kiewer_lib::account::{self, AccountId, Handle};
 use kiewer_lib::auth::{Provider, ProviderUser};
 use kiewer_lib::blob::BlobHash;
 use kiewer_lib::blob::fs::FsBlobStore;
-use kiewer_lib::cache::{Fastly, Key, MAX_KEYS, Policy, Purge, Recorder, surrogate_key};
+use kiewer_lib::cache::{Fastly, Key, KeyPrefix, MAX_KEYS, Policy, Purge, Recorder, surrogate_key};
 use kiewer_lib::design::{self, Design};
 use kiewer_lib::roles::{self, Visibility};
 use kiewer_lib::session;
@@ -129,11 +130,42 @@ async fn the_fastly_client_purges_by_key_with_the_token_and_reports_a_refusal() 
     );
 }
 
+#[tokio::test]
+async fn the_fastly_client_puts_the_prefix_in_front_of_every_key_it_purges() {
+    let (api, calls) = fake_fastly().await;
+    let staging = Fastly::at(&api, "SU1Z0isxPaozGVKXdv0eY", "the-token")
+        .expect("a client")
+        .with_key_prefix(staging_prefix());
+    let ada: Handle = "ada".parse().unwrap();
+    staging
+        .purge(&[Key::Handle(ada), Key::Home])
+        .await
+        .expect("the API took the purge");
+    let keys: Vec<Option<String>> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|seen| seen.keys.clone())
+        .collect();
+    assert_eq!(keys, [Some("staging-handle-ada staging-home".to_owned())]);
+}
+
+/// The prefix kiewer-staging's keys carry.
+fn staging_prefix() -> KeyPrefix {
+    "staging-".parse().expect("a prefix")
+}
+
 /// The server over `db` with a filesystem blob store under cargo's
 /// scratch directory and no sign-in provider.
 async fn server(db: PgPool) -> (SocketAddr, TempDir) {
+    server_with_prefix(db, KeyPrefix::default()).await
+}
+
+/// The same with `prefix` in front of every key a response carries, as
+/// on kiewer-staging.
+async fn server_with_prefix(db: PgPool, prefix: KeyPrefix) -> (SocketAddr, TempDir) {
     let dir = scratch_dir!();
-    let state = http::state(db, Arc::new(FsBlobStore::new(dir.path())));
+    let state = http::state(db, Arc::new(FsBlobStore::new(dir.path()))).with_key_prefix(prefix);
     (http::serve_on_free_port(state).await, dir)
 }
 
@@ -218,7 +250,12 @@ struct Site {
 
 impl Site {
     async fn up(db: PgPool) -> Site {
-        let (addr, dir) = server(db.clone()).await;
+        Site::up_with_prefix(db, KeyPrefix::default()).await
+    }
+
+    /// The same on a server whose keys carry `prefix`.
+    async fn up_with_prefix(db: PgPool, prefix: KeyPrefix) -> Site {
+        let (addr, dir) = server_with_prefix(db.clone(), prefix).await;
         let (mut owner, owner_id, handle) = signed_in(&db, addr).await;
         let path = uploaded(&mut owner).await;
         assert_eq!(path, format!("/{handle}/midi8knob"));
@@ -388,6 +425,27 @@ async fn a_route_names_its_policy_and_its_keys(
     assert_eq!(
         caching(&response),
         (Some(policy.value()), expected.as_deref()),
+        "{url}"
+    );
+}
+
+#[test_case("/", Some("staging-home"); "the home page")]
+#[test_case("/{handle}", Some("staging-handle-{handle}"); "a person")]
+#[test_case("{path}", Some("staging-{design_key}"); "a design")]
+#[test_case("/{nobody}", Some("staging-handle-{nobody}"); "a person who is not there")]
+#[test_case("/about", None; "a page about nothing purgeable")]
+#[tokio::test]
+async fn on_staging_every_key_a_response_carries_has_the_prefix(template: &str, key: Option<&str>) {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let mut site = Site::up_with_prefix(db, staging_prefix()).await;
+    let url = site.url(template);
+    let expected = key.map(|key| site.url(key));
+    let response = site.owner.get(&url).await;
+    assert_eq!(
+        response.header("surrogate-key"),
+        expected.as_deref(),
         "{url}"
     );
 }

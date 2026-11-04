@@ -10,13 +10,16 @@
 //! carries their keys. What axum answers by itself (a 405, an extractor's
 //! rejection) names none, and Fastly's `default_ttl = 0` keeps it out of
 //! the cache.
-//! What each write purges is [`Key`]'s documentation.
+//! What each write purges is [`Key`]'s documentation. On kiewer-staging
+//! every key, in a header and in a purge, carries a [`KeyPrefix`].
 
 use std::fmt;
+use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::extract::State;
 use axum::http::header::{ACCEPT_ENCODING, CACHE_CONTROL, HeaderName};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -133,6 +136,70 @@ pub fn surrogate_key(keys: &[Key]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// What goes in front of every key the server names, in the
+/// `Surrogate-Key` header and in a purge alike: `SURROGATE_KEY_PREFIX`,
+/// `staging-` on kiewer-staging and nothing in production (#85). Both
+/// environments share one Fastly service (ADR 0003) and a purge by key
+/// acts on the whole service, so without it a write on staging would drop
+/// production's pages that carry the same key, and the reverse.
+/// [`KeyPrefix::apply`] is the one place it is applied: the router's
+/// layer ([`prefixed`]) for the header, the [`Fastly`] client for the
+/// purge. The default is no prefix.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyPrefix(String);
+
+impl KeyPrefix {
+    /// `value`, a `Surrogate-Key` value, with the prefix in front of each
+    /// of its keys.
+    #[must_use]
+    pub fn apply(&self, value: &str) -> String {
+        if self.0.is_empty() {
+            return value.to_owned();
+        }
+        value
+            .split(' ')
+            .filter(|key| !key.is_empty())
+            .map(|key| format!("{}{key}", self.0))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+impl FromStr for KeyPrefix {
+    type Err = Error;
+
+    /// Visible ASCII with no space: a key is one token of a
+    /// space-separated header, so a space would split every key in two.
+    /// The empty text is no prefix.
+    fn from_str(text: &str) -> Result<Self> {
+        if text.bytes().all(|byte| byte.is_ascii_graphic()) {
+            Ok(Self(text.to_owned()))
+        } else {
+            Err(Error::Malformed(format!(
+                "surrogate key prefix {text:?} is not visible ASCII without spaces"
+            )))
+        }
+    }
+}
+
+/// `response` with `prefix` in front of each key of its `Surrogate-Key`:
+/// the layer `crate::web::router` puts over every route, so a handler
+/// names its keys as [`page`] and [`not_found_under`] take them and
+/// never sees the prefix.
+pub async fn prefixed(State(prefix): State<KeyPrefix>, mut response: Response) -> Response {
+    let value = response
+        .headers()
+        .get(SURROGATE_KEY)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| prefix.apply(value));
+    if let Some(value) = value
+        && let Ok(value) = HeaderValue::from_str(&value)
+    {
+        response.headers_mut().insert(SURROGATE_KEY, value);
+    }
+    response
 }
 
 /// What a push or the settings form purges for the design `id` of
@@ -280,12 +347,14 @@ const PURGE_TIMEOUT: Duration = Duration::from_secs(5);
 /// keys in a `Surrogate-Key` request header, which drops them across
 /// every POP at once. A late thumbnail on a much-forked revision can
 /// name more keys than one call takes, so they go in [`MAX_KEYS`] at a
-/// time.
+/// time. Each key goes out with the [`KeyPrefix`] in front, the one the
+/// pages' headers carry.
 #[derive(Clone)]
 pub struct Fastly {
     service_id: String,
     token: String,
     api: String,
+    prefix: KeyPrefix,
     http: reqwest::Client,
 }
 
@@ -294,6 +363,7 @@ impl fmt::Debug for Fastly {
         f.debug_struct("Fastly")
             .field("service_id", &self.service_id)
             .field("api", &self.api)
+            .field("prefix", &self.prefix)
             .finish_non_exhaustive()
     }
 }
@@ -326,8 +396,15 @@ impl Fastly {
             service_id: service_id.into(),
             token: token.into(),
             api: api.into().trim_end_matches('/').to_owned(),
+            prefix: KeyPrefix::default(),
             http,
         })
+    }
+
+    /// The same client with `prefix` in front of every key it purges.
+    #[must_use]
+    pub fn with_key_prefix(self, prefix: KeyPrefix) -> Self {
+        Self { prefix, ..self }
     }
 }
 
@@ -336,7 +413,7 @@ impl Purge for Fastly {
     async fn purge(&self, keys: &[Key]) -> Result<()> {
         let url = format!("{}/service/{}/purge", self.api, self.service_id);
         for batch in keys.chunks(MAX_KEYS) {
-            let batch = surrogate_key(batch);
+            let batch = self.prefix.apply(&surrogate_key(batch));
             let response = self
                 .http
                 .post(&url)
@@ -439,6 +516,21 @@ mod tests {
             ]),
             "design-7 handle-ada home"
         );
+    }
+
+    #[test_case("", "design-7 handle-ada home"; "no prefix, production's keys")]
+    #[test_case("staging-", "staging-design-7 staging-handle-ada staging-home"; "staging's")]
+    fn a_prefix_goes_in_front_of_each_key(prefix: &str, value: &str) {
+        let prefix: KeyPrefix = prefix.parse().expect("a prefix");
+        assert_eq!(prefix.apply("design-7 handle-ada home"), value);
+    }
+
+    #[test_case("staging -"; "a space")]
+    #[test_case("staging\t"; "a tab")]
+    #[test_case("stagé-"; "a letter beyond ASCII")]
+    fn a_prefix_that_would_break_a_key_is_refused(text: &str) {
+        text.parse::<KeyPrefix>()
+            .expect_err("not visible ASCII without spaces");
     }
 
     #[test_case(

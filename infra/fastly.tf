@@ -11,7 +11,10 @@
 #
 # Surrogate-Key purges need no configuration: Fastly indexes the
 # Surrogate-Key header every origin response carries and strips it before
-# the client. The server purges with the token in secrets.tf.
+# the client. The server purges with the token in secrets.tf. A purge by
+# key acts on the whole service, so staging's keys carry a prefix
+# (surrogate_key_prefix in locals.tf) and its purges leave production's
+# pages alone.
 
 resource "fastly_service_vcl" "kiewer" {
   name     = "kiewer"
