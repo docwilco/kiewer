@@ -2,8 +2,7 @@
 //! viewer page sends per page load through `navigator.sendBeacon`, with
 //! which backend ran, whether the browser exposed WebGPU at all, how the
 //! start went and which adapter vendor the browser named; a wasm panic
-//! sends the same report with its message, and a canvas held to the
-//! device's texture limit sends one more, once. The server checks the shape,
+//! sends the same report with its message. The server checks the shape,
 //! limits each client to [`LIMIT_PER_MINUTE`] and writes one `tracing`
 //! event with the fields below, which the JSON log the server runs with
 //! on Cloud Run makes one `jsonPayload` line and a Cloud Logging metric

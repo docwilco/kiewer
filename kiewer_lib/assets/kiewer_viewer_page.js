@@ -18,9 +18,8 @@ import init, { Viewer } from "./kiewer_viewer.js";
 // kiewer_lib/src/web/beacon.rs): one beacon per page load, after the
 // adapter init in `start`, with the backend, whether navigator.gpu
 // existed, the outcome of that init and the adapter vendor; a wasm panic
-// sends one more with its message, and the first canvas capped to the
-// device's texture limit one more again, `capped`, with no reason.
-// sendBeacon queues the POST and returns at once, so nothing here waits
+// sends one more with its message, and a capped canvas one `capped`
+// (kiewer_lib/src/web/beacon.rs, Outcome). sendBeacon queues the POST and returns at once, so nothing here waits
 // on the network or runs before the first frame is scheduled. The
 // outcome is the adapter's: a board or sheet that fails to fetch or
 // parse after a working adapter is still "ok", and a module import that
@@ -36,12 +35,15 @@ const MAX_VENDOR = 64;
 // these.
 let backendName = "none";
 let vendorName = "";
+// `text` cut to `max` UTF-16 units, as the server's bounds allow.
 function bounded(text, max) {
   text = String(text || "").slice(0, max);
   // A cut through a surrogate pair leaves a lone high surrogate, which
   // is not JSON the server accepts.
   return /[\uD800-\uDBFF]$/.test(text) ? text.slice(0, -1) : text;
 }
+// Sends one beacon with `outcome` and `reason`; the other fields are the
+// module's.
 function sendBeacon(outcome, reason) {
   if (!navigator.sendBeacon) return;
   const body = JSON.stringify({
@@ -77,6 +79,7 @@ console.error = function () {
   originalError.apply(console, arguments);
 };
 
+// Shows `message` in the page's error box, whatever it held.
 function showError(message) {
   const errorBox = document.getElementById("error");
   errorBox.textContent = String(message);
@@ -117,9 +120,11 @@ export async function start(canvas, load) {
   let viewer = null;
   let frame = 0;
   let gesturing = false;
-  // Whether the ok beacon went, after which a cap sends `capped` at once,
-  // and whether that one went: at most one per page load.
-  let beaconsOpen = false;
+  // Whether the ok beacon went, whether the canvas has been capped at
+  // any point since create, and whether `capped` went: at most one per
+  // page load, after `ok`.
+  let okSent = false;
+  let everCapped = false;
   let cappedSent = false;
 
   function point(e) { return devicePoint(canvas, e); }
@@ -130,11 +135,13 @@ export async function start(canvas, load) {
     const dpr = window.devicePixelRatio || 1;
     return [Math.max(1, Math.round(r.width * dpr)), Math.max(1, Math.round(r.height * dpr))];
   }
+  // Called after each create and resize: notes whether the viewer held
+  // the canvas to the device's limit, and sends `capped` the first time,
+  // once `ok` has gone. A cap that came and went before then still
+  // counts.
   function noteCap() {
-    if (!beaconsOpen || cappedSent || window.kiewerPanic) return;
-    let capped = false;
-    try { capped = viewer.capped(); } catch (e) { return; }
-    if (!capped) return;
+    try { if (viewer.capped()) everCapped = true; } catch (e) { return; }
+    if (!okSent || !everCapped || cappedSent || window.kiewerPanic) return;
     cappedSent = true;
     sendBeacon("capped", "");
   }
@@ -265,8 +272,10 @@ export async function start(canvas, load) {
     viewer = await Viewer.create(canvas, width, height);
     backendName = viewer.backend();
     vendorName = viewer.adapter_vendor();
+    noteCap();
     // The layout may have moved while the adapter was asked for.
     viewer.resize(...wanted());
+    noteCap();
     const samples = viewer.samples();
     status.textContent = backendName + (samples > 1 ? ", " + samples + "x msaa" : "");
     // On WebGL2, hovering the status says why WebGPU was not used.
@@ -281,8 +290,10 @@ export async function start(canvas, load) {
   if (window.kiewerPanic) return;
   if (viewer) {
     vendorName = await webgpuVendor();
+    // A panic while the vendor was asked for sent its own beacon.
+    if (window.kiewerPanic) return;
     sendBeacon("ok", "");
-    beaconsOpen = true;
+    okSent = true;
     noteCap();
   } else {
     sendBeacon("failed", errorBox.textContent);

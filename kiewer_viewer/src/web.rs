@@ -29,7 +29,9 @@ use crate::highlight::{self, Highlight, SLOP_PX};
 use crate::pick::Gesture;
 use crate::render::atlas_pipeline::Coverage;
 use crate::render::label_pipeline::LabelFrame;
-use crate::render::{Backend, MSAA_SAMPLES, Renderer, Rgb, Target, cap_canvas, device_descriptor};
+use crate::render::{
+    Backend, MSAA_SAMPLES, Renderer, Rgb, Target, cap_canvas, device_descriptor_for,
+};
 use crate::scene::{Scene, clear_color};
 use crate::schematic::{self, SheetScene};
 use crate::sheet_highlight::SheetHighlight;
@@ -130,14 +132,13 @@ struct Gpu {
     fallback: Vec<String>,
 }
 
-/// The device asked of `adapter`: the viewer's limits, the WebGL2 floor,
-/// with the adapter's own `max_texture_dimension_2d` (ADR 0001), since
-/// the screen sets the canvas's size; a request past the adapter's limit
-/// would fail, so it is read from the adapter and not picked here.
-fn browser_device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
-    let mut descriptor = device_descriptor();
-    descriptor.required_limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d;
-    descriptor
+/// The backing size for a page asking for `width` by `height` device
+/// pixels on `device` ([`cap_canvas`] at the device's limit), and whether
+/// the cap held it below the ask.
+fn canvas_size(device: &wgpu::Device, width: u32, height: u32) -> ((u32, u32), bool) {
+    let wanted = (width.max(1), height.max(1));
+    let size = cap_canvas(wanted.0, wanted.1, device.limits().max_texture_dimension_2d);
+    (size, size != wanted)
 }
 
 fn instance(backends: wgpu::Backends) -> wgpu::Instance {
@@ -171,7 +172,7 @@ async fn webgpu(canvas: &HtmlCanvasElement, reasons: &mut Vec<String>) -> Option
         }
     };
     let (device, queue) = match adapter
-        .request_device(&browser_device_descriptor(&adapter))
+        .request_device(&device_descriptor_for(&adapter))
         .await
     {
         Ok(pair) => pair,
@@ -219,7 +220,7 @@ async fn webgl2(canvas: HtmlCanvasElement, mut reasons: Vec<String>) -> Result<G
         }
     };
     let (device, queue) = adapter
-        .request_device(&browser_device_descriptor(&adapter))
+        .request_device(&device_descriptor_for(&adapter))
         .await
         .map_err(|source| Error::Device { backend, source })?;
     Ok(Gpu {
@@ -307,12 +308,7 @@ impl Viewer {
         // with the GPU in hand and no viewer yet.
         #[cfg(feature = "panic-probe")]
         assert!(!probe, "panic-probe: the canvas carries data-panic-probe");
-        let wanted = (width.max(1), height.max(1));
-        let (width, height) = cap_canvas(
-            wanted.0,
-            wanted.1,
-            gpu.device.limits().max_texture_dimension_2d,
-        );
+        let ((width, height), capped) = canvas_size(&gpu.device, width, height);
         let mut config = gpu
             .surface
             .get_default_config(&gpu.adapter, width, height)
@@ -351,7 +347,7 @@ impl Viewer {
             state: ViewState::new(1),
             backend: gpu.backend,
             fallback: gpu.fallback,
-            capped: (width, height) != wanted,
+            capped,
             vendor,
             fit_scale: 0.0,
             board: None,
@@ -722,13 +718,8 @@ impl Viewer {
     /// pixels: the viewer sets the canvas to it, capped to the device's
     /// limit as [`Viewer::create`] does.
     pub fn resize(&mut self, width: u32, height: u32) {
-        let wanted = (width.max(1), height.max(1));
-        let (width, height) = cap_canvas(
-            wanted.0,
-            wanted.1,
-            self.device.limits().max_texture_dimension_2d,
-        );
-        self.capped = (width, height) != wanted;
+        let ((width, height), capped) = canvas_size(&self.device, width, height);
+        self.capped = capped;
         if (width, height) == (self.config.width, self.config.height) {
             return;
         }

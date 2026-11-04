@@ -20,7 +20,7 @@ use kicad_core::model::Point;
 use crate::camera::{Camera, Size};
 use crate::error::{Error, Result};
 use crate::render::offscreen::{Image, Offscreen};
-use crate::render::{Backend, Draw, MSAA_SAMPLES, Renderer, Vertex, device_descriptor};
+use crate::render::{Backend, Draw, MSAA_SAMPLES, Renderer, Vertex, device_descriptor_for};
 use crate::scene::{Scene, clear_color};
 use crate::schematic::SheetScene;
 use crate::view::ViewState;
@@ -124,14 +124,10 @@ impl Headless {
                 ],
             })?;
         let info = adapter.get_info();
-        // The viewer's limits, the WebGL2 floor, cap a texture at 2048
-        // pixels on a side, and a page at the hand-off's density is wider
-        // than that; the frame is the one texture that grows with the
-        // page, so its limit is the adapter's own. Everything else stays
-        // at the floor: the shaders and the buffers are the browser's.
-        let mut descriptor = device_descriptor();
-        descriptor.required_limits.max_texture_dimension_2d =
-            adapter.limits().max_texture_dimension_2d;
+        // A page at the hand-off's density is wider than the floor's
+        // 2048 pixels; the frame is the one texture that grows with the
+        // page, so its limit is the adapter's own.
+        let descriptor = device_descriptor_for(&adapter);
         let (device, queue) = futures_executor::block_on(adapter.request_device(&descriptor))
             .map_err(|source| Error::Device {
                 backend: Backend::Vulkan,

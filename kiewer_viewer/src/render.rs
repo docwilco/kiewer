@@ -37,12 +37,8 @@ pub const SHADER: &str = include_str!("shader.wgsl");
 
 /// The limits every device is asked for: WebGL2's, so what runs on
 /// WebGPU is what runs on WebGL2. They have no storage buffers and no
-/// compute. The one exception (ADR 0001) is `max_texture_dimension_2d`,
-/// which the browser's device (`web`) and the headless one
-/// (`headless`) raise to the adapter's own: the screen sets the
-/// canvas's size, and a page at the hand-off's density sets the golden
-/// frames', so no code here can hold them under the floor's 2048. A canvas past even the
-/// adapter's limit is capped by [`cap_canvas`].
+/// compute. Their one exception, `max_texture_dimension_2d`, is
+/// [`device_descriptor_for`]'s.
 #[must_use]
 pub fn limits() -> wgpu::Limits {
     wgpu::Limits::downlevel_webgl2_defaults()
@@ -82,6 +78,18 @@ pub fn device_descriptor() -> wgpu::DeviceDescriptor<'static> {
         required_limits: limits(),
         ..Default::default()
     }
+}
+
+/// [`device_descriptor`] with `adapter`'s own `max_texture_dimension_2d`,
+/// the one exception to the floor (ADR 0001): the device the browser's
+/// canvas and the headless frame are drawn with. A request past the
+/// adapter's limit fails, so the limit is the adapter's and not a number
+/// picked here; a canvas past it is held to it by [`cap_canvas`].
+#[must_use]
+pub fn device_descriptor_for(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
+    let mut descriptor = device_descriptor();
+    descriptor.required_limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d;
+    descriptor
 }
 
 /// Which API a viewer draws with, for the page and the beacon.
