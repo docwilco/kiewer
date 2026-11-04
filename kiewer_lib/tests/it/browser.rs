@@ -7,9 +7,10 @@
 //! server; the canvas cases of #94 and the failed import of #96 below
 //! read the beacons the page hands to `sendBeacon`, through the server's
 //! parser. The net block's case (#95) reads its computed display before
-//! and after the load. The upload page's zips (#83) are chosen in its
-//! file input and either land as a revision or are denied on the page;
-//! those cases need Postgres too.
+//! and after the load, and the failed import's case reads it once the
+//! viewer has failed to start. The upload page's zips (#83) are chosen
+//! in its file input and either land as a revision or are denied on the
+//! page; those cases need Postgres too.
 //!
 //! Runs when `KIEWER_BROWSER` names the browser's executable, which the
 //! browser stage of `scripts/checks.sh` sets, along with
@@ -366,6 +367,18 @@ impl Session {
             .evaluate_on_new_document(PANIC_PROBE)
             .await
             .expect("the panic probe");
+        session
+    }
+
+    /// As [`Session::new`], with the net block's display recorded once
+    /// the page that loads next is parsed, in `window.kiewerNetAtParse`.
+    async fn with_net_recorder(executable: PathBuf) -> Session {
+        let session = Session::new(executable).await;
+        session
+            .page
+            .evaluate_on_new_document(NET_AT_PARSE)
+            .await
+            .expect("the net block's recorder");
         session
     }
 
@@ -783,12 +796,7 @@ async fn the_net_block_shows_only_once_the_page_has_loaded(viewed: Viewed) {
     let Some(executable) = executable() else {
         return;
     };
-    let session = Session::new(executable).await;
-    session
-        .page
-        .evaluate_on_new_document(NET_AT_PARSE)
-        .await
-        .expect("the net block's recorder");
+    let session = Session::with_net_recorder(executable).await;
     session.viewport(1000, 700, 1).await;
     session.goto(viewed).await;
     let unhidden = session
@@ -805,7 +813,7 @@ async fn the_net_block_shows_only_once_the_page_has_loaded(viewed: Viewed) {
     assert_eq!(
         session.net_display().await,
         "flex",
-        "laid out as a column once loaded"
+        "displayed as flex once loaded"
     );
     session.close().await;
 }

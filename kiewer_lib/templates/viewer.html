@@ -84,8 +84,8 @@
      interaction, Search box): the tooltip beside the pointer, the search
      box and the pinned net's pad list stacked at the stage's bottom
      right above the zoom readout. Hidden until the board loads: display
-     is set only while it is not hidden, as a display rule overrides the
-     hidden attribute's (#95). */
+     is set only while it is not hidden, as any display rule here
+     overrides the browser's own display: none for the hidden attribute. */
   #net { position: absolute; right: 0.8em; bottom: 2.4em; max-width: 20em; max-height: calc(100% - 4em); flex-direction: column; gap: 0.4em; align-items: flex-end; font-size: 13px; }
   #net:not([hidden]) { display: flex; }
   #net-tip { position: absolute; padding: 0.2em 0.5em; background: rgba(43, 43, 43, 0.95); border: 1px solid #666; border-radius: 3px; white-space: nowrap; pointer-events: none; font-size: 13px; }
