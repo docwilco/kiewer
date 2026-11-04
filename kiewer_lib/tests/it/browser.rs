@@ -15,7 +15,8 @@
 //! design picked. The glyph table's cases (#41) read the page's resource
 //! timing for its one fetch, compare a screenshot against one drawn with
 //! a table of the space alone, and read the beacons of a fetch that
-//! fails.
+//! fails. The zones slider's case (#56) opens the board on a fragment
+//! with `zones=`, reads the slider, moves it and reads the fragment.
 //!
 //! Runs when `KIEWER_BROWSER` names the browser's executable, which the
 //! browser stage of `scripts/checks.sh` sets, along with
@@ -461,8 +462,14 @@ impl Session {
 
     /// Loads `viewed`'s page from the server.
     async fn goto(&self, viewed: Viewed) {
+        self.goto_at(viewed, "").await;
+    }
+
+    /// Loads `viewed`'s page from the server at `fragment` (`#view=5`,
+    /// or empty for none).
+    async fn goto_at(&self, viewed: Viewed, fragment: &str) {
         self.page
-            .goto(format!("http://{}{}", self.addr, viewed.path()))
+            .goto(format!("http://{}{}{fragment}", self.addr, viewed.path()))
             .await
             .expect("the page loads");
     }
@@ -959,6 +966,58 @@ async fn the_net_block_shows_only_once_the_page_has_loaded(viewed: Viewed) {
         "flex",
         "displayed as flex once loaded"
     );
+    session.close().await;
+}
+
+/// Moves the zones slider to `value` as a person does: the value, then
+/// the input event the panel listens for.
+const MOVE_ZONES: &str = r#"(value) => {
+  const slider = document.getElementById("zone-opacity");
+  slider.value = value;
+  slider.dispatchEvent(new Event("input"));
+  return location.hash;
+}"#;
+
+#[tokio::test]
+async fn the_zones_slider_and_the_fragment_carry_the_zone_opacity() {
+    let Some(executable) = executable() else {
+        return;
+    };
+    let session = Session::new(executable).await;
+    session.viewport(1000, 700, 1).await;
+    session.goto_at(Viewed::Board, "#view=7&zones=0.4").await;
+    let unhidden = session
+        .held_within_deadline(r#"!document.getElementById("layers").hidden"#)
+        .await;
+    let shown = session.shown().await;
+    assert!(
+        unhidden,
+        "the layers panel not shown within {DEADLINE:?}; the page shows {shown:?}"
+    );
+
+    let slider: String = session
+        .read(r#"document.getElementById("zone-opacity").value"#)
+        .await;
+    assert_eq!(slider, "0.4", "the slider starts where the link puts it");
+    let moved: String = session.read(&format!(r#"({MOVE_ZONES})("0.25")"#)).await;
+    assert_eq!(
+        moved, "#view=7&zones=0.25",
+        "the fragment follows the slider"
+    );
+    let back: String = session.read(&format!(r#"({MOVE_ZONES})("0.66")"#)).await;
+    assert_eq!(back, "#view=7", "the default zone opacity is no key");
+    // A view change keeps the zone opacity, as it keeps the labels.
+    let kept: String = session
+        .read(&format!(
+            r#"(({MOVE_ZONES})("0.5"), (() => {{
+                const select = document.getElementById("view");
+                select.value = "5";
+                select.dispatchEvent(new Event("change"));
+                return location.hash;
+            }})())"#
+        ))
+        .await;
+    assert_eq!(kept, "#view=5&zones=0.5");
     session.close().await;
 }
 

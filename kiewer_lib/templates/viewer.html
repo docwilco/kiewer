@@ -64,13 +64,15 @@
   #fonts .absent { opacity: 0.7; }
   /* The views and the layer panel (docs/v1-scope.md, Rendering, Views):
      the view select in the header, the layers folded at the stage's top
-     left, the top of the stack first, a checkbox and an opacity each. */
+     left, the top of the stack first, a checkbox and an opacity each, and
+     under them the zone opacity, one slider for every copper layer. */
   header select { font: inherit; max-width: 40vw; }
   #layers { position: absolute; left: 0.8em; top: 0.8em; max-height: calc(100% - 3em); overflow: auto; padding: 0.3em 0.6em; background: rgba(43, 43, 43, 0.9); border: 1px solid #444; border-radius: 4px; font-size: 13px; }
   #layers summary { cursor: pointer; }
   #layers label { display: grid; grid-template-columns: auto auto 1fr 6em; gap: 0.4em; align-items: center; margin: 0.2em 0; }
   #layers .swatch { width: 0.8em; height: 0.8em; border-radius: 2px; border: 1px solid #666; }
   #layers input[type=range] { width: 6em; margin: 0; }
+  #layers label.zones { grid-template-columns: 1fr 6em; border-top: 1px solid #444; padding-top: 0.3em; }
   #warning { margin: 0.3em 0; padding: 0.3em 0.5em; background: #4a3f1e; border-radius: 4px; }
   /* The net labels (docs/v1-scope.md, Net labels): a toggle per class
      and the threshold slider, folded above the hint at the stage's
@@ -117,6 +119,7 @@
     <details>
       <summary>Layers</summary>
       <div id="layer-list"></div>
+      <label class="zones">zones <input id="zone-opacity" type="range" min="0" max="1" step="0.01" title="zone opacity: how strongly the copper's zones draw against its tracks and pads"></label>
     </details>
   </div>
   <div id="fonts" hidden></div>
@@ -449,7 +452,8 @@ window.addEventListener("kiewer-board", function (e) {
 // The views and the layer panel (docs/v1-scope.md, Rendering, Views). The
 // views, the layers and the state are the wasm's (kiewer_viewer/src/view.rs);
 // this block mirrors the state into the select, the checkboxes and the
-// sliders, sends every change back, and keeps the URL fragment equal to
+// sliders (the zone opacity's too, zones= in the fragment), sends every
+// change back, and keeps the URL fragment equal to
 // viewer.fragment() so the address bar is always a link to what is shown.
 // It wakes on kiewer-board, which the board's load above sends once the
 // board is loaded, with the viewer and the frame scheduler.
@@ -457,6 +461,7 @@ const layersPanel = document.getElementById("layers");
 const layerList = document.getElementById("layer-list");
 const viewSelect = document.getElementById("view");
 const warningBox = document.getElementById("warning");
+const zoneSlider = document.getElementById("zone-opacity");
 let layersViewer = null;
 let scheduleFrame = null;
 // Where each layer's slider was last left, by key: a layer ticked off
@@ -513,6 +518,7 @@ function buildLayers() {
 function refreshPanel() {
   viewSelect.value = String(layersViewer.view());
   buildLayers();
+  zoneSlider.value = String(layersViewer.zone_opacity());
   const warnings = layersViewer.warnings();
   warningBox.hidden = warnings.length === 0;
   warningBox.textContent = warnings.join(" ");
@@ -528,6 +534,12 @@ viewSelect.addEventListener("change", function () {
   if (!layersViewer) return;
   layersViewer.set_view(Number(viewSelect.value));
   refreshPanel();
+  syncFragment();
+  scheduleFrame();
+});
+zoneSlider.addEventListener("input", function () {
+  if (!layersViewer) return;
+  layersViewer.set_zone_opacity(Number(zoneSlider.value));
   syncFragment();
   scheduleFrame();
 });

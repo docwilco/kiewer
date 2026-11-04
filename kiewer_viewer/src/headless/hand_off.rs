@@ -255,9 +255,19 @@ pub fn render_page(headless: &mut Headless, scene: &Scene, page: &Page) -> Resul
         };
         let frame = tile.frame(scene, page.scale, view.mirrored);
         headless
-            .render(scene, &ViewState::new(tile.view), &frame)
+            .render(scene, &as_composed(tile.view), &frame)
             .map(Some)
     })
+}
+
+/// View `view` as the hand-off composes it: its zones drawn like its
+/// tracks, at zone opacity 1, where the viewer's default sets them
+/// apart (GLOSSARY.md, Zone opacity).
+#[must_use]
+pub fn as_composed(view: usize) -> ViewState {
+    let mut state = ViewState::new(view);
+    state.set_zones(1.0);
+    state
 }
 
 /// A view's title as the hand-off names its file: ` + ` dropped, every

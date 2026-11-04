@@ -6,6 +6,16 @@
 //! nanometres. Colours are not here: a slice names its layer, and the
 //! view in force colours it when the frame is drawn
 //! ([`Scene::draw_list`]).
+//!
+//! A layer draws as one group (#56; `crate::render` has the mechanism):
+//! its slices share one depth, so wherever two of its shapes overlap the
+//! layer's opacity applies once, as the hand-off composes a translucent
+//! layer. Inside a group the first shape to cover a sample owns it, so a
+//! layer's slices are built and drawn top-most first: a copper layer's
+//! holes, then its pads, vias and tracks, then its zones (at the zone
+//! opacity, so a fill reads apart from the tracks on it); the holes
+//! layer's rims, then its holes. A hole in a copper layer at 0.8 then
+//! reads 0.8 of the page over what is under it, with no copper in it.
 
 use std::ops::Range;
 
@@ -27,9 +37,13 @@ pub const TOLERANCE: f64 = 0.001;
 pub enum Paint {
     /// The colour its layer has in the view in force.
     Layer,
-    /// The page colour: a hole, drawn over the copper so a track that
-    /// runs into it does not fill it back in.
+    /// The page colour: a hole, drawn before the copper of its group so
+    /// a track that runs into it does not fill it back in.
     Page,
+    /// The layer's colour at the zone opacity: a copper layer's zones,
+    /// drawn after its other copper, so a track or a pad on a fill owns
+    /// its area and the fill shows around it.
+    Zone,
 }
 
 /// One run of the index buffer: part of one layer, in one paint.
@@ -109,16 +123,20 @@ impl Scene {
                 (Layer::Outline, _) => {
                     scene.add(&layer, Paint::Layer, &tessellator.outline(board));
                 }
+                // Each layer's slices top-most first: the first to cover
+                // a sample owns it (the module doc).
                 (Layer::Holes, _) => {
-                    scene.add(&layer, Paint::Page, &tessellator.all_holes(board));
                     scene.add(&layer, Paint::Layer, &tessellator.rims(board));
+                    scene.add(&layer, Paint::Page, &tessellator.all_holes(board));
                 }
                 (Layer::Copper(_), Some(id)) => {
-                    scene.add(&layer, Paint::Layer, &tessellator.copper(board, id));
-                    // After the copper, in the page colour: a track
+                    // The holes first, in the page colour: a track
                     // ending in a via covers the hole the via's ring
                     // left open, and the hole must win.
                     scene.add(&layer, Paint::Page, &tessellator.holes(board, id));
+                    let rest = tessellator.copper_without_zones(board, id);
+                    scene.add(&layer, Paint::Layer, &rest);
+                    scene.add(&layer, Paint::Zone, &tessellator.zones(board, id));
                 }
                 (Layer::Mask(_), Some(id)) => {
                     scene.add(&layer, Paint::Layer, &tessellator.mask(board, id));
@@ -176,30 +194,35 @@ impl Scene {
     }
 
     /// The draws of one frame under `state`: every slice of every shown
-    /// layer, in the view's draw order (bottom first), coloured for a
-    /// target of `format` with the layer's opacity as alpha.
+    /// layer, in the view's draw order (bottom first), each layer its own
+    /// group, coloured for a target of `format` with the layer's opacity
+    /// as alpha, times the zone opacity for its zones.
     #[must_use]
     pub fn draw_list(&self, state: &ViewState, format: wgpu::TextureFormat) -> Vec<Draw> {
         let Some(view) = self.view(state) else {
             return Vec::new();
         };
         let mut draws = Vec::new();
+        let mut group = 0;
         for layer in self.stack.order(view.top) {
             let Some(opacity) = state.opacity(view, &layer) else {
                 continue;
             };
             for slice in self.slices.iter().filter(|slice| slice.layer == layer) {
-                let rgb = match slice.paint {
-                    Paint::Layer => view.color(&self.stack, &layer),
-                    Paint::Page => palette::PAGE,
+                let (rgb, alpha) = match slice.paint {
+                    Paint::Layer => (view.color(&self.stack, &layer), opacity),
+                    Paint::Page => (palette::PAGE, opacity),
+                    Paint::Zone => (view.color(&self.stack, &layer), opacity * state.zones),
                 };
                 let mut color = rgb.for_format(format);
-                color[3] = opacity;
+                color[3] = alpha;
                 draws.push(Draw {
                     range: slice.range.clone(),
                     color,
+                    group,
                 });
             }
+            group += 1;
         }
         draws
     }
@@ -282,6 +305,7 @@ mod tests {
                 .iter()
                 .any(|slice| slice.layer == layer && slice.paint == paint)
         };
+        assert!(has(Layer::Copper("F.Cu".to_owned()), Paint::Zone));
         for name in ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"] {
             assert!(has(Layer::Copper(name.to_owned()), Paint::Layer), "{name}");
             assert!(
@@ -309,23 +333,28 @@ mod tests {
         let scene = hand_off();
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
         let draws = scene.draw_list(&ViewState::new(5), format);
-        let colors: Vec<[f32; 4]> = draws.iter().map(|draw| draw.color).collect();
-        let rgba = |rgb: Rgb, alpha: f32| {
+        let colors: Vec<([f32; 4], u32)> =
+            draws.iter().map(|draw| (draw.color, draw.group)).collect();
+        let rgba = |rgb: Rgb, alpha: f32, group: u32| {
             let mut color = rgb.for_format(format);
             color[3] = alpha;
-            color
+            (color, group)
         };
+        // One group per layer, its slices top-most first: the copper's
+        // holes, the rest of it, its zones at the zone opacity; the rims
+        // before the holes.
         assert_eq!(
             colors,
             [
-                rgba(palette::BOARD, 1.0),
-                rgba(palette::COPPER, 1.0),
-                rgba(palette::PAGE, 1.0),
-                rgba(palette::MASK, 0.7),
-                rgba(palette::PASTE, 1.0),
-                rgba(palette::F_SILKS, 1.0),
-                rgba(palette::PAGE, 1.0),
-                rgba(palette::COPPER, 1.0),
+                rgba(palette::BOARD, 1.0, 0),
+                rgba(palette::PAGE, 1.0, 1),
+                rgba(palette::COPPER, 1.0, 1),
+                rgba(palette::COPPER, 0.66, 1),
+                rgba(palette::MASK, 0.7, 2),
+                rgba(palette::PASTE, 1.0, 3),
+                rgba(palette::F_SILKS, 1.0, 4),
+                rgba(palette::COPPER, 1.0, 5),
+                rgba(palette::PAGE, 1.0, 5),
             ]
         );
         // Each draw is a slice's own range.
@@ -341,14 +370,25 @@ mod tests {
         let views = scene.stack.views();
         let mut state = ViewState::new(1);
         let plain = scene.draw_list(&state, format);
-        // View 1: outline, F.Cu and its holes, F.Paste.
-        assert_eq!(plain.len(), 4);
+        // View 1: outline, F.Cu's holes, the rest of it and its zones,
+        // F.Paste.
+        assert_eq!(plain.len(), 5);
         state.set(&views[0], Layer::Paste(Side::Front), None);
         state.set(&views[0], Layer::Copper("F.Cu".to_owned()), Some(0.5));
         let changed = scene.draw_list(&state, format);
-        assert_eq!(changed.len(), 3);
-        assert!((changed[1].color[3] - 0.5).abs() < 1e-6, "{:?}", changed[1]);
+        assert_eq!(changed.len(), 4);
+        assert!((changed[2].color[3] - 0.5).abs() < 1e-6, "{:?}", changed[2]);
+        assert!(
+            (changed[3].color[3] - 0.33).abs() < 1e-6,
+            "{:?}",
+            changed[3]
+        );
         assert_eq!(changed[0], plain[0]);
+        // The zone opacity moves the zones and nothing else.
+        state.zones = 1.0;
+        let opaque = scene.draw_list(&state, format);
+        assert!((opaque[3].color[3] - 0.5).abs() < 1e-6, "{:?}", opaque[3]);
+        assert_eq!(opaque[..3], changed[..3]);
     }
 
     #[test]

@@ -242,13 +242,16 @@ impl Headless {
 
 #[cfg(test)]
 mod tests {
+    use kicad_core::model::Board;
     use kiewer_assert::assert_is_not_empty;
 
     use super::*;
+    use crate::highlight::Highlight;
     use crate::labels::LabelBatch;
+    use crate::pick::Gesture;
     use crate::render::{Rgb, Splice, Vertex};
     use crate::scene::{Paint, Slice};
-    use crate::view::{Layer, Stack, palette};
+    use crate::view::{Layer, Side, Stack, palette};
 
     /// A board-shaped scene: one rectangle, the board fill, 112 by 58 mm
     /// around (106, 79) like the hand-off board's outline box, and no
@@ -344,6 +347,7 @@ mod tests {
         let draws = [Draw {
             range: 0..6,
             color: [1.0, 0.0, 0.0, 1.0],
+            group: 0,
         }];
         let red = headless
             .render_draws(&scene, &draws, &frame)
@@ -405,14 +409,17 @@ mod tests {
             Draw {
                 range: 0..6,
                 color: palette::BOARD.for_format(Offscreen::FORMAT),
+                group: 0,
             },
             Draw {
                 range: 6..12,
                 color: red,
+                group: 1,
             },
             Draw {
                 range: 12..18,
                 color: green,
+                group: 2,
             },
         ];
         let clear = clear_color(Offscreen::FORMAT);
@@ -448,6 +455,218 @@ mod tests {
         let at = |x: u32| image.pixel(x, 85).expect("inside the frame");
         assert_eq!(at(160)[..3], [0, 255, 0]);
         assert_eq!(at(210)[..3], [0x7a, 0x5a, 0x32]);
+    }
+
+    /// A two-layer board around `items`, and its scene. The views of a
+    /// two-layer board: 1 is F.Cu with F.Paste, 3 the front as built, 5
+    /// both coppers with the front on top.
+    fn two_layers(items: &str) -> (Board, Scene) {
+        let text = format!(
+            r#"(kicad_pcb (version 20241229) (generator "pcbnew")
+              (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user) (35 "F.Fab" user))
+              {items})"#
+        );
+        let board = kicad_core::parse_board(&text).expect("the synthetic board parses");
+        let scene = Scene::build(&board).expect("a board with copper");
+        (board, scene)
+    }
+
+    /// The synthetic boards' frame: (0, 0) to (20, 20) mm at 10 px/mm.
+    const SYNTHETIC: Frame = Frame {
+        width: 200,
+        height: 200,
+        center: Point { x: 10.0, y: 10.0 },
+        scale: 10.0,
+        mirrored: false,
+    };
+
+    /// The colour of `image` at the world point (`x`, `y`) in millimetres,
+    /// drawn in [`SYNTHETIC`].
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the points are inside the 20 mm frame, so the pixel is 0 to 199"
+    )]
+    fn at(image: &Image, x: f64, y: f64) -> [u8; 3] {
+        let pixel = |world: f64| ((world - 10.0) * SYNTHETIC.scale + 100.0) as u32;
+        let rgba = image.pixel(pixel(x), pixel(y)).expect("inside the frame");
+        [rgba[0], rgba[1], rgba[2]]
+    }
+
+    /// `top` at `alpha` over `under`, channel by channel: one blend, on
+    /// the sRGB-encoded values the offscreen format blends.
+    fn over(top: Rgb, alpha: f64, under: [f64; 3]) -> [f64; 3] {
+        let Rgb(r, g, b) = top;
+        let mut out = [0.0; 3];
+        for ((out, top), under) in out.iter_mut().zip([r, g, b]).zip(under) {
+            *out = f64::from(top) * alpha + under * (1.0 - alpha);
+        }
+        out
+    }
+
+    fn solid(rgb: Rgb) -> [f64; 3] {
+        over(rgb, 1.0, [0.0; 3])
+    }
+
+    /// Within two of `expected` on every channel: the blend's rounding.
+    fn assert_reads(actual: [u8; 3], expected: [f64; 3], what: &str) {
+        let near = actual
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| (f64::from(*actual) - expected).abs() <= 2.0);
+        assert!(near, "{what}: read {actual:?}, expected {expected:?}");
+    }
+
+    #[test]
+    fn two_overlapping_shapes_of_one_layer_at_half_blend_once_in_the_overlap() {
+        let Some(mut headless) = headless_or_skip() else {
+            return;
+        };
+        // Two tracks crossing at (10, 10).
+        let (_, scene) = two_layers(
+            r#"(segment (start 4 10) (end 16 10) (width 2) (layer "F.Cu") (net "A"))
+               (segment (start 10 4) (end 10 16) (width 2) (layer "F.Cu") (net "A"))"#,
+        );
+        let mut state = ViewState::new(1);
+        state.set(&scene.views[0], Layer::Copper("F.Cu".to_owned()), Some(0.5));
+        let image = headless
+            .render(&scene, &state, &SYNTHETIC)
+            .expect("renders");
+        let once = over(palette::F_CU, 0.5, solid(palette::PAGE));
+        assert_reads(at(&image, 6.0, 10.0), once, "one track");
+        assert_reads(at(&image, 10.0, 10.0), once, "where the tracks cross");
+    }
+
+    #[test]
+    fn a_hole_in_a_translucent_copper_layer_reads_the_page_at_its_opacity() {
+        let Some(mut headless) = headless_or_skip() else {
+            return;
+        };
+        // A track through a via, on the board fill.
+        let (_, scene) = two_layers(
+            r#"(gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default)) (fill no) (layer "Edge.Cuts"))
+               (via (at 10 10) (size 1.2) (drill 0.6) (layers "F.Cu" "B.Cu") (net "A"))
+               (segment (start 4 10) (end 16 10) (width 2) (layer "F.Cu") (net "A"))"#,
+        );
+        // The front as built with only the board fill and F.Cu at 0.8.
+        let view = &scene.views[2];
+        let mut state = ViewState::new(3);
+        state.set(view, Layer::Copper("F.Cu".to_owned()), Some(0.8));
+        for layer in [
+            Layer::Mask(Side::Front),
+            Layer::Paste(Side::Front),
+            Layer::Silk(Side::Front),
+            Layer::Holes,
+        ] {
+            state.set(view, layer, None);
+        }
+        let image = headless
+            .render(&scene, &state, &SYNTHETIC)
+            .expect("renders");
+        let board = solid(palette::BOARD);
+        assert_reads(
+            at(&image, 6.0, 10.0),
+            over(palette::COPPER, 0.8, board),
+            "the track",
+        );
+        assert_reads(
+            at(&image, 10.0, 10.0),
+            over(palette::PAGE, 0.8, board),
+            "the hole, with no copper in it",
+        );
+    }
+
+    #[test]
+    fn a_track_on_a_zone_reads_the_layer_and_the_zone_that_times_the_zone_opacity() {
+        let Some(mut headless) = headless_or_skip() else {
+            return;
+        };
+        let (_, scene) = two_layers(
+            r#"(zone (net "A") (layer "F.Cu") (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+                 (filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20))))
+               (segment (start 4 10) (end 16 10) (width 2) (layer "F.Cu") (net "A"))"#,
+        );
+        let mut state = ViewState::new(1);
+        state.set(&scene.views[0], Layer::Copper("F.Cu".to_owned()), Some(0.8));
+        let image = headless
+            .render(&scene, &state, &SYNTHETIC)
+            .expect("renders");
+        let page = solid(palette::PAGE);
+        assert_reads(
+            at(&image, 10.0, 10.0),
+            over(palette::F_CU, 0.8, page),
+            "the track",
+        );
+        // The zone opacity is 0.66 unless the link says otherwise.
+        assert_reads(
+            at(&image, 10.0, 16.0),
+            over(palette::F_CU, 0.8 * 0.66, page),
+            "the zone around it",
+        );
+    }
+
+    #[test]
+    fn a_lit_nets_far_side_pad_reads_the_same_on_its_zone_and_off_it() {
+        let Some(mut headless) = headless_or_skip() else {
+            return;
+        };
+        // Net A on B.Cu: a zone over the left half, one pad in it and one
+        // past it. Net B, a track on F.Cu, is pinned first, so A takes a
+        // generated slot and its B.Cu copper is the far side.
+        let (board, scene) = two_layers(
+            r#"(footprint "T" (layer "B.Cu") (at 5 10) (property "Reference" "R1" (at 0 0) (layer "F.Fab"))
+                 (pad "1" smd rect (at 0 0) (size 2 2) (layers "B.Cu") (net "A")))
+               (footprint "T" (layer "B.Cu") (at 15 10) (property "Reference" "R2" (at 0 0) (layer "F.Fab"))
+                 (pad "1" smd rect (at 0 0) (size 2 2) (layers "B.Cu") (net "A")))
+               (zone (net "A") (layer "B.Cu") (polygon (pts (xy 0 0) (xy 10 0) (xy 10 20) (xy 0 20)))
+                 (filled_polygon (layer "B.Cu") (pts (xy 0 0) (xy 10 0) (xy 10 20) (xy 0 20))))
+               (segment (start 12 3) (end 18 3) (width 1) (layer "F.Cu") (net "B"))"#,
+        );
+        let layer = |name: &str| vec![board.layer_named(name).expect("the layer")];
+        let mut highlight = Highlight::new(&board);
+        highlight.pick_mut().set_instant(true);
+        let track = highlight
+            .index()
+            .hit(Point { x: 15.0, y: 3.0 }, 0.0, &layer("F.Cu"))
+            .expect("net B's track");
+        let pad = highlight
+            .index()
+            .hit(Point { x: 15.0, y: 10.0 }, 0.0, &layer("B.Cu"))
+            .expect("net A's pad");
+        for hit in [track, pad] {
+            highlight
+                .pick_mut()
+                .press(Gesture::ModifiedClick, Some(hit));
+        }
+        let splice = highlight
+            .geometry(&board, &scene)
+            .expect("the lit nets' copper");
+        let draws = highlight.draws(&scene, &ViewState::new(5), Offscreen::FORMAT);
+        let Headless {
+            device,
+            queue,
+            renderer,
+            ..
+        } = &mut headless;
+        renderer.upload(device, &scene.vertices, &scene.indices);
+        renderer.splice(device, queue, &splice);
+        let image = headless
+            .draw(
+                scene.origin,
+                clear_color(Offscreen::FORMAT),
+                &draws,
+                &SYNTHETIC,
+            )
+            .expect("renders");
+        let on_zone = at(&image, 5.0, 10.0);
+        let off_zone = at(&image, 15.0, 10.0);
+        let zone = at(&image, 5.0, 16.0);
+        assert_reads(
+            on_zone,
+            off_zone.map(f64::from),
+            "the pad on the zone against the pad off it",
+        );
+        assert_ne!(on_zone, zone, "the zone reads apart from the pad");
     }
 
     #[test]

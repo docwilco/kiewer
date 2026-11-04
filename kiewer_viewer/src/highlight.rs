@@ -4,8 +4,12 @@
 //! copper of each lit net tessellated once and cached, and turns a
 //! scene's draw list into the dimmed one: every slice at the pick's dim
 //! of its opacity (the page-coloured holes excepted, so a hole stays a
-//! hole), then each lit net's copper on each shown copper layer, its
-//! zones and the rest as two runs so each takes its own strength. No
+//! hole), then each lit net's copper on each shown copper layer as a
+//! group of its own, nearer than the whole scene (`crate::render`): its
+//! pads, vias and tracks, then its zones, as two runs so each takes its
+//! own strength, the zones' times the zone opacity. A dimmed layer is
+//! one blend at the dim of its opacity, overlaps included, and every pad
+//! of a lit net reads the same, on a fill or off one. No
 //! slice is re-tessellated: the dim is a paint change through the
 //! per-draw colour, and the lit nets are extra geometry after the
 //! scene's own ([`Tail`], shared with the sheet), of which a change
@@ -346,9 +350,11 @@ impl Highlight {
     /// The draws of one frame: the scene's under `state` at the pick's
     /// dim of their opacity (a page-coloured slice stays as it is), then
     /// each lit net in pick order on each shown copper layer, bottom
-    /// first, in its slot's colour, or between two while it moves slot:
-    /// its zones, then the rest. A lit net [`Highlight::geometry`] has not
-    /// given yet draws nothing.
+    /// first, each a group of its own after the scene's, in its slot's
+    /// colour, or between two while it moves slot: its pads, vias and
+    /// tracks, then its zones at `state`'s zone opacity of their
+    /// strength. A lit net [`Highlight::geometry`] has not given yet
+    /// draws nothing.
     #[must_use]
     pub fn draws(
         &self,
@@ -366,6 +372,7 @@ impl Highlight {
             return draws;
         };
         let shown = shown_copper(scene, state);
+        let mut group = draws.iter().map(|draw| draw.group + 1).max().unwrap_or(0);
         for lit in self.pick.lit() {
             let Some(runs) = self.tail.runs(lit.net) else {
                 continue;
@@ -383,9 +390,10 @@ impl Highlight {
                     color
                 };
                 let color = mix(paint(previous_slot), paint(lit.slot), blend);
+                // The rest first: the first to cover a sample owns it.
                 for (part, strength) in [
-                    (Part::Zones, lit.zone_strength()),
                     (Part::Rest, lit.strength()),
+                    (Part::Zones, lit.zone_strength() * state.zones),
                 ] {
                     let Some((_, range)) =
                         runs.iter().find(|(key, _)| *key == (layer.clone(), part))
@@ -397,8 +405,10 @@ impl Highlight {
                     draws.push(Draw {
                         range: range.clone(),
                         color,
+                        group,
                     });
                 }
+                group += 1;
             }
         }
         draws
@@ -635,18 +645,24 @@ mod tests {
         assert!(usize::try_from(max_index).expect("fits") < total);
         assert_eq!(highlight.geometry(board, scene), None, "uploaded once");
         let draws = highlight.draws(scene, &state, format);
-        // View 5 shows one copper layer, F.Cu. GND has zones and the rest
-        // there: two draws after the scene's, in the copper colour, solid.
+        // View 5 shows one copper layer, F.Cu. GND has the rest and zones
+        // there: two draws after the scene's, in the copper colour, the
+        // rest solid and the zones at the zone opacity, one group nearer
+        // than every one of the scene's.
         let lit = net_draws(scene, &draws);
         assert_eq!(lit.len(), 2, "{lit:?}");
         assert_eq!(draws.len(), plain.len() + 2);
         let copper = crate::view::palette::COPPER.for_format(format);
-        for draw in &lit {
-            for (channel, expected) in draw.color.iter().zip(copper) {
+        for (draw, alpha) in lit.iter().zip([1.0, 0.66]) {
+            for (channel, expected) in draw.color.iter().zip(copper).take(3) {
                 assert!((channel - expected).abs() < 1e-6, "{draw:?}");
             }
+            assert!(close(draw.color[3], alpha), "{draw:?}");
             assert!(draw.range.end > draw.range.start);
         }
+        let scene_groups = plain.iter().map(|draw| draw.group).max();
+        assert_eq!(lit[0].group, lit[1].group);
+        assert!(Some(lit[0].group) > scene_groups);
         for (dimmed, original) in draws.iter().zip(&plain) {
             assert_eq!(dimmed.range, original.range);
             let expected = if is_page(scene, original) {
@@ -671,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hover_draws_the_scene_at_60_and_the_zones_at_35() {
+    fn a_hover_draws_the_scene_at_60_and_the_zones_at_35_of_the_zone_opacity() {
         let (board, scene) = hand_off();
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let state = ViewState::new(5);
@@ -688,10 +704,10 @@ mod tests {
             .expect("a slice that dims");
         assert!(close(draws[dimmed].color[3], plain[dimmed].color[3] * 0.6));
         let lit = net_draws(scene, &draws);
-        let [zones, rest] = lit.as_slice() else {
+        let [rest, zones] = lit.as_slice() else {
             panic!("{lit:?}");
         };
-        assert!(close(zones.color[3], 0.35), "{zones:?}");
+        assert!(close(zones.color[3], 0.35 * 0.66), "{zones:?}");
         assert!(close(rest.color[3], 1.0), "{rest:?}");
     }
 
@@ -710,11 +726,18 @@ mod tests {
         };
         let draws = highlight.draws(scene, &state, format);
         let lit = net_draws(scene, &draws);
-        // GND: zones and the rest on two layers, each at full strength in
-        // its layer's colour.
+        // GND: the rest and zones on two layers, each at full strength in
+        // its layer's colour, the zones at the zone opacity; a group per
+        // layer.
         let (gnd, vdd) = lit.split_at(4);
-        assert!(gnd.iter().all(|draw| close(draw.color[3], 1.0)), "{gnd:?}");
+        for (draw, alpha) in gnd.iter().zip([1.0, 0.66, 1.0, 0.66]) {
+            assert!(close(draw.color[3], alpha), "{gnd:?}");
+        }
         assert_ne!(gnd[0].color[..3], gnd[3].color[..3], "two layer colours");
+        let groups: Vec<u32> = gnd.iter().map(|draw| draw.group).collect();
+        assert_eq!(groups[0], groups[1]);
+        assert_eq!(groups[2], groups[3]);
+        assert!(groups[2] > groups[1]);
         // The via's net: one colour, the far side at 55%, the near solid.
         let generated = Ramp::BOARD.color(1).expect("slot 1").for_format(format);
         assert!(vdd.iter().all(|draw| draw.color[..3] == generated[..3]));

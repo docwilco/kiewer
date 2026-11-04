@@ -378,6 +378,13 @@ impl View {
 const VIEW_KEY: &str = "view";
 /// The key of the label gate's threshold in the fragment, in pixels.
 const LABELS_KEY: &str = "labels";
+/// The key of the zone opacity in the fragment.
+const ZONES_KEY: &str = "zones";
+
+/// The zone opacity unless the link says otherwise (GLOSSARY.md, Zone
+/// opacity): a fill at two thirds of its layer's opacity, so the tracks
+/// and pads on it read apart and what is under it shows a little.
+pub const DEFAULT_ZONE_OPACITY: f32 = 0.66;
 
 /// The text height on screen, in device pixels, a label starts to show
 /// at unless the link says otherwise (docs/v1-scope.md, Net labels).
@@ -464,8 +471,9 @@ fn round_threshold(px: f32) -> f32 {
     (px.clamp(*LABEL_THRESHOLD_RANGE.start(), *LABEL_THRESHOLD_RANGE.end()) * 10.0).round() / 10.0
 }
 
-/// A view with toggles and opacities set on top of it, and the label
-/// settings: what the panels edit and the fragment carries.
+/// A view with toggles and opacities set on top of it, the zone
+/// opacity, and the label settings: what the panels edit and the
+/// fragment carries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewState {
     /// The view, numbered from 1 as the hand-off numbers them.
@@ -474,28 +482,42 @@ pub struct ViewState {
     /// hidden (`None`). A layer set back to the view's own value leaves
     /// the map.
     pub overrides: BTreeMap<Layer, Option<f32>>,
+    /// The zone opacity, 0 to 1: every copper layer's zones draw at this
+    /// fraction of their layer's opacity. Not a view's, like the labels.
+    pub zones: f32,
     /// The net label toggles and threshold.
     pub labels: LabelSettings,
 }
 
 impl ViewState {
-    /// View `view` as it is, with the labels at their defaults.
+    /// View `view` as it is, with the zone opacity and the labels at
+    /// their defaults.
     #[must_use]
     pub fn new(view: usize) -> Self {
         Self {
             view,
             overrides: BTreeMap::new(),
+            zones: DEFAULT_ZONE_OPACITY,
             labels: LabelSettings::default(),
         }
     }
 
-    /// View `view` as it is, keeping this state's label settings: a
-    /// view change is not a reason to lose the toggles.
+    /// View `view` as it is, keeping this state's zone opacity and label
+    /// settings: a view change is not a reason to lose them.
     #[must_use]
     pub fn with_view(&self, view: usize) -> Self {
         Self {
+            zones: self.zones,
             labels: self.labels.clone(),
             ..Self::new(view)
+        }
+    }
+
+    /// Set the zone opacity, rounded to a hundredth and clamped to 0..=1
+    /// as a layer's opacity is; a value that is not a number is ignored.
+    pub fn set_zones(&mut self, opacity: f32) {
+        if opacity.is_finite() {
+            self.zones = round_opacity(opacity);
         }
     }
 
@@ -523,6 +545,7 @@ impl ViewState {
 
     /// The fragment for this state, without the `#`: `view=5`, then one
     /// `layer=opacity` or `layer=off` per override, in [`Layer`] order,
+    /// then `zones=opacity` when the zone opacity is not the default,
     /// then `labels=px` when the threshold is not the default and one
     /// `class=off` per hidden label class, in class order.
     #[must_use]
@@ -536,6 +559,12 @@ impl ViewState {
                 Some(opacity) => out.push_str(&format_number(*opacity)),
                 None => out.push_str("off"),
             }
+        }
+        if self.zones != DEFAULT_ZONE_OPACITY {
+            out.push('&');
+            out.push_str(ZONES_KEY);
+            out.push('=');
+            out.push_str(&format_number(self.zones));
         }
         if self.labels.threshold != DEFAULT_LABEL_THRESHOLD {
             out.push('&');
@@ -554,9 +583,10 @@ impl ViewState {
     /// The state a fragment names (with or without its `#`) for `stack`:
     /// the view number when the stack has it, else the stack's default
     /// view; every `layer=value` with a layer [`Layer::parse`] knows and
-    /// a value that is `off` or a number, clamped to 0..=1; `labels=px`
-    /// as the threshold, clamped to its range; a label class key
-    /// ([`label_key`]) set `off`, or `on`; anything else ignored.
+    /// a value that is `off` or a number, clamped to 0..=1; `zones=` a
+    /// number as the zone opacity, clamped the same; `labels=px` as the
+    /// threshold, clamped to its range; a label class key ([`label_key`])
+    /// set `off`, or `on`; anything else ignored.
     #[must_use]
     pub fn from_fragment(fragment: &str, stack: &Stack) -> Self {
         let mut state = Self::new(stack.default_view());
@@ -570,6 +600,12 @@ impl ViewState {
                     && (1..=view_count).contains(&view)
                 {
                     state.view = view;
+                }
+                continue;
+            }
+            if key == ZONES_KEY {
+                if let Ok(opacity) = value.parse::<f32>() {
+                    state.set_zones(opacity);
                 }
                 continue;
             }
@@ -870,6 +906,33 @@ mod tests {
             assert_eq!(label_key(class), key);
             assert_eq!(Layer::parse(key), None);
         }
+    }
+
+    #[test]
+    fn the_zone_opacity_round_trips_beside_the_layers_and_survives_a_view_change() {
+        let mut state = ViewState::new(5);
+        assert!((state.zones - 0.66).abs() < 1e-6);
+        assert_eq!(state.fragment(), "view=5", "the default is no key");
+        state.set(&four_layers().views()[4], copper("F.Cu"), Some(0.5));
+        state.set_zones(0.404);
+        state.labels.set_threshold(12.0);
+        assert_eq!(state.fragment(), "view=5&F.Cu=0.5&zones=0.4&labels=12");
+        let parsed = ViewState::from_fragment(&state.fragment(), &four_layers());
+        assert_eq!(parsed, state);
+        assert!((parsed.with_view(7).zones - 0.4).abs() < 1e-6);
+        state.set_zones(DEFAULT_ZONE_OPACITY);
+        assert_eq!(state.fragment(), "view=5&F.Cu=0.5&labels=12");
+    }
+
+    #[test_case("zones=1.7", 1.0; "a zone opacity past 1 is clamped")]
+    #[test_case("zones=-1", 0.0; "a zone opacity under 0 is clamped")]
+    #[test_case("zones=0.333", 0.33; "a zone opacity is rounded to a hundredth")]
+    #[test_case("zones=nan", 0.66; "a zone opacity that is not a number is the default")]
+    #[test_case("zones=off", 0.66; "a zone opacity that is not numeric is the default")]
+    fn a_zone_opacity_is_kept_in_range(fragment: &str, zones: f32) {
+        let state = ViewState::from_fragment(fragment, &four_layers());
+        assert!((state.zones - zones).abs() < 1e-6, "{}", state.zones);
+        assert!(state.overrides.is_empty());
     }
 
     #[test]

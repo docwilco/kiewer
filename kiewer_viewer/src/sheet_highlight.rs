@@ -198,6 +198,8 @@ impl SheetHighlight {
         for draw in &mut draws {
             draw.color[3] *= self.pick.dim();
         }
+        // Each lit run a group of its own, nearer than the sheet's.
+        let mut group = draws.iter().map(|draw| draw.group + 1).max().unwrap_or(0);
         for lit in self.pick.lit() {
             let generated = Ramp::SHEET.color(lit.slot);
             for (layer, range) in self.tail.runs(lit.net).unwrap_or_default() {
@@ -208,7 +210,9 @@ impl SheetHighlight {
                 draws.push(Draw {
                     range: range.clone(),
                     color,
+                    group,
                 });
+                group += 1;
             }
         }
         draws

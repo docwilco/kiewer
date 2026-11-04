@@ -8,11 +8,13 @@ struct View {
     scale: vec2<f32>,
 }
 
-// The colour of one draw, its layer's opacity as alpha; one uniform
-// buffer holds every draw's at 256-byte steps, bound with a dynamic
-// offset per draw.
+// The paint of one draw: its colour, its layer's opacity as alpha, and
+// its group's depth, which a later group has nearer (render.rs says why);
+// one uniform buffer holds every draw's at 256-byte steps, bound with a
+// dynamic offset per draw.
 struct Paint {
     color: vec4<f32>,
+    depth: f32,
 }
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -30,7 +32,7 @@ struct VertexOutput {
 fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     let clip = (input.position - view.center) * view.scale;
-    out.clip = vec4<f32>(clip, 0.0, 1.0);
+    out.clip = vec4<f32>(clip, paint.depth, 1.0);
     return out;
 }
 

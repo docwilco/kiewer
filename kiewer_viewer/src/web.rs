@@ -597,8 +597,25 @@ impl Viewer {
         self.state.set(&view, layer, shown.then_some(opacity));
     }
 
+    /// The zone opacity, 0 to 1: how strongly every copper layer's zones
+    /// draw, as a fraction of their layer's opacity.
+    #[must_use]
+    pub fn zone_opacity(&self) -> f64 {
+        f64::from(self.state.zones)
+    }
+
+    /// Set the zone opacity, for every copper layer at once; rounded to
+    /// a hundredth and clamped to 0 to 1, what the fragment carries.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "an opacity is 0 to 1, which f32 holds to the hundredth the state keeps"
+    )]
+    pub fn set_zone_opacity(&mut self, opacity: f64) {
+        self.state.set_zones(opacity as f32);
+    }
+
     /// The state as the URL fragment carries it, without the `#`:
-    /// `view=5&F.Cu=0.5&F.SilkS=off`.
+    /// `view=5&F.Cu=0.5&F.SilkS=off&zones=0.5`.
     #[must_use]
     pub fn fragment(&self) -> String {
         self.state.fragment()

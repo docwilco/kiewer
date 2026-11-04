@@ -3,7 +3,8 @@
 //! relative to the paper's centre, and one draw per layer in KiCad's
 //! default schematic theme, in draw order. A sheet has no views, toggles
 //! or opacities (those are the board's), so its draws are fixed when it
-//! is built.
+//! is built. Each layer is a group of its own (`crate::render`), so a
+//! dimmed layer's own overlaps blend once, as a board's do.
 
 use kicad_core::geometry::Bounds;
 use kicad_core::model::Point;
@@ -98,7 +99,7 @@ pub fn build(sheet: &Sheet, format: wgpu::TextureFormat) -> Option<SheetScene> {
         indices: Vec::new(),
         draws: Vec::new(),
     };
-    for (layer, mesh) in &layers {
+    for (group, (layer, mesh)) in (0..).zip(&layers) {
         let base = u32::try_from(out.vertices.len()).unwrap_or(u32::MAX);
         let start = u32::try_from(out.indices.len()).unwrap_or(u32::MAX);
         out.vertices
@@ -111,6 +112,7 @@ pub fn build(sheet: &Sheet, format: wgpu::TextureFormat) -> Option<SheetScene> {
         out.draws.push(Draw {
             range: start..end,
             color: palette::of(*layer).for_format(format),
+            group,
         });
     }
     Some(out)

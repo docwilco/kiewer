@@ -1,14 +1,29 @@
 //! Drawing with wgpu at the WebGL2 floor (ADR 0001): one pipeline over
 //! flat triangles, a vertex buffer and an index buffer, one uniform for
-//! the camera and one for the colour of each draw, blended over what is
-//! already there so a layer can be translucent; beside it the text pass
-//! of [`atlas_pipeline`], textured quads over a glyph atlas per face. No
-//! storage buffers, no compute, so the same code runs on WebGPU, on
-//! WebGL2 and natively.
+//! the camera and one for the paint of each draw (its colour and its
+//! group's depth), blended over what is already there so a layer can be
+//! translucent; beside it the text pass of [`atlas_pipeline`], textured
+//! quads over a glyph atlas per face. No storage buffers, no compute, so
+//! the same code runs on WebGPU, on WebGL2 and natively.
 //!
 //! A frame is a list of [`Draw`]s, each a run of the index buffer in one
 //! colour, drawn back to front in the order given: the scene decides what
 //! that order is and which runs are in it, this module only draws them.
+//!
+//! A layer draws as one group (#56), as the hand-off composes a
+//! translucent one: wherever two of its shapes overlap, it blends once.
+//! Each draw names its group, and a later group is nearer: the vertex
+//! shader writes the group's depth as `z` into one depth attachment,
+//! sampled as the colour is, under the test `LESS`. A group still blends
+//! over the groups before it, and inside one group the first shape to
+//! cover a sample owns it, since every later shape of the group has the
+//! equal depth and fails there; that is why the scene draws a layer's
+//! slices top-most first (`crate::scene`). No stencil and no offscreen
+//! target per layer, which would cost a composite per layer per frame.
+//! The text and the net labels take the attachment with the compare
+//! `Always` and write nothing ([`overlay_depth`]): a glyph's ink is its
+//! alpha, which a depth write ignores, so a glyph quad in a group would
+//! claim its whole box and the silk under its clear part would vanish.
 //!
 //! Nothing here knows about a canvas or a window: the surface and the
 //! adapter are the platform's (`web.rs` in the browser); this module takes
@@ -104,6 +119,52 @@ pub enum Backend {
     Vulkan,
 }
 
+/// The depth attachment's format: inside the WebGL2 floor, and fine
+/// enough for any count of groups a frame has.
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+
+/// The depth state of the flat triangles, which the groups are: a later
+/// group is nearer and passes, and a later shape of the same group has
+/// the equal depth and fails (the module doc).
+fn group_test() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(true),
+        depth_compare: Some(wgpu::CompareFunction::Less),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// The depth state of a pass drawn over the groups without joining
+/// them, the text and the net labels: every sample passes, none is
+/// written.
+#[must_use]
+pub fn overlay_depth() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::Always),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// The depth group `group` of a frame with `groups` of them writes, in
+/// 0 to 1 and nearer for a later group: evenly spaced inside the range,
+/// so two groups are far more than a step of the attachment apart, and
+/// the cleared 1 is behind them all.
+#[must_use]
+pub fn group_depth(group: u32, groups: u32) -> f32 {
+    let depth = 1.0 - (f64::from(group) + 1.0) / (f64::from(groups) + 1.0);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a depth in 0 to 1, at least 2^-32 from the next group's, which f32 keeps apart"
+    )]
+    let depth = depth as f32;
+    depth
+}
+
 /// Samples per pixel when the target format allows it: the edges of
 /// tracks and pads without a shimmer, at the cost of a four times larger
 /// render target.
@@ -126,13 +187,18 @@ impl Vertex {
 }
 
 /// One draw of a frame: a run of the index buffer in one colour, the
-/// layer's opacity as its alpha, as the target format takes it.
+/// layer's opacity as its alpha, as the target format takes it, in one
+/// group.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Draw {
     /// The indices, a multiple of three.
     pub range: Range<u32>,
     /// Red, green, blue as the shader writes them, and alpha.
     pub color: [f32; 4],
+    /// The group the draw blends in (the module doc): a later group is
+    /// nearer, and inside one the first draw to cover a sample owns it.
+    /// A frame's groups count up from 0 in the order they are drawn.
+    pub group: u32,
 }
 
 /// Where a frame goes: a texture of the renderer's format, its size in
@@ -144,11 +210,14 @@ pub struct Target<'a> {
     pub clear: wgpu::Color,
 }
 
-/// The colour uniform of one draw, as the shader reads it.
+/// The paint uniform of one draw, as the shader reads it: its colour
+/// and its group's depth, padded to two 16-byte rows.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Paint {
     color: [f32; 4],
+    depth: f32,
+    padding: [f32; 3],
 }
 
 /// The step between one draw's paint and the next in the one uniform
@@ -263,6 +332,9 @@ pub struct Renderer {
     format: wgpu::TextureFormat,
     sample_count: u32,
     msaa: Option<MsaaTarget>,
+    /// The depth attachment the groups are told apart by, sampled as the
+    /// colour is.
+    depth: Option<MsaaTarget>,
     /// Named-face text through the glyph atlas (`atlas_pipeline`), drawn
     /// after the flat geometry.
     text: TextPass,
@@ -320,6 +392,8 @@ struct Paints {
     capacity: usize,
 }
 
+/// A texture a frame draws into beside its target, at the target's
+/// size: the multisampled colour, or the depth.
 struct MsaaTarget {
     size: (u32, u32),
     view: wgpu::TextureView,
@@ -368,7 +442,8 @@ impl Renderer {
             label: Some("paint"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                // The vertex stage reads the depth, the fragment the colour.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: true,
@@ -411,7 +486,7 @@ impl Renderer {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(group_test()),
             multisample: wgpu::MultisampleState {
                 count: sample_count,
                 ..Default::default()
@@ -431,6 +506,7 @@ impl Renderer {
             format,
             sample_count,
             msaa: None,
+            depth: None,
             text,
             labels,
         }
@@ -556,6 +632,7 @@ impl Renderer {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&view));
         self.grow_paints(device, draws.len());
         let msaa_view = (self.sample_count > 1).then(|| self.msaa_view(device, target.size));
+        let depth_view = self.depth_view(device, target.size);
         let (attachment, resolve_target) = match &msaa_view {
             Some(msaa) => (msaa, Some(target.view)),
             None => (target.view, None),
@@ -567,6 +644,11 @@ impl Renderer {
         let clear = target.clear;
         // Every draw's paint in one write, each at its stride.
         if !draws.is_empty() {
+            let groups = draws
+                .iter()
+                .map(|draw| draw.group.saturating_add(1))
+                .max()
+                .unwrap_or(1);
             let mut packed = vec![0u8; draws.len() * PAINT_STRIDE];
             for (chunk, draw) in packed
                 .as_chunks_mut::<PAINT_STRIDE>()
@@ -574,7 +656,11 @@ impl Renderer {
                 .iter_mut()
                 .zip(draws)
             {
-                let paint = Paint { color: draw.color };
+                let paint = Paint {
+                    color: draw.color,
+                    depth: group_depth(draw.group, groups),
+                    padding: [0.0; 3],
+                };
                 let bytes = bytemuck::bytes_of(&paint);
                 if let Some(slot) = chunk.get_mut(..bytes.len()) {
                     slot.copy_from_slice(bytes);
@@ -602,7 +688,16 @@ impl Renderer {
                         },
                     },
                 })],
-                depth_stencil_attachment: None,
+                // Cleared behind every group, and needed only while the
+                // pass runs.
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
@@ -678,32 +773,60 @@ impl Renderer {
     /// The multisampled texture the frame is drawn into before the
     /// resolve, remade when the target's size changes.
     fn msaa_view(&mut self, device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
-        if let Some(msaa) = &self.msaa
-            && msaa.size == size
-        {
-            return msaa.view.clone();
-        }
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("msaa"),
-            size: wgpu::Extent3d {
-                width: size.0.max(1),
-                height: size.1.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: self.sample_count,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.msaa = Some(MsaaTarget {
-            size,
-            view: view.clone(),
-        });
-        view
+        let (format, samples) = (self.format, self.sample_count);
+        attachment(device, &mut self.msaa, size, format, samples, "msaa")
     }
+
+    /// The depth attachment, sampled as the colour is, remade when the
+    /// target's size changes.
+    fn depth_view(&mut self, device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
+        let samples = self.sample_count;
+        attachment(
+            device,
+            &mut self.depth,
+            size,
+            DEPTH_FORMAT,
+            samples,
+            "depth",
+        )
+    }
+}
+
+/// The view of `held` when it is `size`; otherwise of a new attachment of
+/// `format` at `samples` per pixel, which `held` then keeps.
+fn attachment(
+    device: &wgpu::Device,
+    held: &mut Option<MsaaTarget>,
+    size: (u32, u32),
+    format: wgpu::TextureFormat,
+    samples: u32,
+    label: &str,
+) -> wgpu::TextureView {
+    if let Some(target) = held
+        && target.size == size
+    {
+        return target.view.clone();
+    }
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: size.0.max(1),
+            height: size.1.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: samples,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    *held = Some(MsaaTarget {
+        size,
+        view: view.clone(),
+    });
+    view
 }
 
 #[cfg(test)]
@@ -792,7 +915,24 @@ mod tests {
         assert_eq!(Vertex::LAYOUT.array_stride, 8);
         assert_eq!(Vertex::LAYOUT.attributes.len(), 1);
         assert_eq!(std::mem::size_of::<View>(), 16, "one 16-byte uniform row");
-        assert_eq!(std::mem::size_of::<Paint>(), 16, "one 16-byte uniform row");
+        assert_eq!(std::mem::size_of::<Paint>(), 32, "two 16-byte uniform rows");
+    }
+
+    #[test]
+    fn a_later_group_is_nearer_and_every_group_is_in_front_of_the_clear() {
+        let groups = 40;
+        let depths: Vec<f32> = (0..groups)
+            .map(|group| group_depth(group, groups))
+            .collect();
+        assert!(
+            depths.iter().all(|depth| *depth > 0.0 && *depth < 1.0),
+            "{depths:?}"
+        );
+        // Apart by far more than a step of a 24-bit attachment.
+        assert!(
+            depths.windows(2).all(|pair| pair[0] - pair[1] > 1e-4),
+            "{depths:?}"
+        );
     }
 
     #[test_case(1.0, 0.0, 0.0, "#ffffff" ; "white")]

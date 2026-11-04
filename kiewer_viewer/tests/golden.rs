@@ -5,8 +5,7 @@
 //! that are not drift: it draws net labels in every pad and via, its
 //! silkscreen text is Consolas where the viewer draws Newstroke, its
 //! anti-aliasing is rsvg's coverage where the viewer's is 4x
-//! multisampling, and a translucent layer is composited as a group
-//! where the viewer blends shape by shape (#56). So the metric is a
+//! multisampling. So the metric is a
 //! count: inside each view's tile, a pixel is off when the render's
 //! colour there is more than [`CHANNEL_TOLERANCE`] away on some channel
 //! from the reference's pixel and from every reference pixel one step
@@ -17,7 +16,9 @@
 //! as one it adds); the page fails when the off pixels exceed its
 //! budget in [`BUDGETS`], set about one point above what the sample
 //! board measured (the floor is in each line there, the measurement in
-//! the done-note of #7). Inside that margin a change of colour on a
+//! the done-note of #7, those of views 7 and 8 again in #56's). The
+//! pages are drawn at zone opacity 1 (`hand_off::as_composed`), as the
+//! hand-off draws its zones. Inside that margin a change of colour on a
 //! layer that covers an area, copper, mask, board fill or a hole rim,
 //! blows through on the pages that show it, as does a missing layer, a
 //! shift or a mirror; a tint change on the silkscreen text or the paste
@@ -39,9 +40,9 @@ use std::time::{Duration, Instant};
 use kiewer_viewer::headless::Headless;
 use kiewer_viewer::headless::hand_off::{self, Page, Rendered};
 use kiewer_viewer::render::offscreen::{Image, Offscreen};
-use kiewer_viewer::scene::Scene;
+use kiewer_viewer::scene::{Paint, Scene};
+use kiewer_viewer::view::Layer;
 use kiewer_viewer::view::palette::F_CU;
-use kiewer_viewer::view::{Layer, ViewState};
 
 const BOARD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -59,8 +60,8 @@ const CHANNEL_TOLERANCE: u8 = 8;
 /// each about one point over the floor the sample board measured on
 /// lavapipe (Mesa 25.2.8), noted beside it. The floors differ by what
 /// each view shows: the views with both coppers carry the pad labels of
-/// both sides, the compounded translucent copper (#56) and the courtyard
-/// lines, a thin line being off along its whole length.
+/// both sides and the courtyard lines, a thin line being off along its
+/// whole length.
 const BUDGETS: [(&str, f64); 9] = [
     ("01-F_Cu_F_Paste.png", 0.095),                              // 8.21%
     ("02-In1_Cu.png", 0.045),                                    // 3.29%
@@ -68,9 +69,9 @@ const BUDGETS: [(&str, f64); 9] = [
     ("04-B_Cu.png", 0.060),                                      // 4.87%
     ("05-F_Cu_F_Paste_F_Mask_F_SilkS.png", 0.115),               // 10.42%
     ("06-B_Cu_B_Paste_B_Mask_B_SilkS_mirrored.png", 0.055),      // 4.15%
-    ("07-F_Cu_B_Cu_F_SilkS_B_SilkS_F_CrtYd_B_CrtYd.png", 0.170), // 15.56%
-    ("08-B_Cu_F_Cu_B_SilkS_F_SilkS_B_CrtYd_F_CrtYd.png", 0.155), // 13.94%
-    ("midi8knob-layers.png", 0.135),                             // 12.11%
+    ("07-F_Cu_B_Cu_F_SilkS_B_SilkS_F_CrtYd_B_CrtYd.png", 0.140), // 13.04%
+    ("08-B_Cu_F_Cu_B_SilkS_F_SilkS_B_CrtYd_F_CrtYd.png", 0.130), // 11.99%
+    ("midi8knob-layers.png", 0.135),                             // 11.61%
 ];
 
 /// The budget of the page named `name`.
@@ -329,22 +330,25 @@ fn a_layer_in_another_colour_fails_the_comparison() {
     // the comparison exists to catch. The page is composed as the real
     // one is, with the draws recoloured.
     let page = hand_off::page(&scene.bounds, &[5], hand_off::VIEW_DENSITY);
-    let mut draws = scene.draw_list(&ViewState::new(5), Offscreen::FORMAT);
-    let copper = scene
+    let mut draws = scene.draw_list(&hand_off::as_composed(5), Offscreen::FORMAT);
+    let copper: Vec<_> = scene
         .slices
         .iter()
-        .find(|slice| slice.layer == Layer::Copper("F.Cu".to_owned()))
-        .expect("front copper")
-        .range
-        .clone();
+        .filter(|slice| {
+            slice.layer == Layer::Copper("F.Cu".to_owned()) && slice.paint != Paint::Page
+        })
+        .map(|slice| slice.range.clone())
+        .collect();
     let mut recoloured = 0;
     for draw in &mut draws {
-        if draw.range == copper {
+        if copper.contains(&draw.range) {
+            let alpha = draw.color[3];
             draw.color = F_CU.for_format(Offscreen::FORMAT);
+            draw.color[3] = alpha;
             recoloured += 1;
         }
     }
-    assert_eq!(recoloured, 1);
+    assert_eq!(recoloured, 2, "the copper and its zones");
     let image = hand_off::compose(&page, |tile| {
         headless
             .render_draws(scene, &draws, &tile.frame(scene, page.scale, false))

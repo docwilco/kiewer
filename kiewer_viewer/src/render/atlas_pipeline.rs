@@ -125,7 +125,10 @@ impl TextPass {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: None,
+            // Over the groups, joining none: a glyph quad that wrote
+            // depth would hide the silk under its clear part
+            // (`crate::render`).
+            depth_stencil: Some(crate::render::overlay_depth()),
             multisample: wgpu::MultisampleState {
                 count: sample_count,
                 ..Default::default()
