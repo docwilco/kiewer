@@ -10,15 +10,14 @@
 # migrations/ makes: a scratch database beside the one DATABASE_URL names,
 # that name plus `_sqlx` (kiewer_sqlx against the compose Postgres and
 # on CI), is dropped, created and migrated, then `cargo sqlx prepare`
-# compiles every target of every crate against it. One run at a time per
-# DATABASE_URL, since each run starts by dropping the scratch database.
-# After a run the scratch database is left migrated: the database to
+# compiles every target of every crate against it. Runs on one scratch
+# database take turns (the flock below). After a run the scratch database is left migrated: the database to
 # point DATABASE_URL at, with SQLX_OFFLINE=false, while a statement is in
 # flux (README, Development).
 #
 # Needs DATABASE_URL on a Postgres whose role may create databases
-# (compose's and CI's `kiewer` is the image's superuser), sqlx-cli at the
-# version Cargo.lock pins, and jq (for scripts/sqlx-version.sh):
+# (compose's and CI's `kiewer` is the image's superuser), flock, jq (for
+# scripts/sqlx-version.sh) and sqlx-cli at the version Cargo.lock pins:
 #
 #     cargo install sqlx-cli --version "$(scripts/sqlx-version.sh)" --locked \
 #       --no-default-features --features postgres,rustls
@@ -31,6 +30,11 @@ install='cargo install sqlx-cli --version "$(scripts/sqlx-version.sh)" --locked 
 
 [ -n "${DATABASE_URL:-}" ] || {
   echo "sqlx-prepare: DATABASE_URL is unset or empty; it names the Postgres the scratch database goes on (README, Development)." >&2
+  exit 1
+}
+
+command -v jq >/dev/null || {
+  echo "sqlx-prepare: jq is required (apt-get install jq)." >&2
   exit 1
 }
 
@@ -63,6 +67,12 @@ esac
   exit 1
 }
 export DATABASE_URL="${base%/*}/${name}_sqlx$query"
+
+# One run at a time per scratch database: each starts by dropping it, so
+# a second run (a commit's hook beside a hand run, or two worktrees on one
+# DATABASE_URL) waits here rather than pulling it out from under the first.
+exec 9>"${TMPDIR:-/tmp}/kiewer-sqlx-prepare-${name}_sqlx.lock"
+flock 9
 
 sqlx database reset -y --source migrations
 # The arguments after `--` go to the `cargo check` sqlx-cli runs, with

@@ -134,8 +134,9 @@ gate() {  # $1: the variable, $2: its opt-out, $3: the service, $4: a function n
   fi
   skipped+=("!!! test: $opt_out=1, so the tests on $service skip and count as passed: $tests")
 }
-# The files that take a pool from kiewer_test_support::db; every user of
-# it is under kiewer_lib/tests/it/ today.
+# What runs on Postgres: the files that take a pool from
+# kiewer_test_support::db (every user of it is under kiewer_lib/tests/it/
+# today), and the sqlx stage.
 db_tests() {
   local file names=()
   for file in kiewer_lib/tests/it/*.rs; do

@@ -231,7 +231,11 @@ jobs:
       # Nothing after this step needs stable: the toolchain step above made
       # the MSRV toolchain the default.
       - run: rustup toolchain uninstall stable
+      # The query macros against .sqlx/, as every check builds them; this
+      # job runs cargo directly rather than through scripts/checks.sh.
       - uses: ./.github/actions/cargo-cached
+        env:
+          SQLX_OFFLINE: true
         with:
           run: cargo check --workspace --all-targets
 

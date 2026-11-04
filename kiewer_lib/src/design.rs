@@ -1286,6 +1286,8 @@ pub(crate) async fn lock(
     id: DesignId,
     lock: Lock,
 ) -> Result<Option<Design>> {
+    // A statement per lock: a query macro takes literal text, so the
+    // clause cannot be spliced in at run time.
     let row: Option<DesignRow> = match lock {
         Lock::Shared => {
             statement!(query_as!(
