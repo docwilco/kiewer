@@ -6,6 +6,9 @@
 //! (#100). A new area is a file in this directory and its `mod` line
 //! here. One area runs as
 //! `cargo build --workspace --all-targets && cargo test --workspace --test it <module>::`.
+//! `kicad_core` has an `it` binary too, so a module name both have
+//! (`schematic`) runs in both; the filter names the path, never `-p`
+//! (rust-conventions).
 
 mod accounts;
 mod beacon;

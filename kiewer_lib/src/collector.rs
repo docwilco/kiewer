@@ -35,7 +35,7 @@
 //! site, which no other statement here does: what nothing names has no
 //! index to find it by. They run once a night, with no person waiting.
 //! Steps 5 and 6 are index ranges: `session_expires_at`, and the unique
-//! index on `account.handle`, which holds the nulls; `tests/collector.rs`
+//! index on `account.handle`, which holds the nulls; `tests/it/collector.rs`
 //! plans both.
 //!
 //! A sign-up the person is using in the instant it goes: a handle choice
@@ -204,7 +204,7 @@ pub async fn run(db: &PgPool, blobs: &dyn BlobStore) -> Result<Collected> {
 }
 
 /// Step 5's statement. Steps 5 and 6 keep theirs public so that the plan
-/// test in `tests/collector.rs` plans the text the run executes.
+/// test in `tests/it/collector.rs` plans the text the run executes.
 pub const EXPIRED_SESSIONS: &str = "DELETE FROM session WHERE expires_at <= now()";
 
 /// Step 6's statement; `$1` is [`GRACE_HOURS`].

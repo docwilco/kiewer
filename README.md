@@ -12,7 +12,10 @@ the viewer's browser build `rustup target add wasm32-unknown-unknown` and
 commit against a snapshot of the index, so unstaged edits never reach the
 checks and the working tree stays usable while they run; it needs `rsync`,
 `jq` and `cargo-sweep`. CI runs the same script. Run a single stage with
-`scripts/checks.sh clippy`.
+`scripts/checks.sh clippy`. The same setting enables a post-merge hook:
+after a merge or pull, fast-forwards included, it removes what the
+checkout's target has not used in three days (`.githooks/sweep.sh`, which
+the pre-commit hook runs too), and prints a line when it skips.
 
 Running the server: `docker compose up -d` starts Postgres (`compose.yaml`),
 `cp .env.example .env` and export it (`set -a; . ./.env; set +a`),

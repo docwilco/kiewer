@@ -17,33 +17,55 @@
 # neither rustc nor cargo ever removes one. A fresh unit never opens its
 # directory, so use cannot be seen; the directory's mtime is its last
 # compile, and one not compiled in three days belongs to a hash that will
-# not be compiled again.
+# not be compiled again. Every profile's directory is swept, a target
+# triple's (wasm32-unknown-unknown/release) and a nested target
+# directory's (rust-analyzer's analyzer/debug) included.
 
 sweep_incremental() {  # $1: the hook's name, $2: a target directory
   local old
-  old=$(find "$2"/*/incremental -mindepth 1 -maxdepth 1 -type d -mtime +3 \
-    2>/dev/null || true)
+  old=$(find "$2" -mindepth 2 -maxdepth 4 -type d -name incremental \
+    -exec find {} -mindepth 1 -maxdepth 1 -type d -mtime +3 \; 2>/dev/null || true)
   [ -n "$old" ] || return 0
   echo "$1: removing $(printf '%s\n' "$old" | wc -l) incremental" \
     "directories not compiled in three days under $2"
   printf '%s\n' "$old" | xargs -d '\n' rm -rf --
 }
 
-# The checkout's own target, by age. Skipped while a build holds a profile's
-# lock, and when cargo-sweep is missing, with a line saying so either way.
+# The checkout's own target, by age, wherever cargo puts it
+# (CARGO_TARGET_DIR, a config's build.target-dir). Every profile lock under
+# it is taken and held for the whole sweep, so a build that starts meanwhile
+# waits for the sweep instead of reading a directory being emptied, and a
+# build already holding one skips the sweep. Skipped too when cargo-sweep is
+# missing, when the target does not exist yet, and when a lock cannot be
+# opened (another user's file); a line says which.
 sweep_checkout() {  # $1: the hook's name, $2: the checkout's root
-  local lock busy=0
-  for lock in "$2"/target/*/.cargo-lock; do
-    if [ -e "$lock" ] && ! flock -n "$lock" true; then busy=1; fi
-  done
-  if [ "$busy" = 1 ]; then
-    echo "$1: a build holds the checkout's target; its sweep is skipped."
+  local target lock fd status
+  target=$(cd "$2" && cargo metadata --format-version 1 --no-deps 2>/dev/null |
+    jq -r .target_directory) || target=""
+  if [ -z "$target" ] || [ ! -d "$target" ]; then
+    echo "$1: no target directory yet; no sweep."
     return 0
   fi
-  sweep_incremental "$1" "$2/target"
-  if command -v cargo-sweep >/dev/null; then
-    cargo sweep --time 3 "$2"
-  else
+  if ! command -v cargo-sweep >/dev/null; then
     echo "$1: cargo-sweep is missing (cargo install cargo-sweep --locked); no sweep."
+    return 0
   fi
+  local fds=()
+  while IFS= read -r lock; do
+    if ! exec {fd}<"$lock"; then
+      echo "$1: cannot open $lock; no sweep."
+      return 0
+    fi
+    fds+=("$fd")
+    status=0
+    flock -n "$fd" || status=$?
+    if [ "$status" != 0 ]; then
+      echo "$1: a build holds $lock; the checkout's sweep is skipped."
+      for fd in "${fds[@]}"; do exec {fd}<&-; done
+      return 0
+    fi
+  done < <(find "$target" -maxdepth 4 -name .cargo-lock 2>/dev/null)
+  sweep_incremental "$1" "$target"
+  (cd "$2" && cargo sweep --time 3 .) || echo "$1: cargo sweep failed; the sweep is incomplete."
+  for fd in "${fds[@]}"; do exec {fd}<&-; done
 }

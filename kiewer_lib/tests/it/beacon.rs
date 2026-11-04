@@ -18,16 +18,21 @@ use kiewer_lib::web::viewer::page_script_url;
 use kiewer_test_support::db::fresh;
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use test_case::test_case;
+use tracing::Level;
+use tracing_subscriber::Layer;
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 
 const CHROME: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
-/// The process's log as JSON lines. A global subscriber is per process,
-/// and every module of this test binary shares this one once a test here
-/// installs it, so each test finds its own lines by a marker no other test
-/// uses. It is the binary's only global subscriber: installing a second
-/// one fails, so another module that needs the log reads this one or
-/// scopes its own with `tracing::subscriber::with_default`.
+/// The beacon's log lines as JSON. A global subscriber is per process,
+/// and every module of this test binary runs under this one once a test
+/// here installs it, so it keeps only the beacon handler's target: the
+/// rest of the binary's events would grow the buffer for the whole run.
+/// Each test finds its own lines by a marker no other test uses. It is
+/// the binary's only global subscriber: installing a second one fails, so
+/// another module that needs a log scopes its own with
+/// `tracing::subscriber::with_default`.
 static LOG: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
 
 struct LogWriter(Arc<Mutex<Vec<u8>>>);
@@ -50,8 +55,11 @@ fn log() -> Arc<Mutex<Vec<u8>>> {
     LOG.get_or_init(|| {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let writer = Arc::clone(&buffer);
-        let subscriber = tracing_subscriber::registry()
-            .with(tracing_stackdriver::layer().with_writer(move || LogWriter(Arc::clone(&writer))));
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_stackdriver::layer()
+                .with_writer(move || LogWriter(Arc::clone(&writer)))
+                .with_filter(Targets::new().with_target("kiewer_lib::web::beacon", Level::TRACE)),
+        );
         tracing::subscriber::set_global_default(subscriber).expect("the one global subscriber");
         buffer
     })
