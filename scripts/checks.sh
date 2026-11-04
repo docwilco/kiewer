@@ -57,6 +57,9 @@ stage_wasm() {
 # and what links it compile once here and once more in the next test
 # stage, in the same target directory: a compile each way, where a
 # directory of its own would hold a second copy of every dependency.
+# No workspace build first, unlike the test stage: the test spawns no
+# binary of the workspace, and a build would relink every binary with
+# the variable set, for nothing.
 #
 # No browser is a skip with a line saying so; on CI (which sets CI) it
 # is a failure, since the workflow installs it and a skip would hide a

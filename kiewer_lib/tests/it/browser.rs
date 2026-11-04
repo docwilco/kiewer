@@ -23,7 +23,7 @@ use chromiumoxide::listeners::EventStream;
 use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures_util::StreamExt as _;
 use kiewer_lib::blob::fs::FsBlobStore;
-use kiewer_lib::web::beacon::BEACON_PATH;
+use kiewer_lib::web::beacon::{BEACON_PATH, Backend, Beacon, Outcome};
 use kiewer_lib::web::viewer::embedded;
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use serde::Deserialize;
@@ -31,6 +31,10 @@ use serde::Deserialize;
 /// How long a page gets to send its beacon: SwiftShader draws on the CPU
 /// and the viewer is a debug build, so this is generous.
 const DEADLINE: Duration = Duration::from_secs(60);
+
+/// How long reading what a page shows may take, so a page stuck in its
+/// script still lets the failure say what it was waiting for.
+const READ_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The browser's executable, or `None` with a line saying the test
 /// skips.
@@ -80,26 +84,31 @@ struct Shown {
     error: Option<String>,
 }
 
-async fn shown(page: &Page) -> Shown {
-    page.evaluate(
+/// What `page` shows, or `None` when it does not answer within
+/// [`READ_DEADLINE`].
+async fn shown(page: &Page) -> Option<Shown> {
+    let read = page.evaluate(
         r#"({
             status: document.getElementById("status").textContent,
             error: document.getElementById("error").hidden
                 ? null
                 : document.getElementById("error").textContent,
         })"#,
+    );
+    let shown = tokio::time::timeout(READ_DEADLINE, read).await.ok()?;
+    Some(
+        shown
+            .expect("the page evaluates")
+            .into_value()
+            .expect("the status and the error box"),
     )
-    .await
-    .expect("the page evaluates")
-    .into_value()
-    .expect("the status and the error box")
 }
 
-/// A beacon as the server answered it: the body the page posted and the
-/// status that came back.
+/// A beacon as the server answered it: what the page posted, read by the
+/// server's own parser, and the status that came back.
 #[derive(Debug)]
-struct Beacon {
-    body: serde_json::Value,
+struct Answered {
+    beacon: Beacon,
     status: i64,
 }
 
@@ -109,8 +118,8 @@ async fn first_beacon(
     page: &Page,
     requests: &mut EventStream<EventRequestWillBeSent>,
     responses: &mut EventStream<EventResponseReceived>,
-) -> Beacon {
-    let mut sent: Option<(RequestId, serde_json::Value)> = None;
+) -> Answered {
+    let mut sent: Option<(RequestId, Beacon)> = None;
     let mut answered: HashMap<RequestId, i64> = HashMap::new();
     loop {
         tokio::select! {
@@ -122,8 +131,8 @@ async fn first_beacon(
                         .expect("the beacon's body")
                         .result
                         .post_data;
-                    let body = serde_json::from_str(&body).expect("the beacon is JSON");
-                    sent = Some((event.request_id.clone(), body));
+                    let beacon = Beacon::parse(body.as_bytes()).expect("a beacon the server takes");
+                    sent = Some((event.request_id.clone(), beacon));
                 }
             }
             Some(event) = responses.next() => {
@@ -131,12 +140,13 @@ async fn first_beacon(
                     answered.insert(event.request_id.clone(), event.response.status);
                 }
             }
+            else => panic!("the browser's event streams ended before a beacon was answered"),
         }
-        if let Some((id, body)) = &sent
+        if let Some((id, beacon)) = &sent
             && let Some(&status) = answered.get(id)
         {
-            return Beacon {
-                body: body.clone(),
+            return Answered {
+                beacon: beacon.clone(),
                 status,
             };
         }
@@ -173,17 +183,18 @@ async fn the_board_page_draws_on_webgl2_and_its_ok_beacon_arrives() {
     let beacon =
         tokio::time::timeout(DEADLINE, first_beacon(&page, &mut requests, &mut responses)).await;
     let shown = shown(&page).await;
-    let beacon = beacon
+    let answered = beacon
         .unwrap_or_else(|_| panic!("no beacon within {DEADLINE:?}; the page shows {shown:?}"));
+    let shown = shown.expect("the page answers once its beacon is sent");
 
     assert!(
         shown.status.starts_with("webgl2"),
-        "the backend line: {shown:?}, beacon {beacon:?}"
+        "the backend line: {shown:?}, beacon {answered:?}"
     );
     assert_eq!(shown.error, None, "the error box stays hidden");
-    assert_eq!(beacon.body["outcome"], "ok", "{beacon:?}");
-    assert_eq!(beacon.body["backend"], "webgl2", "{beacon:?}");
-    assert_eq!(beacon.status, 204, "the server took it: {beacon:?}");
+    assert_eq!(answered.beacon.outcome, Outcome::Ok, "{answered:?}");
+    assert_eq!(answered.beacon.backend, Backend::WebGl2, "{answered:?}");
+    assert_eq!(answered.status, 204, "the server took it: {answered:?}");
 
     browser.close().await.expect("the browser closes");
     browser.wait().await.expect("the browser exits");

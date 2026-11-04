@@ -17,7 +17,9 @@ set -euo pipefail
 version=156.0.8078.80
 sha256=547dcd374e02961bf998f6046a267644f8502225c36bb78ca307dab32a0b3eb4
 # The shared libraries the executable needs that a bare Ubuntu 24.04 lacks
-# (`ldd` lists them as not found), by their 24.04 package names.
+# (`ldd` lists them as not found), by their 24.04 package names; CI's test
+# job installs these on ubuntu-latest, so a runner image whose names differ
+# fails its apt step until this list follows.
 packages=(
   libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64
   libgbm1 libnspr4 libnss3 libxcomposite1 libxdamage1 libxfixes3
@@ -46,7 +48,9 @@ case "${1:-}" in
       "https://storage.googleapis.com/chrome-for-testing-public/$version/linux64/chrome-headless-shell-linux64.zip"
     echo "$sha256  $work/browser.zip" | sha256sum -c --quiet -
     unzip -q "$work/browser.zip" -d "$work/unpacked"
-    mv "$work/unpacked" "$dir"
+    # -T: when another install got there first, fail rather than nest
+    # this copy inside the directory the stage looks in.
+    mv -T "$work/unpacked" "$dir"
     echo "chrome-headless-shell $version installed at $executable"
     ;;
   *) echo "usage: $0 path|install|packages" >&2; exit 2 ;;
