@@ -42,7 +42,10 @@ target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_direct
 # A named package, not the workspace: the server does not build for
 # wasm32. The feature-unification concern behind "never -p"
 # (rust-conventions) is about duplicate artifacts under one target
-# directory; a --target build has a directory of its own.
+# directory; a --target build has a directory of its own. Within it,
+# debug and probe are two feature sets of kiewer_viewer alone, each kept
+# under deps, and both write the one debug/kiewer_viewer.wasm, which
+# wasm-bindgen reads right after, so each out-dir gets its own build.
 cargo build --target wasm32-unknown-unknown -p kiewer_viewer --lib "${profile_flag[@]}"
 mkdir -p "$out_dir"
 # --target web: an ES module with a default export that fetches the wasm

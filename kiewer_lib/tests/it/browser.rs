@@ -44,13 +44,20 @@ const DEADLINE: Duration = Duration::from_secs(60);
 const READ_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The browser's executable, or `None` with a line saying the test
-/// skips.
+/// skips. A browser with no viewer in the server is a broken setup, not
+/// a skip, so it fails here.
 fn executable() -> Option<PathBuf> {
     let path = std::env::var_os("KIEWER_BROWSER").filter(|path| !path.is_empty());
     if path.is_none() {
         eprintln!("KIEWER_BROWSER is unset; skipping (scripts/checks.sh browser sets it)");
     }
-    path.map(PathBuf::from)
+    let path = path.map(PathBuf::from)?;
+    assert!(
+        embedded(),
+        "KIEWER_BROWSER is set but this server has no viewer in it; \
+         KIEWER_VIEWER_DIST names the viewer to embed (scripts/checks.sh browser sets both)"
+    );
+    Some(path)
 }
 
 async fn start_server() -> (SocketAddr, TempDir) {
@@ -165,11 +172,6 @@ async fn the_board_page_draws_on_webgl2_and_its_ok_beacon_arrives() {
     let Some(executable) = executable() else {
         return;
     };
-    assert!(
-        embedded(),
-        "KIEWER_BROWSER is set but this server has no viewer in it; \
-         KIEWER_VIEWER_DIST names the viewer to embed (scripts/checks.sh browser sets both)"
-    );
     let (addr, _blobs) = start_server().await;
     let profile = scratch_dir!();
     let (mut browser, traffic) = launch(executable, &profile).await;
@@ -224,14 +226,17 @@ static BROWSERS: Semaphore = Semaphore::const_new(2);
 /// the beacons are counted, so one sent late is counted too.
 const SETTLE: Duration = Duration::from_millis(1500);
 
-/// The canvas's displayed width in the capped cases, in CSS pixels, and
-/// its height: short, so the 4x MSAA target at the limit stays a few
-/// hundred megabytes on SwiftShader.
+/// The canvas's displayed width in the capped cases, in CSS pixels.
 const CAPPED_WIDTH: u32 = 1200;
-const CAPPED_HEIGHT: u32 = 140;
 
-/// Room for the page's header line above the canvas, in CSS pixels.
-const HEADER: u32 = 40;
+/// The viewport's height in the capped cases, in CSS pixels: the page's
+/// header line and a short canvas under it, so the 4x MSAA target at the
+/// limit stays a few hundred megabytes on SwiftShader.
+const CAPPED_VIEWPORT_HEIGHT: u32 = 180;
+
+/// The viewport's height for a canvas 900 CSS pixels tall: the canvas and
+/// room for the page's header line above it.
+const FULL_VIEWPORT_HEIGHT: u32 = 940;
 
 /// Records each beacon's body as the page hands it to sendBeacon, before
 /// any script of the page runs.
@@ -251,6 +256,30 @@ document.addEventListener("readystatechange", function () {
   for (const canvas of document.querySelectorAll("canvas")) canvas.setAttribute("data-panic-probe", "");
 });
 "#;
+
+/// The two pages that draw on a canvas with the viewer.
+#[derive(Debug, Clone, Copy)]
+enum Viewed {
+    Board,
+    Schematic,
+}
+
+impl Viewed {
+    fn path(self) -> &'static str {
+        match self {
+            Viewed::Board => "/viewer",
+            Viewed::Schematic => "/schematic",
+        }
+    }
+
+    /// The id of the page's canvas.
+    fn canvas(self) -> &'static str {
+        match self {
+            Viewed::Board => "board",
+            Viewed::Schematic => "sheet",
+        }
+    }
+}
 
 /// A page in a browser of its own, with the server behind it.
 struct Session {
@@ -274,10 +303,15 @@ struct Canvas {
     css_height: f64,
 }
 
+/// The outcome of each beacon, in the order they were sent.
+fn outcomes(beacons: &[Beacon]) -> Vec<Outcome> {
+    beacons.iter().map(|beacon| beacon.outcome).collect()
+}
+
 impl Session {
-    /// A browser on a blank tab, recording beacons, with `probe` setting
-    /// data-panic-probe on the canvases of whatever page loads next.
-    async fn new(executable: PathBuf, probe: bool) -> Session {
+    /// A browser on a blank tab that records the beacons of whatever page
+    /// loads next.
+    async fn new(executable: PathBuf) -> Session {
         let permit = BROWSERS.acquire().await.expect("the semaphore stays open");
         let (addr, blobs) = start_server().await;
         let profile = scratch_dir!();
@@ -286,11 +320,6 @@ impl Session {
         page.evaluate_on_new_document(RECORD_BEACONS)
             .await
             .expect("the beacon recorder");
-        if probe {
-            page.evaluate_on_new_document(PANIC_PROBE)
-                .await
-                .expect("the panic probe");
-        }
         Session {
             browser,
             traffic,
@@ -300,6 +329,18 @@ impl Session {
             _profile: profile,
             _permit: permit,
         }
+    }
+
+    /// As [`Session::new`], with data-panic-probe set on the canvases of
+    /// the page that loads next, so Viewer.create panics there.
+    async fn with_panic_probe(executable: PathBuf) -> Session {
+        let session = Session::new(executable).await;
+        session
+            .page
+            .evaluate_on_new_document(PANIC_PROBE)
+            .await
+            .expect("the panic probe");
+        session
     }
 
     /// The viewport, `width` by `height` CSS pixels at `dpr` device
@@ -316,9 +357,10 @@ impl Session {
             .expect("the viewport");
     }
 
-    async fn goto(&self, path: &str) {
+    /// Loads `viewed`'s page from the server.
+    async fn goto(&self, viewed: Viewed) {
         self.page
-            .goto(format!("http://{}{path}", self.addr))
+            .goto(format!("http://{}{}", self.addr, viewed.path()))
             .await
             .expect("the page loads");
     }
@@ -333,15 +375,20 @@ impl Session {
             .expect("a value of the expected shape")
     }
 
-    /// Waits until `condition` holds on the page, up to [`DEADLINE`];
-    /// whether it did.
-    async fn until(&self, condition: &str) -> bool {
+    /// Whether `condition` came to hold on the page within [`DEADLINE`].
+    async fn held_within_deadline(&self, condition: &str) -> bool {
         let poll = async {
             while !self.read::<bool>(condition).await {
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         };
         tokio::time::timeout(DEADLINE, poll).await.is_ok()
+    }
+
+    /// Whether the page sent `count` beacons within [`DEADLINE`].
+    async fn sent_within_deadline(&self, count: usize) -> bool {
+        self.held_within_deadline(&format!("window.kiewerBeacons.length >= {count}"))
+            .await
     }
 
     /// WebGL2's `MAX_TEXTURE_SIZE`, which wgpu reads as the adapter's
@@ -354,13 +401,25 @@ impl Session {
         .await
     }
 
-    async fn canvas(&self, id: &str) -> Canvas {
+    /// `viewed`'s canvas as the page holds it now.
+    async fn canvas(&self, viewed: Viewed) -> Canvas {
         self.read(&format!(
             r#"(() => {{
-                const canvas = document.getElementById("{id}");
+                const canvas = document.getElementById("{}");
                 const r = canvas.getBoundingClientRect();
                 return {{ width: canvas.width, height: canvas.height, cssWidth: r.width, cssHeight: r.height }};
-            }})()"#
+            }})()"#,
+            viewed.canvas()
+        ))
+        .await
+    }
+
+    /// Whether `viewed`'s canvas came to be `width` backing pixels wide
+    /// within [`DEADLINE`].
+    async fn canvas_within_deadline(&self, viewed: Viewed, width: u32) -> bool {
+        self.held_within_deadline(&format!(
+            r#"document.getElementById("{}").width === {width}"#,
+            viewed.canvas()
         ))
         .await
     }
@@ -374,36 +433,17 @@ impl Session {
             .collect()
     }
 
-    async fn outcomes(&self) -> Vec<Outcome> {
-        self.beacons()
-            .await
-            .iter()
-            .map(|beacon| beacon.outcome)
-            .collect()
-    }
-
     /// What the page shows, waiting for it to answer.
     async fn shown(&self) -> Shown {
         shown(&self.page).await.expect("the page answers")
     }
 
+    /// Closes the browser and waits for it and its protocol task to end.
     async fn close(mut self) {
         self.browser.close().await.expect("the browser closes");
         self.browser.wait().await.expect("the browser exits");
         self.traffic.await.expect("the protocol task ends");
     }
-}
-
-/// The browser's executable once the server is known to carry the
-/// viewer, or `None` when the test skips.
-fn ready() -> Option<PathBuf> {
-    let executable = executable()?;
-    assert!(
-        embedded(),
-        "KIEWER_BROWSER is set but this server has no viewer in it; \
-         KIEWER_VIEWER_DIST names the viewer to embed (scripts/checks.sh browser sets both)"
-    );
-    Some(executable)
 }
 
 /// The device pixel ratio that puts a canvas [`CAPPED_WIDTH`] CSS pixels
@@ -412,17 +452,17 @@ fn dpr_past(limit: u32) -> u32 {
     (limit + limit / 10).div_ceil(CAPPED_WIDTH)
 }
 
-#[test_case("/viewer", "board"; "the board page")]
-#[test_case("/schematic", "sheet"; "the schematic page")]
+#[test_case(Viewed::Board; "the board page")]
+#[test_case(Viewed::Schematic; "the schematic page")]
 #[tokio::test]
-async fn a_canvas_2100_wide_draws_at_full_size_on_webgl2(path: &str, id: &str) {
-    let Some(executable) = ready() else {
+async fn a_canvas_2100_wide_draws_at_full_size_on_webgl2(viewed: Viewed) {
+    let Some(executable) = executable() else {
         return;
     };
-    let session = Session::new(executable, false).await;
-    session.viewport(2100, 900 + HEADER, 1).await;
-    session.goto(path).await;
-    let sent = session.until("window.kiewerBeacons.length > 0").await;
+    let session = Session::new(executable).await;
+    session.viewport(2100, FULL_VIEWPORT_HEIGHT, 1).await;
+    session.goto(viewed).await;
+    let sent = session.sent_within_deadline(1).await;
     tokio::time::sleep(SETTLE).await;
     let shown = session.shown().await;
     assert!(
@@ -430,7 +470,7 @@ async fn a_canvas_2100_wide_draws_at_full_size_on_webgl2(path: &str, id: &str) {
         "no beacon within {DEADLINE:?}; the page shows {shown:?}"
     );
 
-    let canvas = session.canvas(id).await;
+    let canvas = session.canvas(viewed).await;
     assert_eq!(canvas.width, 2100, "{canvas:?}");
     assert!(
         shown.status.starts_with("webgl2"),
@@ -438,65 +478,61 @@ async fn a_canvas_2100_wide_draws_at_full_size_on_webgl2(path: &str, id: &str) {
     );
     assert_eq!(shown.error, None, "the error box stays hidden");
     assert_eq!(
-        session.outcomes().await,
+        outcomes(&session.beacons().await),
         [Outcome::Ok],
         "one ok beacon, no capped one"
     );
     session.close().await;
 }
 
-#[test_case("/viewer", "board"; "the board page")]
-#[test_case("/schematic", "sheet"; "the schematic page")]
+#[test_case(Viewed::Board; "the board page")]
+#[test_case(Viewed::Schematic; "the schematic page")]
 #[tokio::test]
-async fn a_canvas_past_the_adapters_limit_is_capped_with_its_aspect_kept(path: &str, id: &str) {
-    let Some(executable) = ready() else {
+async fn a_canvas_past_the_adapters_limit_is_capped_with_its_aspect_kept(viewed: Viewed) {
+    let Some(executable) = executable() else {
         return;
     };
-    let session = Session::new(executable, false).await;
+    let session = Session::new(executable).await;
     let limit = session.texture_limit().await;
     let dpr = dpr_past(limit);
     session
-        .viewport(CAPPED_WIDTH, CAPPED_HEIGHT + HEADER, dpr)
+        .viewport(CAPPED_WIDTH, CAPPED_VIEWPORT_HEIGHT, dpr)
         .await;
-    session.goto(path).await;
-    let sent = session.until("window.kiewerBeacons.length >= 2").await;
+    session.goto(viewed).await;
+    let sent = session.sent_within_deadline(2).await;
     tokio::time::sleep(SETTLE).await;
     let shown = session.shown().await;
+    let beacons = session.beacons().await;
     assert!(
         sent,
-        "no ok and capped beacons within {DEADLINE:?}; the page shows {shown:?}, sent {:?}",
-        session.beacons().await
+        "no ok and capped beacons within {DEADLINE:?}; the page shows {shown:?}, sent {beacons:?}"
     );
 
-    let canvas = session.canvas(id).await;
-    let wanted = (
+    let canvas = session.canvas(viewed).await;
+    let asked = (
         (canvas.css_width * f64::from(dpr)).round(),
         (canvas.css_height * f64::from(dpr)).round(),
     );
     assert!(
-        wanted.0 > f64::from(limit),
+        asked.0 > f64::from(limit),
         "the page asks past {limit}: {canvas:?}"
     );
     assert_eq!(
         canvas.width, limit,
         "the longer side at the limit: {canvas:?}"
     );
-    let kept = (wanted.1 * f64::from(limit) / wanted.0).round();
+    let aspect_kept = (asked.1 * f64::from(limit) / asked.0).round();
     assert!(
-        (f64::from(canvas.height) - kept).abs() <= 1.0,
-        "the aspect is kept: {canvas:?}, asked {wanted:?}"
+        (f64::from(canvas.height) - aspect_kept).abs() <= 1.0,
+        "the aspect is kept: {canvas:?}, asked {asked:?}"
     );
     assert!(
         shown.status.starts_with("webgl2"),
         "the backend line: {shown:?}"
     );
     assert_eq!(shown.error, None, "the error box stays hidden");
-    let beacons = session.beacons().await;
     assert_eq!(
-        beacons
-            .iter()
-            .map(|beacon| beacon.outcome)
-            .collect::<Vec<_>>(),
+        outcomes(&beacons),
         [Outcome::Ok, Outcome::Capped],
         "{beacons:?}"
     );
@@ -505,71 +541,78 @@ async fn a_canvas_past_the_adapters_limit_is_capped_with_its_aspect_kept(path: &
     session.close().await;
 }
 
-#[test_case("/viewer", "board"; "the board page")]
-#[test_case("/schematic", "sheet"; "the schematic page")]
+#[test_case(Viewed::Board; "the board page")]
+#[test_case(Viewed::Schematic; "the schematic page")]
 #[tokio::test]
-async fn a_window_that_grows_past_the_limit_after_startup_is_capped_once(path: &str, id: &str) {
-    let Some(executable) = ready() else {
+async fn a_window_that_grows_past_the_limit_after_startup_is_capped_once(viewed: Viewed) {
+    let Some(executable) = executable() else {
         return;
     };
-    let session = Session::new(executable, false).await;
+    let session = Session::new(executable).await;
     let limit = session.texture_limit().await;
     let dpr = dpr_past(limit);
-    let under = limit / dpr - 200;
-    session.viewport(under, CAPPED_HEIGHT + HEADER, dpr).await;
-    session.goto(path).await;
-    let sent = session.until("window.kiewerBeacons.length > 0").await;
+    let start_width = limit / dpr - 200;
+    session
+        .viewport(start_width, CAPPED_VIEWPORT_HEIGHT, dpr)
+        .await;
+    session.goto(viewed).await;
+    let sent = session.sent_within_deadline(1).await;
     let shown = session.shown().await;
     assert!(
         sent,
         "no beacon within {DEADLINE:?}; the page shows {shown:?}"
     );
-    let canvas = session.canvas(id).await;
+    let canvas = session.canvas(viewed).await;
     assert!(
         canvas.width < limit,
         "under the limit at startup: {canvas:?}"
     );
 
-    // Past the limit, back under it and past it again: one capped beacon.
-    for width in [CAPPED_WIDTH, under, CAPPED_WIDTH + 100] {
-        session.viewport(width, CAPPED_HEIGHT + HEADER, dpr).await;
-        let follows = if width == under {
-            format!(r#"document.getElementById("{id}").width < {limit}"#)
-        } else {
-            format!(r#"document.getElementById("{id}").width === {limit}"#)
-        };
+    // Past the limit, back to where it started and past it again, each
+    // step once the canvas has followed the last: one capped beacon.
+    let started = canvas.width;
+    for (width, backing) in [
+        (CAPPED_WIDTH, limit),
+        (start_width, started),
+        (CAPPED_WIDTH + 100, limit),
+    ] {
+        session.viewport(width, CAPPED_VIEWPORT_HEIGHT, dpr).await;
         assert!(
-            session.until(&follows).await,
+            session.canvas_within_deadline(viewed, backing).await,
             "the canvas follows the window to {width}: {:?}",
-            session.canvas(id).await
+            session.canvas(viewed).await
         );
     }
     tokio::time::sleep(SETTLE).await;
 
-    let canvas = session.canvas(id).await;
+    let canvas = session.canvas(viewed).await;
+    assert!(
+        canvas.css_width * f64::from(dpr) > f64::from(limit),
+        "the page asks past {limit}: {canvas:?}"
+    );
     assert_eq!(canvas.width, limit, "capped after growing: {canvas:?}");
     let shown = session.shown().await;
     assert_eq!(shown.error, None, "no panic: {shown:?}");
     assert_eq!(
-        session.outcomes().await,
+        outcomes(&session.beacons().await),
         [Outcome::Ok, Outcome::Capped],
         "one capped beacon over two crossings, no panic"
     );
     session.close().await;
 }
 
-#[test_case("/viewer"; "the board page")]
-#[test_case("/schematic"; "the schematic page")]
+#[test_case(Viewed::Board; "the board page")]
+#[test_case(Viewed::Schematic; "the schematic page")]
 #[tokio::test]
-async fn a_panic_inside_viewer_create_shows_and_sends_its_beacon(path: &str) {
-    let Some(executable) = ready() else {
+async fn a_panic_inside_viewer_create_shows_and_sends_its_beacon(viewed: Viewed) {
+    let Some(executable) = executable() else {
         return;
     };
-    let session = Session::new(executable, true).await;
+    let session = Session::with_panic_probe(executable).await;
     session.viewport(1000, 700, 1).await;
-    session.goto(path).await;
+    session.goto(viewed).await;
     let failed = session
-        .until(r#"!document.getElementById("error").hidden"#)
+        .held_within_deadline(r#"!document.getElementById("error").hidden"#)
         .await;
     tokio::time::sleep(SETTLE).await;
     let shown = session.shown().await;
@@ -584,14 +627,7 @@ async fn a_panic_inside_viewer_create_shows_and_sends_its_beacon(path: &str) {
         "the panic's own message: {error}"
     );
     let beacons = session.beacons().await;
-    assert_eq!(
-        beacons
-            .iter()
-            .map(|beacon| beacon.outcome)
-            .collect::<Vec<_>>(),
-        [Outcome::Panic],
-        "{beacons:?}"
-    );
+    assert_eq!(outcomes(&beacons), [Outcome::Panic], "{beacons:?}");
     assert_eq!(
         beacons[0].backend,
         Backend::None,
