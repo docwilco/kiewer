@@ -634,11 +634,8 @@ async fn refused(
 /// What follows a revision landing, a push's or a pending revision's: the
 /// thumbnail (ADR 0004), drawn within the render budget, else queued for
 /// a retry, which never fails the upload; then the purge of `keys`, so it
-/// covers a thumbnail drawn within the budget. Its caller runs it in a
-/// task of its own: a browser that gives up during the render drops the
-/// handler, and a purge lost with it would leave the pages stale for the
-/// hour.
-async fn settle(state: &AppState, revision: RevisionHash, keys: Vec<Key>) {
+/// covers a thumbnail drawn within the budget.
+async fn render_and_purge(state: &AppState, revision: RevisionHash, keys: Vec<Key>) {
     state
         .thumbnails
         .after_push(&state.db, state.blobs.as_ref(), revision)
@@ -646,22 +643,26 @@ async fn settle(state: &AppState, revision: RevisionHash, keys: Vec<Key>) {
     cache::after_write(state.purge.as_ref(), &keys).await;
 }
 
-/// [`settle`] in a task of its own, awaited: a pending revision's, once
-/// its decision has landed.
+/// [`render_and_purge`] in a task of its own, awaited. A task of its own
+/// twice over: a browser that gives up during the render drops the
+/// handler, and a purge lost with it would leave the pages stale for the
+/// hour; and a panic in the render or the purge is a warning in the log,
+/// never the failure of the write that landed the revision.
 pub(super) async fn after_landing(state: &AppState, revision: RevisionHash, keys: Vec<Key>) {
     let after = state.clone();
-    let settled = tokio::spawn(async move { settle(&after, revision, keys).await });
-    if let Err(error) = settled.await {
-        tracing::warn!(%error, "the render and purge after a push did not finish");
+    let rendered = tokio::spawn(async move { render_and_purge(&after, revision, keys).await });
+    if let Err(error) = rendered.await {
+        tracing::warn!(%error, %revision, "the render and purge after a revision landed did not finish");
     }
 }
 
-/// The push of `incoming` to `target` and what follows a revision it
-/// lands ([`settle`], with the keys of the design under `owner`), together
+/// The push of `incoming` to `target` and [`after_landing`] for a
+/// revision it lands, with the keys of the design under `owner`, together
 /// in one task, which the handler awaits. A browser that leaves drops only
 /// the wait, so it can no longer land between the push's commit and the
-/// render and purge (#91).
-async fn push_and_settle(
+/// render and purge (#91). The pending revision's decision still spawns
+/// after its commit (#114).
+async fn push_with_after_landing(
     state: &AppState,
     author: Author,
     owner: Handle,
@@ -683,10 +684,12 @@ async fn push_and_settle(
         .await?;
         if let Outcome::Pushed(committed) = &outcome {
             let keys = cache::of_design(committed.design.id, &owner, committed.design.visibility);
-            settle(&state, committed.revision, keys).await;
+            after_landing(&state, committed.revision, keys).await;
         }
         Ok(outcome)
     });
+    // A panic in the push itself, before any revision landed, or the
+    // runtime shutting down: the handler's 500.
     pushed.await.unwrap_or_else(|error| {
         Err(Error::Failed {
             reason: format!("the push did not finish: {error}"),
@@ -730,7 +733,7 @@ pub(super) async fn upload(
     };
     let committed = match target {
         Ok(target) => {
-            push_and_settle(
+            push_with_after_landing(
                 &state,
                 author,
                 owner.clone(),
