@@ -40,7 +40,8 @@ pub async fn pool_from_env() -> Option<PgPool> {
 pub async fn pool_of_its_own(suffix: &str) -> Option<PgPool> {
     let url = database_url()?;
     let shared: PgConnectOptions = url.parse().expect("DATABASE_URL is a Postgres URL");
-    // With no database in the URL, Postgres connects to the user's.
+    // With no database in the URL, sqlx takes PGDATABASE, and without that
+    // Postgres connects to the user's.
     let shared_name = shared.get_database().unwrap_or(shared.get_username());
     let own = format!("{shared_name}_{suffix}");
     let mut on_shared = PgConnection::connect_with(&shared)
