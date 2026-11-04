@@ -62,38 +62,194 @@
   <label>Files, or a zip of the project
     <input type="file" name="files" multiple accept=".kicad_pcb,.kicad_sch,.kicad_pro,.zip">
   </label>
+  <noscript><p>With scripts off, a zip is refused: choose the project folder or its files.</p></noscript>
   <label>Or the project folder
     <input type="file" name="files" multiple webkitdirectory>
   </label>
   <div id="drop" tabindex="0">Or drop files, a folder or a zip here</div>
   <ul id="dropped"></ul>
-  <p>Only <code>.kicad_pcb</code>, <code>.kicad_sch</code> and <code>.kicad_pro</code> files are kept, from KiCad 9 or later, up to {{ file_mb }} MB each and {{ revision_mb }} MB together. Other files are left out, and so are backups, lock files and autosaves. The files are kept under the project folder, the one holding the <code>.kicad_pro</code>, with their paths.</p>
+  <p>Only <code>.kicad_pcb</code>, <code>.kicad_sch</code> and <code>.kicad_pro</code> files are kept, from KiCad 9 or later, up to {{ file_mb }} MB each and {{ revision_mb }} MB together. Other files are left out, and so are backups, lock files and autosaves. A zip is opened here, in the browser, and only the files it keeps count. The files are kept under the project folder, the one holding the <code>.kicad_pro</code>, with their paths.</p>
+  <p id="denied" class="error" role="alert" hidden></p>
   <button type="submit">Upload</button>
 </form>
 <script type="module">
 // The folder picker and a dropped folder give each file its path under
 // the folder (webkitRelativePath, the entry's path): the body is built
-// here so every part carries it, and the server roots the tree.
+// here so every part carries it, and the server roots the tree. A zip is
+// expanded here too (ADR 0005), into files with their paths in the zip,
+// so the server takes no zip and a zip's own size counts for nothing.
 const form = document.querySelector("form");
 const button = form.querySelector("button");
 const drop = document.getElementById("drop");
 const droppedList = document.getElementById("dropped");
+const denial = document.getElementById("denied");
 const dropped = [];
 // A dropped folder is read a batch at a time; a submit waits for it, or the
 // revision would hold only what the walk had reached.
 let walking = Promise.resolve();
 
-// What leaves the browser. The server's rules decide what is kept (FileKind,
-// upload::skipped, Incoming::is_archive); these spare the transfer, since
-// everything sent counts against the body limit and a large .git beside the
-// project would refuse an upload whose files fit.
-const skippedFolder = (name) => name.endsWith("-backups") || name.startsWith(".") || name === "__MACOSX";
+// The server's caps (upload::Limits), which a zip's directory is checked
+// against before anything in it is inflated.
+const MB = 1024 * 1024;
+const fileMb = {{ file_mb }};
+const revisionMb = {{ revision_mb }};
+const zipEntries = {{ zip_entries }};
 
-function sent(path) {
+// What leaves the browser. The server's rules decide what is kept (FileKind,
+// upload::skipped); these spare the transfer, since everything sent counts
+// against the body limit and a large .git beside the project would refuse
+// an upload whose files fit.
+const skippedFolder = (name) => name.endsWith("-backups") || name.startsWith(".") || name === "__MACOSX";
+const skippedName = (name) => name.endsWith(".lck") || name.startsWith("_autosave-") || name.includes("-save.kicad_");
+
+function kept(path) {
   const folders = path.split("/");
   const name = folders.pop().toLowerCase();
-  if (folders.some(skippedFolder)) return false;
-  return /\.kicad_(pcb|sch|pro)$/.test(name) || (folders.length === 0 && name.endsWith(".zip"));
+  if (folders.some(skippedFolder) || skippedName(name)) return false;
+  return /\.kicad_(pcb|sch|pro)$/.test(name);
+}
+
+// A zip chosen or dropped by itself is expanded; one inside a folder is a
+// backup or an archive beside the project, and stays behind.
+const isZip = (path) => !path.includes("/") && path.toLowerCase().endsWith(".zip");
+
+const sent = (path) => kept(path) || isZip(path);
+
+// Why the page will not send what was chosen, said on the page.
+class Denied extends Error {}
+
+function damaged(zip, what) {
+  return new Denied(`${zip.name}: ${what}; zip the project again, or drop the project folder instead`);
+}
+
+const u16 = (view, at) => view.getUint16(at, true);
+const u32 = (view, at) => view.getUint32(at, true);
+const bytesOf = async (blob) => new DataView(await blob.arrayBuffer());
+const names = new TextDecoder();
+
+// The entries of `zip` the upload keeps, read from its central directory
+// alone: path, method, sizes and where the entry starts. Store and deflate
+// only; no encryption, no zip64, one file.
+async function directoryOf(zip) {
+  const tailStart = Math.max(0, zip.size - (22 + 0xffff));
+  const tail = await bytesOf(zip.slice(tailStart));
+  let end = -1;
+  for (let at = tail.byteLength - 22; at >= 0; at--) {
+    if (u32(tail, at) === 0x06054b50) {
+      end = at;
+      break;
+    }
+  }
+  if (end < 0) throw damaged(zip, "is not a zip");
+  const count = u16(tail, end + 10);
+  const size = u32(tail, end + 12);
+  const offset = u32(tail, end + 16);
+  const zip64 = (end >= 20 && u32(tail, end - 20) === 0x07064b50)
+    || count === 0xffff || size === 0xffffffff || offset === 0xffffffff;
+  if (zip64) throw damaged(zip, "has zip64 records, which the page does not read");
+  if (u16(tail, end + 4) !== 0 || u16(tail, end + 6) !== 0 || u16(tail, end + 8) !== count) {
+    throw damaged(zip, "spans more than one file");
+  }
+  if (count > zipEntries) {
+    throw damaged(zip, `lists ${count} entries, more than the ${zipEntries} the page reads`);
+  }
+  if (offset + size > zip.size) throw damaged(zip, "has a damaged directory");
+  const directory = await bytesOf(zip.slice(offset, offset + size));
+  const entries = [];
+  let at = 0;
+  for (let index = 0; index < count; index++) {
+    if (at + 46 > directory.byteLength || u32(directory, at) !== 0x02014b50) {
+      throw damaged(zip, "has a damaged directory");
+    }
+    const flags = u16(directory, at + 8);
+    const method = u16(directory, at + 10);
+    const packed = u32(directory, at + 20);
+    const unpacked = u32(directory, at + 24);
+    const nameLength = u16(directory, at + 28);
+    const local = u32(directory, at + 42);
+    const start = at + 46;
+    at = start + nameLength + u16(directory, at + 30) + u16(directory, at + 32);
+    if (at > directory.byteLength) throw damaged(zip, "has a damaged directory");
+    const raw = new Uint8Array(directory.buffer, directory.byteOffset + start, nameLength);
+    // Windows PowerShell's Compress-Archive writes backslashes.
+    const path = names.decode(raw).replaceAll("\\", "/");
+    if (path.endsWith("/") || !kept(path)) continue;
+    if (flags & 1) throw damaged(zip, `${path} is encrypted`);
+    if (method !== 0 && method !== 8) {
+      throw damaged(zip, `${path} is compressed with neither deflate nor store`);
+    }
+    if (packed === 0xffffffff || unpacked === 0xffffffff || local === 0xffffffff) {
+      throw damaged(zip, "has zip64 records, which the page does not read");
+    }
+    if (method === 0 && packed !== unpacked) {
+      throw damaged(zip, `${path} is stored with two sizes`);
+    }
+    entries.push({ path, method, packed, unpacked, local });
+  }
+  return entries;
+}
+
+// The bytes of one entry, bounded by the size its directory entry declares:
+// an entry that inflates past it is a lie, and stops there.
+async function inflated(zip, entry) {
+  const head = await bytesOf(zip.slice(entry.local, entry.local + 30));
+  if (head.byteLength < 30 || u32(head, 0) !== 0x04034b50) {
+    throw damaged(zip, `${entry.path} is not where its directory entry says`);
+  }
+  const start = entry.local + 30 + u16(head, 26) + u16(head, 28);
+  const packed = zip.slice(start, start + entry.packed);
+  if (packed.size !== entry.packed) throw damaged(zip, `${entry.path} is cut short`);
+  if (entry.method === 0) return packed;
+  const chunks = [];
+  let size = 0;
+  try {
+    const reader = packed.stream().pipeThrough(new DecompressionStream("deflate-raw")).getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > entry.unpacked) {
+        await reader.cancel();
+        throw damaged(zip, `${entry.path} inflates to more than the ${entry.unpacked} bytes its directory entry declares`);
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (error instanceof Denied) throw error;
+    throw damaged(zip, `${entry.path} does not inflate: ${error.message}`);
+  }
+  if (size !== entry.unpacked) {
+    throw damaged(zip, `${entry.path} holds ${size} bytes where its directory entry declares ${entry.unpacked}`);
+  }
+  return new Blob(chunks);
+}
+
+// What was chosen, with every zip in it replaced by the files it keeps.
+// Every directory is read and checked against the caps first, so a zip
+// over one is denied before anything is inflated.
+async function expanded(chosen) {
+  const zips = chosen.filter((item) => isZip(item.path));
+  if (zips.length === 0) return chosen;
+  const plain = chosen.filter((item) => !isZip(item.path));
+  const planned = [];
+  for (const { file } of zips) planned.push({ zip: file, entries: await directoryOf(file) });
+  let total = plain.reduce((sum, item) => sum + item.file.size, 0);
+  for (const { zip, entries } of planned) {
+    for (const entry of entries) {
+      if (entry.unpacked > fileMb * MB) {
+        throw new Denied(`${zip.name}: ${entry.path} is larger than ${fileMb} MB, the limit for one file`);
+      }
+      total += entry.unpacked;
+    }
+  }
+  if (total > revisionMb * MB) {
+    throw new Denied(`the files together are larger than ${revisionMb} MB, the limit for one revision`);
+  }
+  const files = [...plain];
+  for (const { zip, entries } of planned) {
+    for (const entry of entries) files.push({ path: entry.path, file: await inflated(zip, entry) });
+  }
+  return files;
 }
 
 function note(path) {
@@ -153,21 +309,33 @@ drop.addEventListener("drop", async (event) => {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   button.disabled = true;
+  denial.hidden = true;
   try {
     await walking;
     const body = new FormData();
+    const chosen = [];
     for (const field of form.elements) {
       if (!field.name) continue;
       if (field.type === "file") {
         for (const file of field.files) {
           const path = file.webkitRelativePath || file.name;
-          if (sent(path)) body.append("files", file, path);
+          if (sent(path)) chosen.push({ path, file });
         }
       } else {
         body.append(field.name, field.value);
       }
     }
-    for (const entry of dropped) body.append("files", entry.file, entry.path);
+    chosen.push(...dropped);
+    let files;
+    try {
+      files = await expanded(chosen);
+    } catch (error) {
+      if (!(error instanceof Denied)) throw error;
+      denial.textContent = error.message;
+      denial.hidden = false;
+      return;
+    }
+    for (const { path, file } of files) body.append("files", file, path);
     const response = await fetch(form.action, { method: "POST", body, credentials: "same-origin" });
     if (response.redirected) {
       location.assign(response.url);

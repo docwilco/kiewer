@@ -1,13 +1,13 @@
 //! Uploading a revision and viewing it, over HTTP (#16): the upload form
 //! and its POST for a signed-in person, the design page with the viewer
 //! at the head of the default branch, the blob route, and the caps
-//! through `kiewer_lib::upload` directly; and (#17) a zip and a dropped
-//! folder with their paths, the skip list, the rooting with its warning,
-//! the zip caps against the central directory, and the hourly allowance.
-//! The Postgres tests skip without `DATABASE_URL`, like `tests/it/db.rs`;
-//! the route-priority test and the cap tests need no database.
+//! through `kiewer_lib::upload` directly; and (#17) a dropped folder with
+//! its paths, the skip list, the rooting with its warning, and the hourly
+//! allowance; and (#83) the refusal of a zip part, since the upload page
+//! expands a zip itself (ADR 0005; its tests are in `browser.rs`). The
+//! Postgres tests skip without `DATABASE_URL`, like `tests/it/db.rs`; the
+//! route-priority test and the cap tests need no database.
 
-use std::io::{Cursor, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,29 +29,13 @@ use sqlx::PgPool;
 use test_case::test_case;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use zip::CompressionMethod;
-use zip::write::SimpleFileOptions;
 
-const BOARD: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_pcb");
-const SCHEMATIC: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_sch");
-const PROJECT: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_pro");
+pub(super) const BOARD: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_pcb");
+pub(super) const SCHEMATIC: &[u8] =
+    include_bytes!("../../../viewer-drop/board/midi8knob.kicad_sch");
+pub(super) const PROJECT: &[u8] = include_bytes!("../../../viewer-drop/board/midi8knob.kicad_pro");
 /// A sheet below the root sheet: the least the parser takes.
-const LOWER_SHEET: &[u8] = b"(kicad_sch (version 20250114) (generator \"test\"))";
-
-/// A zip as Explorer or `zip -r` writes one: a directory entry for each
-/// of `folders`, then `entries` (path, bytes) deflated.
-fn zip_of(folders: &[&str], entries: &[(&str, &[u8])]) -> Vec<u8> {
-    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    for folder in folders {
-        writer.add_directory(*folder, options).expect("a folder");
-    }
-    for (path, bytes) in entries {
-        writer.start_file(*path, options).expect("an entry");
-        writer.write_all(bytes).expect("its bytes");
-    }
-    writer.finish().expect("a zip").into_inner()
-}
+pub(super) const LOWER_SHEET: &[u8] = b"(kicad_sch (version 20250114) (generator \"test\"))";
 
 /// The server over `db` with a filesystem blob store under cargo's
 /// scratch directory and no sign-in provider.
@@ -62,7 +46,7 @@ async fn server(db: PgPool) -> (SocketAddr, TempDir) {
 }
 
 /// A person with a handle: the uploader.
-async fn person(db: &PgPool) -> (AccountId, Handle) {
+pub(super) async fn person(db: &PgPool) -> (AccountId, Handle) {
     let signed_in = account::sign_in(
         db,
         Provider::GitHub,
@@ -329,16 +313,6 @@ async fn an_upload_without_a_kicad_file_or_with_a_malformed_one_is_refused_with_
     assert!(nothing.body.contains("no KiCad file"), "{}", nothing.body);
     assert_eq!(nothing.header("cache-control"), Some("private, no-store"));
 
-    let not_a_zip = browser
-        .post_multipart("/upload", &[Part::file("x.zip", b"PK")])
-        .await;
-    assert_eq!(not_a_zip.status, 422, "{}", not_a_zip.body);
-    assert!(
-        not_a_zip.body.contains("x.zip:"),
-        "a zip that is not one is refused naming it: {}",
-        not_a_zip.body
-    );
-
     let malformed = browser
         .post_multipart(
             "/upload",
@@ -577,7 +551,7 @@ async fn the_account_cap_and_the_parse_timeout_refuse_through_commit() {
 }
 
 /// The paths the design page lists, in order: what the tree holds.
-fn listed_paths(page: &str) -> Vec<&str> {
+pub(super) fn listed_paths(page: &str) -> Vec<&str> {
     page.match_indices(r#" download=""#)
         .map(|(at, _)| {
             let rest = &page[at..];
@@ -586,84 +560,6 @@ fn listed_paths(page: &str) -> Vec<&str> {
             &rest[start..end]
         })
         .collect()
-}
-
-#[tokio::test]
-async fn an_explorer_zip_of_the_hand_off_project_uploads_rooted_with_the_sheet_paths_kept() {
-    let Some(db) = pool_from_env().await else {
-        return;
-    };
-    let (addr, _dir) = server(db.clone()).await;
-    let (mut browser, _, handle) = signed_in(&db, addr).await;
-    // Explorer's "Compressed (zipped) folder" of the project folder: the
-    // folder itself wraps everything, with KiCad's backups, lock file,
-    // autosave and save file, a dot-directory, Finder's folder, and the
-    // files KiCad keeps beside the project. Every skipped file is garbage
-    // where a KiCad file would be refused, so keeping one would fail.
-    let zip = zip_of(
-        &[
-            "midi8knob/",
-            "midi8knob/sub/",
-            "midi8knob/midi8knob-backups/",
-            "midi8knob/.git/",
-            "__MACOSX/",
-            "__MACOSX/midi8knob/",
-        ],
-        &[
-            ("midi8knob/midi8knob.kicad_pro", PROJECT),
-            ("midi8knob/midi8knob.kicad_pcb", BOARD),
-            ("midi8knob/midi8knob.kicad_sch", SCHEMATIC),
-            ("midi8knob/sub/power.kicad_sch", LOWER_SHEET),
-            (
-                "midi8knob/midi8knob-backups/midi8knob-2026-11-02_120000.zip",
-                b"PK\x03\x04 not a zip",
-            ),
-            (
-                "midi8knob/midi8knob-backups/midi8knob.kicad_pcb",
-                b"(kicad_pcb garbage",
-            ),
-            ("midi8knob/~midi8knob.kicad_pcb.lck", b"{}"),
-            ("midi8knob/_autosave-midi8knob.kicad_sch", b"(garbage"),
-            ("midi8knob/midi8knob-save.kicad_pcb", b"(garbage"),
-            ("midi8knob/.git/HEAD", b"ref: refs/heads/main\n"),
-            (
-                "__MACOSX/midi8knob/._midi8knob.kicad_pcb",
-                b"\x00\x05\x16\x07",
-            ),
-            ("midi8knob/fp-info-cache", b"0\n"),
-            ("midi8knob/README.md", b"# not kept\n"),
-        ],
-    );
-    let posted = browser
-        .post_multipart(
-            "/upload",
-            &[
-                Part::text("message", "from a zip"),
-                Part::file("midi8knob.zip", &zip),
-            ],
-        )
-        .await;
-    assert_eq!(posted.status, 303, "{}", posted.body);
-    let design_path = format!("/{handle}/midi8knob");
-    assert_eq!(posted.header("location"), Some(design_path.as_str()));
-    let page = http::request(addr, "GET", &design_path, &[], "").await;
-    assert_eq!(page.status, 200, "{}", page.body);
-    assert_eq!(
-        listed_paths(&page.body),
-        [
-            "midi8knob.kicad_pcb",
-            "midi8knob.kicad_pro",
-            "midi8knob.kicad_sch",
-            "sub/power.kicad_sch"
-        ],
-        "the wrapper folder is gone, the sheet's path stays, nothing skipped is in: {}",
-        page.body
-    );
-    assert!(
-        page.body.contains("<dt>Footprints</dt><dd>78</dd>"),
-        "the board came out of the zip whole: {}",
-        page.body
-    );
 }
 
 #[tokio::test]
@@ -677,9 +573,9 @@ async fn a_dropped_folder_sends_paths_and_two_projects_yield_the_shallowest_with
     // script sends it: one part per file, named by its path. The backups
     // folder comes along as it does on disk, with the zip KiCad writes
     // there at every save, and so does a zip beside the project, as its
-    // Archive Project command leaves one. Neither is expanded: their
-    // bytes are no zip, so looking at one would refuse the upload, and a
-    // real one would put an old snapshot at the top of the tree.
+    // Archive Project command leaves one. Neither refuses the upload, as
+    // a zip sent by itself does: a zip inside a folder is a file the
+    // upload drops, so a folder sent with scripts off still uploads.
     let posted = browser
         .post_multipart(
             "/upload",
@@ -728,324 +624,6 @@ async fn a_dropped_folder_sends_paths_and_two_projects_yield_the_shallowest_with
         ],
         "the shallowest project, rooted, without the backups: {}",
         page.body
-    );
-}
-
-/// A zip written to `incoming` as the handler writes the part: begun as
-/// an archive, written in chunks, ended (expanded).
-async fn receive_zip(incoming: &mut Incoming, name: &str, bytes: &[u8]) -> Result<()> {
-    incoming.begin_archive(name).await?;
-    for piece in bytes.chunks(4096) {
-        incoming.write(piece).await?;
-    }
-    incoming.end().await
-}
-
-/// `bytes` written over the first central directory entry of `zip`, `at`
-/// bytes past its signature.
-fn patch_directory(zip: &mut [u8], at: usize, bytes: &[u8]) {
-    let entry = zip
-        .windows(4)
-        .position(|window| window == b"PK\x01\x02")
-        .expect("a central directory entry");
-    zip[entry + at..entry + at + bytes.len()].copy_from_slice(bytes);
-}
-
-/// The declared uncompressed size of the first entry rewritten: what a
-/// zip bomb's directory does. An entry made to lie this way is refused
-/// the moment it is inflated, so a test that gets any other outcome knows
-/// it was not.
-fn declare_size(zip: &mut [u8], size: u32) {
-    patch_directory(zip, 24, &size.to_le_bytes());
-}
-
-/// The sheet-shaped bytes of `size` bytes, at least 11. Never parsed: the
-/// tests over `Incoming` stop before `push`.
-fn sized_sheet(size: usize) -> Vec<u8> {
-    format!("(kicad_sch{})", " ".repeat(size - 11)).into_bytes()
-}
-
-#[tokio::test]
-async fn a_zips_caps_are_checked_against_its_directory_before_anything_is_inflated() {
-    let caps = Limits {
-        file_bytes: 1000,
-        revision_bytes: 1500,
-        zip_entries: 4,
-        ..Limits::DEFAULT
-    };
-
-    // Sheets the directory says sum to more than the revision cap, after
-    // a first entry that lies: inflated first, it would refuse otherwise.
-    let mut over = zip_of(
-        &[],
-        &[
-            ("a.kicad_sch", &sized_sheet(200)),
-            ("b.kicad_sch", &sized_sheet(900)),
-            ("c.kicad_sch", &sized_sheet(900)),
-        ],
-    );
-    declare_size(&mut over, 1);
-    let mut incoming = Incoming::new(caps).unwrap();
-    let err = receive_zip(&mut incoming, "over.zip", &over)
-        .await
-        .expect_err("over the revision cap");
-    assert!(
-        matches!(
-            err,
-            Error::Refused(Refusal::RevisionTooLarge { limit_mb: 0 })
-        ),
-        "{err}"
-    );
-
-    // One sheet the directory says is over the file cap, named, after the
-    // same lying entry.
-    let mut big = zip_of(
-        &[],
-        &[
-            ("a.kicad_sch", &sized_sheet(200)),
-            ("sub/big.kicad_sch", &sized_sheet(1001)),
-        ],
-    );
-    declare_size(&mut big, 1);
-    let mut incoming = Incoming::new(caps).unwrap();
-    let err = receive_zip(&mut incoming, "big.zip", &big)
-        .await
-        .expect_err("over the file cap");
-    assert!(
-        matches!(err, Error::Refused(Refusal::FileTooLarge { ref path, limit_mb: 0 }) if path == "sub/big.kicad_sch"),
-        "{err}"
-    );
-
-    // More entries than the server reads, folders counted.
-    let many = zip_of(
-        &["a/", "b/"],
-        &[
-            ("a/a.kicad_sch", &sized_sheet(20)),
-            ("b/b.kicad_sch", &sized_sheet(20)),
-            ("README.md", b"#"),
-        ],
-    );
-    let mut incoming = Incoming::new(caps).unwrap();
-    let err = receive_zip(&mut incoming, "many.zip", &many)
-        .await
-        .expect_err("too many entries");
-    assert!(
-        matches!(err, Error::Refused(Refusal::TooManyEntries { ref path, count: 5, limit: 4 }) if path == "many.zip"),
-        "{err}"
-    );
-
-    // The count comes before the zip reader loads the directory, which
-    // would hold every entry in memory: these headers are no zip at all,
-    // and the reader would say that instead.
-    let headers = b"PK\x01\x02".repeat(5);
-    let mut incoming = Incoming::new(caps).unwrap();
-    let err = receive_zip(&mut incoming, "headers.zip", &headers)
-        .await
-        .expect_err("too many entries");
-    assert!(
-        matches!(
-            err,
-            Error::Refused(Refusal::TooManyEntries {
-                count: 5,
-                limit: 4,
-                ..
-            })
-        ),
-        "{err}"
-    );
-}
-
-#[tokio::test]
-async fn a_backups_folder_in_a_zip_is_never_inflated_nor_counted() {
-    let caps = Limits {
-        file_bytes: 1000,
-        revision_bytes: 1500,
-        ..Limits::DEFAULT
-    };
-    // The backup is over both caps, and its directory entry lies, so
-    // counting it or inflating it would each refuse the upload.
-    let mut backups = zip_of(
-        &[],
-        &[
-            ("demo/demo-backups/demo.kicad_sch", &sized_sheet(5000)),
-            ("demo/demo.kicad_sch", &sized_sheet(20)),
-        ],
-    );
-    declare_size(&mut backups, 4000);
-    let mut incoming = Incoming::new(caps).unwrap();
-    receive_zip(&mut incoming, "backups.zip", &backups)
-        .await
-        .expect("the backups folder is not looked at");
-    assert_eq!((incoming.len(), incoming.total()), (1, 20));
-}
-
-#[tokio::test]
-async fn a_zip_written_with_backslashes_keeps_its_folders() {
-    // What Windows PowerShell's Compress-Archive writes.
-    let zip = zip_of(
-        &[],
-        &[
-            ("demo\\demo.kicad_sch", &sized_sheet(20)),
-            ("demo\\demo-backups\\old.kicad_sch", &sized_sheet(30)),
-        ],
-    );
-    let mut incoming = Incoming::new(Limits::DEFAULT).unwrap();
-    receive_zip(&mut incoming, "demo.zip", &zip)
-        .await
-        .expect("a zip");
-    assert_eq!(
-        (incoming.len(), incoming.total()),
-        (1, 20),
-        "the sheet is kept and the backup is skipped by its folder"
-    );
-}
-
-/// A sheet beside `backups` zips stored whole, as `zip -r` keeps them: each
-/// inner end-of-directory record stays readable in the outer's tail.
-fn zip_holding_stored_zips(backups: usize) -> Vec<u8> {
-    let inner = zip_of(&[], &[("old.kicad_sch", &sized_sheet(30))]);
-    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-    writer
-        .start_file("demo/demo.kicad_sch", deflated)
-        .expect("an entry");
-    writer.write_all(&sized_sheet(20)).expect("its bytes");
-    for backup in 0..backups {
-        writer
-            .start_file(format!("demo/demo-backups/old-{backup}.zip"), stored)
-            .expect("an entry");
-        writer.write_all(&inner).expect("its bytes");
-    }
-    writer.finish().expect("a zip").into_inner()
-}
-
-#[tokio::test]
-async fn a_zip_with_too_many_end_records_is_refused_before_it_is_opened() {
-    // A valid zip with its end record repeated. The zip reader tries each
-    // record in turn and walks the directory again for it, so these are
-    // what multiplies the cost of opening a hostile zip; this one, whose
-    // last record is good, would open.
-    let mut zip = zip_of(&[], &[("a.kicad_sch", &sized_sheet(20))]);
-    let record = zip[zip.len() - 22..].to_vec();
-    zip.extend(record.repeat(32));
-    let mut incoming = Incoming::new(Limits::DEFAULT).unwrap();
-    let err = receive_zip(&mut incoming, "ends.zip", &zip)
-        .await
-        .expect_err("thirty-three records");
-    assert!(
-        matches!(err, Error::Refused(Refusal::BadArchive { ref path, ref reason })
-            if path == "ends.zip" && reason.contains("33 end-of-directory records")),
-        "{err}"
-    );
-
-    // At the limit the same zip opens.
-    zip.truncate(zip.len() - 22);
-    let mut incoming = Incoming::new(Limits::DEFAULT).unwrap();
-    receive_zip(&mut incoming, "ends.zip", &zip)
-        .await
-        .expect("thirty-two records");
-    assert_eq!(incoming.len(), 1);
-}
-
-#[tokio::test]
-async fn a_small_project_with_stored_backups_is_read_as_one_zip() {
-    // Twenty-five backups small enough that every record is in the tail.
-    let mut incoming = Incoming::new(Limits::DEFAULT).unwrap();
-    receive_zip(&mut incoming, "demo.zip", &zip_holding_stored_zips(25))
-        .await
-        .expect("the inner records are not mistaken for an attack");
-    assert_eq!((incoming.len(), incoming.total()), (1, 20));
-}
-
-#[tokio::test]
-async fn a_zip_streamed_with_data_descriptors_is_read_from_its_directory() {
-    // What a streaming writer such as macOS's Archive Utility produces:
-    // the local headers carry no sizes, the central directory does.
-    let mut writer = zip::ZipWriter::new_stream(Vec::new());
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    writer
-        .start_file("demo/demo.kicad_sch", options)
-        .expect("an entry");
-    writer.write_all(&sized_sheet(20)).expect("its bytes");
-    let zip = writer.finish().expect("a zip").into_inner();
-    assert_ne!(
-        zip[6] & 0b1000,
-        0,
-        "the local header defers to a descriptor"
-    );
-    let mut incoming = Incoming::new(Limits::DEFAULT).unwrap();
-    receive_zip(&mut incoming, "demo.zip", &zip)
-        .await
-        .expect("a zip");
-    assert_eq!((incoming.len(), incoming.total()), (1, 20));
-}
-
-// Offsets from the central header's signature: the general purpose flags
-// at 8 (bit 0 is encrypted), the compression method at 10 (12 is bzip2).
-#[test_case(8, &[1], "encrypted"; "an encrypted entry")]
-#[test_case(10, &[12, 0], "deflate"; "an entry in bzip2")]
-#[tokio::test]
-async fn a_zip_the_server_will_not_inflate_is_refused_from_its_directory(
-    at: usize,
-    patch: &[u8],
-    says: &str,
-) {
-    let mut zip = zip_of(&[], &[("a.kicad_sch", &sized_sheet(200))]);
-    patch_directory(&mut zip, at, patch);
-    let mut incoming = Incoming::new(Limits::DEFAULT).unwrap();
-    let err = receive_zip(&mut incoming, "demo.zip", &zip)
-        .await
-        .expect_err("refused");
-    assert!(
-        matches!(err, Error::Refused(Refusal::BadArchive { ref path, ref reason })
-            if path == "demo.zip" && reason.starts_with("a.kicad_sch ") && reason.contains(says)),
-        "{err}"
-    );
-}
-
-#[tokio::test]
-async fn a_zip_that_lies_about_an_entry_or_is_itself_over_the_cap_is_refused() {
-    let caps = Limits {
-        file_bytes: 1000,
-        revision_bytes: 1500,
-        ..Limits::DEFAULT
-    };
-
-    // A directory that lies about an entry's size, either way: a bomb's
-    // small number, and a number larger than the entry.
-    let mut bomb = zip_of(&[], &[("a.kicad_sch", &sized_sheet(500))]);
-    declare_size(&mut bomb, 1);
-    let mut incoming = Incoming::new(caps).unwrap();
-    let err = receive_zip(&mut incoming, "bomb.zip", &bomb)
-        .await
-        .expect_err("inflates past its declared size");
-    assert!(
-        matches!(err, Error::Refused(Refusal::BadArchive { ref path, ref reason }) if path == "bomb.zip" && reason.starts_with("a.kicad_sch: ") && reason.contains("declared")),
-        "{err}"
-    );
-    let mut short = zip_of(&[], &[("a.kicad_sch", &sized_sheet(500))]);
-    declare_size(&mut short, 600);
-    let mut incoming = Incoming::new(caps).unwrap();
-    let err = receive_zip(&mut incoming, "short.zip", &short)
-        .await
-        .expect_err("holds less than declared");
-    assert!(
-        matches!(err, Error::Refused(Refusal::BadArchive { ref path, .. }) if path == "short.zip"),
-        "{err}"
-    );
-
-    // A zip's own bytes are bounded by the revision cap.
-    let mut incoming = Incoming::new(caps).unwrap();
-    let err = receive_zip(&mut incoming, "huge.zip", &[0; 1501])
-        .await
-        .expect_err("a zip over the revision cap");
-    assert!(
-        matches!(
-            err,
-            Error::Refused(Refusal::RevisionTooLarge { limit_mb: 0 })
-        ),
-        "{err}"
     );
 }
 
@@ -1191,8 +769,9 @@ async fn a_refused_upload_counts_against_the_hourly_allowance() {
     };
     let (addr, _dir) = server(db.clone()).await;
     let (mut browser, _, handle) = signed_in(&db, addr).await;
-    // Refusals are what a hostile zip gets, and each one cost the server
-    // the work of refusing it: they spend the allowance as pushes do.
+    // Refusals are what a hostile upload gets, and each one cost the
+    // server the work of refusing it: they spend the allowance as pushes
+    // do.
     for n in 1..=30 {
         let refused = browser
             .post_multipart("/upload", &[Part::file("bad.kicad_pro", b"{ not json")])
@@ -1318,6 +897,48 @@ async fn an_upload_over_a_size_limit_is_refused_naming_that_limit(
     for framing in ["201 MB", "framing"] {
         assert!(!response.contains(framing), "{framing}: {response}");
     }
+}
+
+#[tokio::test]
+async fn a_zip_part_is_refused_before_its_bytes_are_read() {
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let (addr, _dir) = server(db.clone()).await;
+    let (mut browser, _, _) = signed_in(&db, addr).await;
+    let message = "demo.zip: a zip needs the upload page with scripts on; \
+                   or choose the project folder or its files";
+    // What a form sent with scripts off sends: the zip itself, beside the
+    // project's own files.
+    let refused = browser
+        .post_multipart(
+            "/upload",
+            &[
+                Part::file("demo.kicad_pcb", BOARD),
+                Part::file("demo.zip", b"PK\x03\x04"),
+            ],
+        )
+        .await;
+    assert_eq!(refused.status, 422, "{}", refused.body);
+    assert!(refused.body.contains(message), "{}", refused.body);
+    assert!(
+        refused.body.contains(r#"enctype="multipart/form-data""#),
+        "the form again, as for any refusal: {}",
+        refused.body
+    );
+    // A zip's own size counts for nothing: one past the body limit is
+    // refused as a zip, at its first bytes, not as an upload too large.
+    let response = post_zeros(&browser, &[("big.zip", 250)]).await;
+    assert_eq!(
+        response.split_whitespace().nth(1),
+        Some("422"),
+        "{response}"
+    );
+    assert!(
+        response.contains("big.zip: a zip needs the upload page with scripts on"),
+        "{response}"
+    );
+    assert!(!response.contains(BODY_LIMIT_MESSAGE), "{response}");
 }
 
 #[tokio::test]

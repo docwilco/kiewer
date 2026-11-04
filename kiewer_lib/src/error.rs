@@ -191,20 +191,13 @@ pub enum Refusal {
     /// The multipart body itself could not be read.
     #[display("the upload could not be read: {reason}")]
     Unreadable { reason: String },
-    /// A zip the server could not read as one or will not open (too many
-    /// end-of-directory records), or holding an entry it will not inflate:
-    /// encrypted, in a compression method other than deflate or stored,
-    /// or of another size than its directory entry declares.
-    #[display("{path}: {reason}")]
-    BadArchive { path: String, reason: String },
-    /// A zip holding more entries than the server reads, counted from its
-    /// bytes.
-    #[display("{path} lists {count} entries, more than the {limit} the server reads")]
-    TooManyEntries {
-        path: String,
-        count: usize,
-        limit: usize,
-    },
+    /// A zip uploaded by itself: the upload page expands a zip and sends
+    /// its files (ADR 0005), so this one came from a form sent with
+    /// scripts off, and the server reads no zip.
+    #[display(
+        "{path}: a zip needs the upload page with scripts on; or choose the project folder or its files"
+    )]
+    ZipPart { path: String },
     /// The account has made its hourly allowance of uploads; the web
     /// layer answers 429 with `retry_after_secs` as `Retry-After`.
     #[display(

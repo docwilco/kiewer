@@ -19,9 +19,10 @@
 //! What is kept: `.kicad_pcb`, `.kicad_sch` and `.kicad_pro`; anything
 //! else is dropped with a line in the log, and so is what the skip list
 //! names ([`skipped`]: `-backups` folders, lock files, autosaves and save
-//! files, dot-directories, `__MACOSX`). A zip uploaded by itself is
-//! received whole and expanded by `upload/archive.rs` under the same
-//! rules, its central directory read first; a zip inside a folder is
+//! files, dot-directories, `__MACOSX`). A zip is expanded by the upload
+//! page, which sends its files as a folder drop sends them (ADR 0005), so
+//! a zip uploaded by itself is a body sent without the page's script and
+//! refuses the upload ([`Incoming::refuses`]); a zip inside a folder is
 //! another file that is not kept. A board is parsed with `kicad_core` for
 //! its metadata; a schematic is parsed with it too, so a sheet KiCad 9
 //! cannot read is refused naming its version; a project file is checked
@@ -33,8 +34,6 @@
 //! upload: the shallowest is taken and [`Pushed::warnings`] names the
 //! others, for the page to show. The hourly allowance on uploads is
 //! `crate::rate_limit`, checked before the rows are written.
-
-mod archive;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -65,8 +64,9 @@ pub struct Limits {
     pub account_bytes: u64,
     /// How long parsing the revision's files may take in all.
     pub parse_timeout: Duration,
-    /// The most entries a zip may hold, files and folders alike, counted
-    /// from its bytes before the zip is opened.
+    /// The most entries the upload page reads from a zip's central
+    /// directory, files and folders alike (ADR 0005). The server reads no
+    /// zip; the page is given this number with the others.
     pub zip_entries: usize,
     /// The most uploads one account may make in an hour, refused ones
     /// included (`crate::rate_limit`).
@@ -78,8 +78,8 @@ const MB: u64 = 1024 * 1024;
 impl Limits {
     /// The caps of docs/v1-scope.md: 50 MB per file, 200 MB per revision,
     /// 2 GB per account, 30 seconds of parsing, 30 revisions an hour; and
-    /// 10 000 zip entries, the bound on what opening a zip holds in
-    /// memory, which is this code's own number, not the scope's.
+    /// 10 000 zip entries, the bound on the directory the upload page
+    /// reads, which is this code's own number, not the scope's.
     pub const DEFAULT: Limits = Limits {
         file_bytes: 50 * MB,
         revision_bytes: 200 * MB,
@@ -162,25 +162,10 @@ struct Received {
     size: u64,
 }
 
-/// What the open part is.
-#[derive(Debug)]
-enum Writing {
-    /// A file the upload keeps as it is.
-    File(Received),
-    /// A zip, expanded into files when it ends. Its own bytes are bounded
-    /// by the per-revision cap and count towards nothing else: the files
-    /// it yields are the ones the caps measure.
-    Archive {
-        name: String,
-        temp: PathBuf,
-        size: u64,
-    },
-}
-
 /// A part being written.
 #[derive(Debug)]
 struct Open {
-    writing: Writing,
+    received: Received,
     file: tokio::fs::File,
 }
 
@@ -194,8 +179,7 @@ pub struct Incoming {
     files: Vec<Received>,
     open: Option<Open>,
     total: u64,
-    /// The number of the next temporary file: one for each part and each
-    /// file a zip yields.
+    /// The number of the next temporary file, one for each part.
     parts: usize,
     limits: Limits,
 }
@@ -276,7 +260,8 @@ impl Incoming {
     /// What an upload keeps of a part named `name` (the browser's file
     /// name, or a directory upload's relative path): its path and kind,
     /// or `None` for a file that is dropped or skipped, said once in the
-    /// log. A zip is neither: [`Incoming::is_archive`] tells one.
+    /// log. A zip sent by itself is neither: [`Incoming::refuses`] tells
+    /// one, before this is asked.
     #[must_use]
     pub fn accepts(name: &str) -> Option<(TreePath, FileKind)> {
         let path = match name.parse::<TreePath>() {
@@ -298,16 +283,24 @@ impl Incoming {
         }
     }
 
-    /// Whether a part named `name` is a zip the upload expands: by its
-    /// extension, any case, and uploaded by itself. A zip inside a folder
-    /// is not the upload but something beside the project (KiCad writes
-    /// one into `-backups` at every save and one beside the project for
-    /// Archive Project), and expanding it would root the tree at an old
-    /// snapshot.
+    /// Why a part named `name` refuses the whole upload, before any of its
+    /// bytes are read, or `None` for a part [`Incoming::accepts`] decides.
+    /// A zip uploaded by itself (by its extension, any case, at the top of
+    /// the upload) is refused with [`Refusal::ZipPart`]: the upload page
+    /// expands a zip and sends its files (ADR 0005), so a zip part comes
+    /// from a form sent with scripts off. A zip inside a folder is not the
+    /// upload but something beside the project (KiCad writes one into
+    /// `-backups` at every save and one beside the project for Archive
+    /// Project): another file the upload drops, so a folder sent without
+    /// the script still uploads.
     #[must_use]
-    pub fn is_archive(name: &str) -> bool {
-        name.parse::<TreePath>()
-            .is_ok_and(|path| path.depth() == 0 && path.extension().as_deref() == Some("zip"))
+    pub fn refuses(name: &str) -> Option<Refusal> {
+        let path = name.parse::<TreePath>().ok()?;
+        (path.depth() == 0 && path.extension().as_deref() == Some("zip")).then(|| {
+            Refusal::ZipPart {
+                path: path.to_string(),
+            }
+        })
     }
 
     /// Start receiving the file at `path`.
@@ -328,37 +321,10 @@ impl Incoming {
             temp,
             size: 0,
         };
-        self.open_part(Writing::File(received)).await
-    }
-
-    /// Start receiving a zip named `name`, expanded when it ends.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Io`] when its temporary file cannot be made.
-    ///
-    /// # Panics
-    ///
-    /// As [`Incoming::begin`].
-    pub async fn begin_archive(&mut self, name: &str) -> Result<()> {
-        let temp = archive::temp_path(self.dir.path(), self.parts);
-        self.open_part(Writing::Archive {
-            name: name.to_owned(),
-            temp,
-            size: 0,
-        })
-        .await
-    }
-
-    async fn open_part(&mut self, writing: Writing) -> Result<()> {
         assert!(self.open.is_none(), "an upload receives one part at a time");
-        let temp = match &writing {
-            Writing::File(received) => &received.temp,
-            Writing::Archive { temp, .. } => temp,
-        };
-        let file = tokio::fs::File::create(temp).await?;
+        let file = tokio::fs::File::create(&received.temp).await?;
         self.parts += 1;
-        self.open = Some(Open { writing, file });
+        self.open = Some(Open { received, file });
         Ok(())
     }
 
@@ -367,9 +333,8 @@ impl Incoming {
     /// # Errors
     ///
     /// [`Error::Refused`] when the chunk takes the file over the per-file
-    /// cap or the upload over the per-revision cap (a zip's own bytes
-    /// against the latter alone); [`Error::Io`] when the temporary file
-    /// cannot be written.
+    /// cap or the upload over the per-revision cap; [`Error::Io`] when the
+    /// temporary file cannot be written.
     ///
     /// # Panics
     ///
@@ -377,43 +342,31 @@ impl Incoming {
     pub async fn write(&mut self, chunk: &[u8]) -> Result<()> {
         let open = self.open.as_mut().expect("a part is open");
         let len = chunk.len() as u64;
-        let revision_too_large = || Refusal::RevisionTooLarge {
-            limit_mb: self.limits.revision_mb(),
-        };
-        match &mut open.writing {
-            Writing::File(received) => {
-                if received.size + len > self.limits.file_bytes {
-                    return Err(Refusal::FileTooLarge {
-                        path: received.path.to_string(),
-                        limit_mb: self.limits.file_mb(),
-                    }
-                    .into());
-                }
-                if self.total + len > self.limits.revision_bytes {
-                    return Err(revision_too_large().into());
-                }
-                open.file.write_all(chunk).await?;
-                received.size += len;
-                self.total += len;
+        let received = &mut open.received;
+        if received.size + len > self.limits.file_bytes {
+            return Err(Refusal::FileTooLarge {
+                path: received.path.to_string(),
+                limit_mb: self.limits.file_mb(),
             }
-            Writing::Archive { size, .. } => {
-                if *size + len > self.limits.revision_bytes {
-                    return Err(revision_too_large().into());
-                }
-                open.file.write_all(chunk).await?;
-                *size += len;
-            }
+            .into());
         }
+        if self.total + len > self.limits.revision_bytes {
+            return Err(Refusal::RevisionTooLarge {
+                limit_mb: self.limits.revision_mb(),
+            }
+            .into());
+        }
+        open.file.write_all(chunk).await?;
+        received.size += len;
+        self.total += len;
         Ok(())
     }
 
-    /// The open part is complete: a file joins the upload; a zip is
-    /// expanded and its files do.
+    /// The open part is complete: its file joins the upload.
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] when the temporary file cannot be flushed;
-    /// [`Error::Refused`] when the zip is refused (`upload/archive.rs`).
+    /// [`Error::Io`] when the temporary file cannot be flushed.
     ///
     /// # Panics
     ///
@@ -422,27 +375,7 @@ impl Incoming {
         let mut open = self.open.take().expect("a part is open");
         open.file.flush().await?;
         drop(open.file);
-        match open.writing {
-            Writing::File(received) => self.files.push(received),
-            Writing::Archive { name, temp, .. } => {
-                let into = self.dir.path().to_owned();
-                let first = self.parts;
-                let total = self.total;
-                let limits = self.limits;
-                let expanded = tokio::task::spawn_blocking(move || {
-                    archive::expand(&temp, &name, &into, first, total, &limits)
-                })
-                .await
-                .map_err(|join| Error::Failed {
-                    reason: format!("the upload's zip task did not finish: {join}"),
-                })??;
-                self.parts += expanded.len();
-                for received in expanded {
-                    self.total += received.size;
-                    self.files.push(received);
-                }
-            }
-        }
+        self.files.push(open.received);
         Ok(())
     }
 
@@ -1106,8 +1039,15 @@ mod tests {
     #[test_case("demo/demo-backups/demo-2026-11-02_120000.zip", false; "KiCad's backup zip in a dropped folder")]
     #[test_case("demo/.cache/demo.zip", false; "a zip in a dot-directory")]
     #[test_case("demo/demo-archive.zip", false; "a zip in a dropped folder, not the upload itself")]
-    fn a_zip_is_a_part_of_its_own_with_the_extension(name: &str, is_archive: bool) {
-        assert_eq!(Incoming::is_archive(name), is_archive);
+    fn a_zip_sent_by_itself_refuses_the_upload(name: &str, refused: bool) {
+        let refusal = Incoming::refuses(name);
+        assert_eq!(refusal.is_some(), refused, "{refusal:?}");
+        if let Some(refusal) = refusal {
+            assert!(
+                matches!(refusal, Refusal::ZipPart { ref path } if path == name),
+                "names the zip: {refusal:?}"
+            );
+        }
     }
 
     fn received(path: &str) -> Received {

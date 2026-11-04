@@ -3,14 +3,15 @@
 //! (`web/viewer.rs`'s page); `/upload` is the form and its POST for a
 //! signed-in person with a handle, streamed part by part into
 //! `upload::Incoming` and committed by `upload::push`; an upload whose
-//! branch moved on goes to its choice (`web/pending.rs`). A part named
-//! `.zip` is expanded there; a part's file name may be a relative path,
-//! as the folder picker and a dropped folder send (the page's script
-//! builds the body with `webkitRelativePath` and the dropped entries'
-//! paths). The hourly allowance is checked before the body is read, so an
-//! upload over it writes nothing to disk. The upload pages are the
-//! person's own, so they carry `private, no-store`; the design page
-//! renders the same for everyone.
+//! branch moved on goes to its choice (`web/pending.rs`). A part's file
+//! name may be a relative path, as the folder picker, a dropped folder and
+//! a zip send (the page's script builds the body with
+//! `webkitRelativePath`, the dropped entries' paths and the paths in a
+//! zip's directory, ADR 0005); a zip part refuses the upload. The hourly
+//! allowance is checked before the body is read, so an upload over it
+//! writes nothing to disk. The upload pages are the person's own, so they
+//! carry `private, no-store`; the design page renders the same for
+//! everyone.
 
 use askama::Template;
 use axum::extract::multipart::{Field, Multipart, MultipartError};
@@ -304,6 +305,8 @@ struct UploadPage {
     pushed: Option<PushedNotice>,
     file_mb: u64,
     revision_mb: u64,
+    /// The most entries the page reads from a zip's directory.
+    zip_entries: usize,
 }
 
 /// A push that went through with something to say: where the revision
@@ -356,6 +359,7 @@ async fn upload_page(
         pushed,
         file_mb: Limits::DEFAULT.file_mb(),
         revision_mb: Limits::DEFAULT.revision_mb(),
+        zip_entries: Limits::DEFAULT.zip_entries,
     };
     Ok(personal(settled.jar, (status, Html(page.render()?))))
 }
@@ -384,8 +388,7 @@ pub(super) fn status(refusal: &Refusal) -> StatusCode {
         | Refusal::DoesNotParse { .. }
         | Refusal::ParseTimeout { .. }
         | Refusal::Blocked { .. }
-        | Refusal::BadArchive { .. }
-        | Refusal::TooManyEntries { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        | Refusal::ZipPart { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         Refusal::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
         Refusal::SlugTaken { .. }
         | Refusal::SlugMoved { .. }
@@ -560,9 +563,10 @@ async fn drain(mut field: Field<'_>) -> Result<()> {
     Ok(())
 }
 
-/// One file part into `incoming`, chunk by chunk: a zip to be expanded,
-/// a KiCad file as it is, or dropped when it is neither (or the empty
-/// part a form sends with no file chosen).
+/// One file part into `incoming`, chunk by chunk: a KiCad file as it is,
+/// or dropped when it is not one (or the empty part a form sends with no
+/// file chosen); a zip sent by itself refuses the upload before its bytes
+/// are read.
 async fn receive_file(mut field: Field<'_>, incoming: &mut Incoming) -> Result<()> {
     let name = field
         .file_name()
@@ -571,13 +575,13 @@ async fn receive_file(mut field: Field<'_>, incoming: &mut Incoming) -> Result<(
     let Some(name) = name else {
         return drain(field).await;
     };
-    if Incoming::is_archive(&name) {
-        incoming.begin_archive(&name).await?;
-    } else if let Some((path, kind)) = Incoming::accepts(&name) {
-        incoming.begin(path, kind).await?;
-    } else {
-        return drain(field).await;
+    if let Some(refusal) = Incoming::refuses(&name) {
+        return Err(refusal.into());
     }
+    let Some((path, kind)) = Incoming::accepts(&name) else {
+        return drain(field).await;
+    };
+    incoming.begin(path, kind).await?;
     while let Some(chunk) = field.chunk().await.map_err(|error| unreadable(&error))? {
         incoming.write(&chunk).await?;
     }

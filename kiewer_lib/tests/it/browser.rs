@@ -6,7 +6,9 @@
 //! load is checked through the network, its beacon answered by the
 //! server; the canvas cases of #94 and the failed import of #96 below
 //! read the beacons the page hands to `sendBeacon`, through the server's
-//! parser.
+//! parser. The upload page's zips (#83) are chosen in its file input and
+//! either land as a revision or are denied on the page; those cases need
+//! Postgres too.
 //!
 //! Runs when `KIEWER_BROWSER` names the browser's executable, which the
 //! browser stage of `scripts/checks.sh` sets, along with
@@ -15,30 +17,40 @@
 //! so, as it does in the test stage.
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
 use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use chromiumoxide::cdp::browser_protocol::fetch::{
     self, EventRequestPaused, FulfillRequestParams, RequestPattern,
 };
 use chromiumoxide::cdp::browser_protocol::network::{
-    EventRequestWillBeSent, EventResponseReceived, GetRequestPostDataParams, RequestId,
+    CookieParam, EventRequestWillBeSent, EventResponseReceived, GetRequestPostDataParams, RequestId,
 };
 use chromiumoxide::listeners::EventStream;
 use chromiumoxide::{Browser, BrowserConfig, Page};
+use flate2::write::DeflateEncoder;
+use flate2::{Compression, Crc};
 use futures_util::StreamExt as _;
 use kiewer_assert::assert_is_empty;
+use kiewer_lib::account::Handle;
 use kiewer_lib::blob::fs::FsBlobStore;
+use kiewer_lib::session;
 use kiewer_lib::web::beacon::{BEACON_PATH, Backend, Beacon, Outcome};
 use kiewer_lib::web::viewer::{embedded, script_url};
+use kiewer_test_support::db::pool_from_env;
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use serde::Deserialize;
+use sqlx::PgPool;
 use test_case::test_case;
 use tokio::sync::{Semaphore, SemaphorePermit};
+
+use super::upload::{BOARD, LOWER_SHEET, PROJECT, SCHEMATIC, listed_paths, person};
 
 /// How long a page gets to send its beacon: SwiftShader draws on the CPU
 /// and the viewer is a debug build, so this is generous.
@@ -727,4 +739,597 @@ async fn a_viewer_script_that_answers_404_shows_and_sends_its_beacon(viewed: Vie
         "the beacon carries what the box shows"
     );
     session.close().await;
+}
+
+// The upload page's zips (#83, ADR 0005): the page reads a zip's central
+// directory, checks it against the caps and the skip list, inflates only
+// the entries it keeps and sends them as files with their paths in the
+// zip; or it denies the zip on the page and sends nothing. The form is a
+// signed-in person's, so these need Postgres as well and skip without
+// `DATABASE_URL`.
+
+/// Records the file names of the body the upload page posts, before any
+/// script of the page runs: in session storage, so the record outlives
+/// the redirect to the design page.
+const RECORD_UPLOAD: &str = r#"
+const kiewerFetch = window.fetch.bind(window);
+window.fetch = function (url, init) {
+  if (init && init.body instanceof FormData) {
+    const sent = [];
+    for (const [, value] of init.body.entries()) if (value instanceof File) sent.push(value.name);
+    sessionStorage.setItem("kiewerSent", JSON.stringify(sent));
+  }
+  return kiewerFetch(url, init);
+};
+"#;
+
+/// One entry of a zip as a writer put it down. Past `bytes` are what the
+/// denied cases change.
+#[derive(Debug, Clone, Copy)]
+struct Entry<'a> {
+    path: &'a str,
+    bytes: &'a [u8],
+    /// 0 is stored and 8 deflated; anything else is another method, its
+    /// bytes left as they are.
+    method: u16,
+    encrypted: bool,
+    /// The uncompressed size the headers declare when it is not the true
+    /// one: what a zip bomb's directory does.
+    declared: Option<u32>,
+}
+
+impl<'a> Entry<'a> {
+    fn deflated(path: &'a str, bytes: &'a [u8]) -> Self {
+        Entry {
+            path,
+            bytes,
+            method: 8,
+            encrypted: false,
+            declared: None,
+        }
+    }
+
+    fn stored(path: &'a str, bytes: &'a [u8]) -> Self {
+        Entry {
+            method: 0,
+            ..Entry::deflated(path, bytes)
+        }
+    }
+
+    fn folder(path: &'a str) -> Self {
+        Entry::stored(path, b"")
+    }
+}
+
+/// How a zip as a whole is written.
+#[derive(Debug, Clone, Copy, Default)]
+struct Shape {
+    /// Each entry's sizes in a data descriptor after its bytes, the local
+    /// header's left zero (flag bit 3): what a streaming writer such as
+    /// macOS's Archive Utility writes.
+    streamed: bool,
+    /// A zip64 end record and its locator before the end record, as
+    /// `zip -fz` writes.
+    zip64_end: bool,
+    /// Each entry's sizes and offset as 0xFFFFFFFF in the directory, the
+    /// true ones in a zip64 extra field.
+    zip64_entries: bool,
+}
+
+fn put16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn u32_of(len: usize) -> u32 {
+    u32::try_from(len).expect("a test zip under 4 GB")
+}
+
+/// A zip of `entries`, written by hand so a case can write what no zip
+/// writer at hand will: zip64 records, an encrypted flag, a size that lies.
+fn zip_of(entries: &[Entry<'_>], shape: Shape) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut directory = Vec::new();
+    for entry in entries {
+        let packed = if entry.method == 8 {
+            let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(entry.bytes).expect("deflated");
+            encoder.finish().expect("deflated")
+        } else {
+            entry.bytes.to_vec()
+        };
+        let mut crc = Crc::new();
+        crc.update(entry.bytes);
+        let crc = crc.sum();
+        let packed_size = u32_of(packed.len());
+        let size = entry.declared.unwrap_or(u32_of(entry.bytes.len()));
+        let flags = u16::from(entry.encrypted) | if shape.streamed { 0b1000 } else { 0 };
+        let offset = u32_of(out.len());
+        let name = entry.path.as_bytes();
+        let name_len = u16::try_from(name.len()).expect("a short name");
+
+        out.extend_from_slice(b"PK\x03\x04");
+        put16(&mut out, 20);
+        put16(&mut out, flags);
+        put16(&mut out, entry.method);
+        put16(&mut out, 0);
+        put16(&mut out, 0x21);
+        for value in if shape.streamed {
+            [0; 3]
+        } else {
+            [crc, packed_size, size]
+        } {
+            put32(&mut out, value);
+        }
+        put16(&mut out, name_len);
+        put16(&mut out, 0);
+        out.extend_from_slice(name);
+        out.extend_from_slice(&packed);
+        if shape.streamed {
+            out.extend_from_slice(b"PK\x07\x08");
+            for value in [crc, packed_size, size] {
+                put32(&mut out, value);
+            }
+        }
+
+        let mut extra = Vec::new();
+        let listed = if shape.zip64_entries {
+            put16(&mut extra, 0x0001);
+            put16(&mut extra, 24);
+            put64(&mut extra, u64::from(size));
+            put64(&mut extra, u64::from(packed_size));
+            put64(&mut extra, u64::from(offset));
+            [u32::MAX; 3]
+        } else {
+            [packed_size, size, offset]
+        };
+        directory.extend_from_slice(b"PK\x01\x02");
+        put16(&mut directory, 20);
+        put16(&mut directory, 20);
+        put16(&mut directory, flags);
+        put16(&mut directory, entry.method);
+        put16(&mut directory, 0);
+        put16(&mut directory, 0x21);
+        put32(&mut directory, crc);
+        put32(&mut directory, listed[0]);
+        put32(&mut directory, listed[1]);
+        put16(&mut directory, name_len);
+        put16(
+            &mut directory,
+            u16::try_from(extra.len()).expect("a short extra field"),
+        );
+        put16(&mut directory, 0);
+        put16(&mut directory, 0);
+        put16(&mut directory, 0);
+        put32(&mut directory, 0);
+        put32(&mut directory, listed[2]);
+        directory.extend_from_slice(name);
+        directory.extend_from_slice(&extra);
+    }
+    let count = u16::try_from(entries.len()).expect("fewer than 65 536 entries");
+    end_records(&mut out, &directory, count, shape);
+    out
+}
+
+/// `directory` and the end records after it, at the end of `out`.
+fn end_records(out: &mut Vec<u8>, directory: &[u8], count: u16, shape: Shape) {
+    let start = out.len();
+    out.extend_from_slice(directory);
+    if shape.zip64_end {
+        let record = out.len();
+        out.extend_from_slice(b"PK\x06\x06");
+        put64(out, 44);
+        put16(out, 45);
+        put16(out, 45);
+        put32(out, 0);
+        put32(out, 0);
+        put64(out, u64::from(count));
+        put64(out, u64::from(count));
+        put64(out, directory.len() as u64);
+        put64(out, start as u64);
+        out.extend_from_slice(b"PK\x06\x07");
+        put32(out, 0);
+        put64(out, record as u64);
+        put32(out, 1);
+    }
+    out.extend_from_slice(b"PK\x05\x06");
+    put16(out, 0);
+    put16(out, 0);
+    put16(out, count);
+    put16(out, count);
+    put32(out, u32_of(directory.len()));
+    put32(out, u32_of(start));
+    put16(out, 0);
+}
+
+/// The hand-off project's four files, named `names`, each written as
+/// `entry` writes it.
+fn project<'a>(
+    names: &'a [String; 4],
+    entry: fn(&'a str, &'a [u8]) -> Entry<'a>,
+) -> [Entry<'a>; 4] {
+    [
+        entry(&names[0], PROJECT),
+        entry(&names[1], BOARD),
+        entry(&names[2], SCHEMATIC),
+        entry(&names[3], LOWER_SHEET),
+    ]
+}
+
+/// The hand-off project's file names under `prefix`, the lower sheet in
+/// `sub` with `separator` between them.
+fn project_names(prefix: &str, separator: char) -> [String; 4] {
+    [
+        format!("{prefix}midi8knob.kicad_pro"),
+        format!("{prefix}midi8knob.kicad_pcb"),
+        format!("{prefix}midi8knob.kicad_sch"),
+        format!("{prefix}sub{separator}power.kicad_sch"),
+    ]
+}
+
+/// Explorer's "Compressed (zipped) folder" of the project folder: the
+/// folder wraps everything, deflated, with files that are not KiCad
+/// files beside the project; and the lower sheet's path written with a
+/// backslash, as Windows PowerShell's Compress-Archive writes one.
+fn explorer_zip() -> Vec<u8> {
+    let names = project_names("midi8knob/", '\\');
+    let mut entries = vec![Entry::folder("midi8knob/"), Entry::folder("midi8knob/sub/")];
+    entries.extend(project(&names, Entry::deflated));
+    entries.push(Entry::deflated("midi8knob/fp-info-cache", b"0\n"));
+    entries.push(Entry::deflated("midi8knob/README.md", b"# not sent\n"));
+    zip_of(&entries, Shape::default())
+}
+
+/// The project stored, not deflated, by a streaming writer: the sizes in
+/// data descriptors, so only the directory has them.
+fn streamed_stored_zip() -> Vec<u8> {
+    let names = project_names("", '/');
+    zip_of(
+        &project(&names, Entry::stored),
+        Shape {
+            streamed: true,
+            ..Shape::default()
+        },
+    )
+}
+
+/// The project beside entries the skip list names, each one an entry the
+/// page would deny if it looked at it: encrypted, in another method, or
+/// declared over a cap.
+fn zip_with_skipped_folders() -> Vec<u8> {
+    let names = project_names("", '/');
+    let mut entries = project(&names, Entry::deflated).to_vec();
+    entries.extend([
+        Entry {
+            encrypted: true,
+            ..Entry::deflated("midi8knob-backups/midi8knob.kicad_pcb", BOARD)
+        },
+        Entry {
+            declared: Some(60 << 20),
+            ..Entry::stored(".git/huge.kicad_pcb", b"(garbage")
+        },
+        Entry {
+            method: 12,
+            ..Entry::stored("__MACOSX/._midi8knob.kicad_pcb", b"\x00\x05\x16\x07")
+        },
+        Entry {
+            declared: Some(210 << 20),
+            ..Entry::stored("_autosave-midi8knob.kicad_sch", b"(garbage")
+        },
+        Entry {
+            method: 12,
+            ..Entry::stored("midi8knob-save.kicad_pcb", b"(garbage")
+        },
+    ]);
+    zip_of(&entries, Shape::default())
+}
+
+/// A signed-in person's upload form in a browser of its own, with the
+/// server and its database behind it.
+struct Uploader {
+    browser: Browser,
+    traffic: tokio::task::JoinHandle<()>,
+    page: Page,
+    addr: SocketAddr,
+    handle: Handle,
+    zips: TempDir,
+    _blobs: TempDir,
+    _profile: TempDir,
+    _permit: SemaphorePermit<'static>,
+}
+
+impl Uploader {
+    /// The upload form, loaded for a new person with a live session.
+    async fn new(executable: PathBuf, db: PgPool) -> Uploader {
+        let permit = BROWSERS.acquire().await.expect("the semaphore stays open");
+        let blobs = scratch_dir!();
+        let state = http::state(db.clone(), Arc::new(FsBlobStore::new(blobs.path())));
+        let addr = http::serve_on_free_port(state).await;
+        let (account_id, handle) = person(&db).await;
+        let session = session::start(&db, account_id).await.expect("a session");
+        let profile = scratch_dir!();
+        let (browser, traffic) = launch(executable, &profile).await;
+        let page = browser.new_page("about:blank").await.expect("a tab");
+        page.evaluate_on_new_document(RECORD_UPLOAD)
+            .await
+            .expect("the upload recorder");
+        let mut cookie = CookieParam::new("kiewer_session", session.to_string());
+        cookie.url = Some(format!("http://{addr}/"));
+        page.set_cookie(cookie).await.expect("the session cookie");
+        page.goto(format!("http://{addr}/upload"))
+            .await
+            .expect("the form loads");
+        Uploader {
+            browser,
+            traffic,
+            page,
+            addr,
+            handle,
+            zips: scratch_dir!(),
+            _blobs: blobs,
+            _profile: profile,
+            _permit: permit,
+        }
+    }
+
+    /// `bytes` chosen as the zip `name` in the form's file input, and the
+    /// form submitted.
+    async fn upload_zip(&self, name: &str, bytes: &[u8]) {
+        let path = self.zips.path().join(name);
+        std::fs::write(&path, bytes).expect("the zip written");
+        let input = self
+            .page
+            .find_element(r#"input[type="file"]:not([webkitdirectory])"#)
+            .await
+            .expect("the file input");
+        let mut chosen = SetFileInputFilesParams::new(vec![path.display().to_string()]);
+        chosen.node_id = Some(input.node_id);
+        self.page.execute(chosen).await.expect("the zip chosen");
+        self.page
+            .evaluate(r#"document.querySelector("form").requestSubmit()"#)
+            .await
+            .expect("the form submitted");
+    }
+
+    /// Whether `condition` came to hold on the page within [`DEADLINE`]. A
+    /// page between two documents does not evaluate, and counts as not
+    /// yet.
+    async fn held_within_deadline(&self, condition: &str) -> bool {
+        let poll = async {
+            loop {
+                let held = self
+                    .page
+                    .evaluate(condition)
+                    .await
+                    .ok()
+                    .and_then(|result| result.into_value::<bool>().ok());
+                if held == Some(true) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        };
+        tokio::time::timeout(DEADLINE, poll).await.is_ok()
+    }
+
+    /// The file names the page posted, or `None` when it posted nothing.
+    /// The record is read as its JSON text, `null` when there is none,
+    /// since the protocol hands back no value for a null.
+    async fn sent(&self) -> Option<Vec<String>> {
+        let record: String = self
+            .read(r#"sessionStorage.getItem("kiewerSent") ?? "null""#)
+            .await;
+        serde_json::from_str(&record).expect("null or the names")
+    }
+
+    /// The value of `expression` on the page.
+    async fn read<T: serde::de::DeserializeOwned>(&self, expression: &str) -> T {
+        self.page
+            .evaluate(expression)
+            .await
+            .expect("the page evaluates")
+            .into_value()
+            .expect("a value of the expected shape")
+    }
+
+    /// Closes the browser and waits for it and its protocol task to end.
+    async fn close(mut self) {
+        self.browser.close().await.expect("the browser closes");
+        self.browser.wait().await.expect("the browser exits");
+        self.traffic.await.expect("the protocol task ends");
+    }
+}
+
+#[test_case(explorer_zip, "midi8knob/"; "a deflated zip with a wrapper folder and a backslash")]
+#[test_case(streamed_stored_zip, ""; "a stored zip with data descriptors")]
+#[test_case(zip_with_skipped_folders, ""; "a zip with skipped folders, none of them read")]
+#[tokio::test]
+async fn the_upload_page_expands_a_zip_and_sends_the_kicad_files_in_it(
+    zip: fn() -> Vec<u8>,
+    prefix: &str,
+) {
+    let Some(executable) = executable() else {
+        return;
+    };
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let uploader = Uploader::new(executable, db).await;
+    uploader.upload_zip("midi8knob.zip", &zip()).await;
+    let design_path = format!("/{}/midi8knob", uploader.handle);
+    let landed = uploader
+        .held_within_deadline(&format!(r#"location.pathname === "{design_path}""#))
+        .await;
+    let denied: String = uploader
+        .read(r#"document.getElementById("denied")?.textContent ?? """#)
+        .await;
+    assert!(
+        landed,
+        "not on {design_path} within {DEADLINE:?}; the page denies {denied:?}"
+    );
+
+    assert_eq!(
+        uploader.sent().await,
+        Some(project_names(prefix, '/').to_vec()),
+        "the KiCad files alone, with their paths in the zip, and no zip"
+    );
+    let page = http::request(uploader.addr, "GET", &design_path, &[], "").await;
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert_eq!(
+        listed_paths(&page.body),
+        [
+            "midi8knob.kicad_pcb",
+            "midi8knob.kicad_pro",
+            "midi8knob.kicad_sch",
+            "sub/power.kicad_sch"
+        ],
+        "rooted at the project folder, the sheet's path kept: {}",
+        page.body
+    );
+    assert!(
+        page.body.contains("<dt>Footprints</dt><dd>78</dd>"),
+        "the board came out of the zip whole: {}",
+        page.body
+    );
+    uploader.close().await;
+}
+
+/// The project zipped with its four files each changed by `change`.
+fn project_zip_with(shape: Shape, change: fn(Entry<'_>) -> Entry<'_>) -> Vec<u8> {
+    let names = project_names("", '/');
+    let entries = project(&names, Entry::deflated).map(change);
+    zip_of(&entries, shape)
+}
+
+fn zip64_end_records() -> Vec<u8> {
+    project_zip_with(
+        Shape {
+            zip64_end: true,
+            ..Shape::default()
+        },
+        |entry| entry,
+    )
+}
+
+fn zip64_entries() -> Vec<u8> {
+    project_zip_with(
+        Shape {
+            zip64_entries: true,
+            ..Shape::default()
+        },
+        |entry| entry,
+    )
+}
+
+fn encrypted_board() -> Vec<u8> {
+    project_zip_with(Shape::default(), |entry| Entry {
+        encrypted: entry.path.ends_with(".kicad_pcb"),
+        ..entry
+    })
+}
+
+fn board_in_bzip2() -> Vec<u8> {
+    project_zip_with(Shape::default(), |entry| {
+        if entry.path.ends_with(".kicad_pcb") {
+            Entry {
+                method: 12,
+                ..entry
+            }
+        } else {
+            entry
+        }
+    })
+}
+
+/// A board whose directory declares 60 MB: inflated, it would be denied
+/// for holding less than it declares, so the cap's denial shows it never
+/// was.
+fn board_over_the_file_cap() -> Vec<u8> {
+    project_zip_with(Shape::default(), |entry| {
+        if entry.path.ends_with(".kicad_pcb") {
+            Entry {
+                declared: Some(60 << 20),
+                ..entry
+            }
+        } else {
+            entry
+        }
+    })
+}
+
+/// The project and one more sheet, each declaring 45 MB: under the file
+/// cap, 225 MB together.
+fn files_over_the_revision_cap() -> Vec<u8> {
+    let names = project_names("", '/');
+    let mut entries = project(&names, Entry::deflated).to_vec();
+    entries.push(Entry::deflated("extra.kicad_sch", LOWER_SHEET));
+    for entry in &mut entries {
+        entry.declared = Some(45 << 20);
+    }
+    zip_of(&entries, Shape::default())
+}
+
+/// The project behind 9,999 folders: 10,003 entries.
+fn too_many_entries() -> Vec<u8> {
+    let folders: Vec<String> = (0..9_999).map(|n| format!("f{n}/")).collect();
+    let names = project_names("", '/');
+    let mut entries: Vec<Entry<'_>> = folders.iter().map(|path| Entry::folder(path)).collect();
+    entries.extend(project(&names, Entry::deflated));
+    zip_of(&entries, Shape::default())
+}
+
+const AGAIN: &str = "; zip the project again, or drop the project folder instead";
+
+#[test_case(zip64_end_records, "midi8knob.zip: has zip64 records, which the page does not read", true; "zip64 end records")]
+#[test_case(zip64_entries, "midi8knob.zip: has zip64 records, which the page does not read", true; "zip64 sizes in the entries")]
+#[test_case(encrypted_board, "midi8knob.zip: midi8knob.kicad_pcb is encrypted", true; "an encrypted entry")]
+#[test_case(board_in_bzip2, "midi8knob.zip: midi8knob.kicad_pcb is compressed with neither deflate nor store", true; "an entry in bzip2")]
+#[test_case(board_over_the_file_cap, "midi8knob.zip: midi8knob.kicad_pcb is larger than 50 MB, the limit for one file", false; "an entry over the file cap")]
+#[test_case(files_over_the_revision_cap, "the files together are larger than 200 MB, the limit for one revision", false; "entries over the revision cap")]
+#[test_case(too_many_entries, "midi8knob.zip: lists 10003 entries, more than the 10000 the page reads", true; "more entries than the page reads")]
+#[tokio::test]
+async fn the_upload_page_denies_a_zip_it_will_not_expand_and_sends_nothing(
+    zip: fn() -> Vec<u8>,
+    denial: &str,
+    says_zip_again: bool,
+) {
+    let Some(executable) = executable() else {
+        return;
+    };
+    let Some(db) = pool_from_env().await else {
+        return;
+    };
+    let uploader = Uploader::new(executable, db).await;
+    uploader.upload_zip("midi8knob.zip", &zip()).await;
+    let denied = uploader
+        .held_within_deadline(r#"!document.getElementById("denied").hidden"#)
+        .await;
+    assert!(denied, "no denial within {DEADLINE:?}");
+
+    let shown: String = uploader
+        .read(r#"document.getElementById("denied").textContent"#)
+        .await;
+    let expected = if says_zip_again {
+        format!("{denial}{AGAIN}")
+    } else {
+        denial.to_owned()
+    };
+    assert_eq!(shown, expected);
+    assert_eq!(uploader.sent().await, None, "nothing was posted");
+    let (path, enabled): (String, bool) = uploader
+        .read(r#"[location.pathname, !document.querySelector("form button").disabled]"#)
+        .await;
+    assert_eq!(
+        (path.as_str(), enabled),
+        ("/upload", true),
+        "still on the form, ready for another try"
+    );
+    uploader.close().await;
 }
