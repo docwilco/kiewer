@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn the_surrogate_key_prefix_is_read_and_refused_with_a_space() {
+    fn the_surrogate_key_prefix_is_read() {
         let config = Config::from_vars(vars(&[
             ("DATABASE_URL", "postgres://x"),
             ("SURROGATE_KEY_PREFIX", "staging-"),
@@ -378,6 +378,10 @@ mod tests {
             config.surrogate_key_prefix,
             "staging-".parse().expect("a prefix")
         );
+    }
+
+    #[test]
+    fn a_surrogate_key_prefix_with_a_space_names_the_variable() {
         let err = Config::from_vars(vars(&[
             ("DATABASE_URL", "postgres://x"),
             ("SURROGATE_KEY_PREFIX", "staging "),

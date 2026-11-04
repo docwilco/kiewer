@@ -86,7 +86,13 @@ async fn fake_fastly() -> (String, Calls) {
 #[tokio::test]
 async fn the_fastly_client_purges_by_key_with_the_token_and_reports_a_refusal() {
     let (api, calls) = fake_fastly().await;
-    let fastly = Fastly::at(&api, "SU1Z0isxPaozGVKXdv0eY", "the-token").expect("a client");
+    let fastly = Fastly::at(
+        &api,
+        "SU1Z0isxPaozGVKXdv0eY",
+        "the-token",
+        KeyPrefix::default(),
+    )
+    .expect("a client");
     let ada: Handle = "ada".parse().unwrap();
     fastly
         .purge(&[Key::Home, Key::Handle(ada)])
@@ -119,7 +125,13 @@ async fn the_fastly_client_purges_by_key_with_the_token_and_reports_a_refusal() 
         .collect();
     assert_eq!(keys_per_call, [MAX_KEYS, 1], "more than one call takes");
 
-    let wrong = Fastly::at(&api, "SU1Z0isxPaozGVKXdv0eY", "another").expect("a client");
+    let wrong = Fastly::at(
+        &api,
+        "SU1Z0isxPaozGVKXdv0eY",
+        "another",
+        KeyPrefix::default(),
+    )
+    .expect("a client");
     let refused = wrong
         .purge(&[Key::Home])
         .await
@@ -133,9 +145,8 @@ async fn the_fastly_client_purges_by_key_with_the_token_and_reports_a_refusal() 
 #[tokio::test]
 async fn the_fastly_client_puts_the_prefix_in_front_of_every_key_it_purges() {
     let (api, calls) = fake_fastly().await;
-    let staging = Fastly::at(&api, "SU1Z0isxPaozGVKXdv0eY", "the-token")
-        .expect("a client")
-        .with_key_prefix(staging_prefix());
+    let staging =
+        Fastly::at(&api, "SU1Z0isxPaozGVKXdv0eY", "the-token", staging_prefix()).expect("a client");
     let ada: Handle = "ada".parse().unwrap();
     staging
         .purge(&[Key::Handle(ada), Key::Home])

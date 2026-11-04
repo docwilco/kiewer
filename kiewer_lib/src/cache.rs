@@ -145,8 +145,8 @@ pub fn surrogate_key(keys: &[Key]) -> String {
 /// acts on the whole service, so without it a write on staging would drop
 /// production's pages that carry the same key, and the reverse.
 /// [`KeyPrefix::apply`] is the one place it is applied: the router's
-/// layer ([`prefixed`]) for the header, the [`Fastly`] client for the
-/// purge. The default is no prefix.
+/// layer ([`prefix_surrogate_keys`]) for the header, the [`Fastly`]
+/// client for the purge. The default is no prefix.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyPrefix(String);
 
@@ -187,17 +187,36 @@ impl FromStr for KeyPrefix {
 /// `response` with `prefix` in front of each key of its `Surrogate-Key`:
 /// the layer `crate::web::router` puts over every route, so a handler
 /// names its keys as [`page`] and [`not_found_under`] take them and
-/// never sees the prefix.
-pub async fn prefixed(State(prefix): State<KeyPrefix>, mut response: Response) -> Response {
-    let value = response
-        .headers()
-        .get(SURROGATE_KEY)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| prefix.apply(value));
-    if let Some(value) = value
-        && let Ok(value) = HeaderValue::from_str(&value)
-    {
-        response.headers_mut().insert(SURROGATE_KEY, value);
+/// never sees the prefix. Without a prefix the response goes out as it
+/// came. A value that would not prefix (not text, or
+/// not a header once prefixed) loses its keys rather than going out
+/// bare, where it would match the other environment's: the page is then
+/// purged by nothing and kept its hour ([`Policy::Page`]), and the log
+/// says so. Neither happens with the keys [`Key`] spells and a prefix
+/// [`KeyPrefix`] accepts.
+pub async fn prefix_surrogate_keys(
+    State(prefix): State<KeyPrefix>,
+    mut response: Response,
+) -> Response {
+    if prefix.0.is_empty() {
+        return response;
+    }
+    let Some(value) = response.headers().get(SURROGATE_KEY) else {
+        return response;
+    };
+    let prefixed = value
+        .to_str()
+        .ok()
+        .and_then(|value| HeaderValue::from_str(&prefix.apply(value)).ok());
+    if let Some(prefixed) = prefixed {
+        response.headers_mut().insert(SURROGATE_KEY, prefixed);
+    } else {
+        tracing::warn!(
+            ?value,
+            ?prefix,
+            "the surrogate keys would not prefix; dropped"
+        );
+        response.headers_mut().remove(SURROGATE_KEY);
     }
     response
 }
@@ -369,13 +388,20 @@ impl fmt::Debug for Fastly {
 }
 
 impl Fastly {
-    /// The client for `service_id` with `token`, against Fastly's API.
+    /// The client for `service_id` with `token`, against Fastly's API,
+    /// with `prefix` in front of every key it purges: the one the state
+    /// gives the pages' headers (`crate::web::AppState`), so a purge
+    /// names the keys the edge indexed.
     ///
     /// # Errors
     ///
     /// [`Error::Http`] when the HTTP client cannot be built.
-    pub fn new(service_id: impl Into<String>, token: impl Into<String>) -> Result<Self> {
-        Self::at(FASTLY_API, service_id, token)
+    pub fn new(
+        service_id: impl Into<String>,
+        token: impl Into<String>,
+        prefix: KeyPrefix,
+    ) -> Result<Self> {
+        Self::at(FASTLY_API, service_id, token, prefix)
     }
 
     /// The client against another API origin: a test's fake.
@@ -387,6 +413,7 @@ impl Fastly {
         api: impl Into<String>,
         service_id: impl Into<String>,
         token: impl Into<String>,
+        prefix: KeyPrefix,
     ) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(PURGE_TIMEOUT)
@@ -396,15 +423,9 @@ impl Fastly {
             service_id: service_id.into(),
             token: token.into(),
             api: api.into().trim_end_matches('/').to_owned(),
-            prefix: KeyPrefix::default(),
+            prefix,
             http,
         })
-    }
-
-    /// The same client with `prefix` in front of every key it purges.
-    #[must_use]
-    pub fn with_key_prefix(self, prefix: KeyPrefix) -> Self {
-        Self { prefix, ..self }
     }
 }
 
@@ -533,6 +554,37 @@ mod tests {
             .expect_err("not visible ASCII without spaces");
     }
 
+    #[test_case("", Some("home handle-ada"); "no prefix leaves the keys")]
+    #[test_case("staging-", Some("staging-home staging-handle-ada"); "staging's prefixes each")]
+    #[tokio::test]
+    async fn the_layer_prefixes_the_keys_a_page_carries(prefix: &str, keys: Option<&str>) {
+        let prefix: KeyPrefix = prefix.parse().expect("a prefix");
+        let response = page(&[Key::Home, Key::Handle(handle("ada"))], "hello");
+        let response = prefix_surrogate_keys(State(prefix), response).await;
+        assert_eq!(
+            response
+                .headers()
+                .get(SURROGATE_KEY)
+                .map(|value| value.to_str().expect("text")),
+            keys
+        );
+        assert_eq!(
+            response.headers().get(CACHE_CONTROL).unwrap(),
+            Policy::Page.value(),
+            "the policy is left as it was"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_layer_leaves_a_keyless_response_keyless() {
+        let response = prefix_surrogate_keys(
+            State("staging-".parse().expect("a prefix")),
+            not_found("not found\n"),
+        )
+        .await;
+        assert!(response.headers().get(SURROGATE_KEY).is_none());
+    }
+
     #[test_case(
         Policy::Page,
         "public, max-age=0, s-maxage=3600, stale-while-revalidate=60"
@@ -652,7 +704,8 @@ mod tests {
 
     #[test]
     fn the_fastly_client_names_its_service_and_hides_its_token() {
-        let fastly = Fastly::new("SU1Z0isxPaozGVKXdv0eY", "secret").expect("a client");
+        let fastly =
+            Fastly::new("SU1Z0isxPaozGVKXdv0eY", "secret", KeyPrefix::default()).expect("a client");
         let debug = format!("{fastly:?}");
         assert!(debug.contains("SU1Z0isxPaozGVKXdv0eY"), "{debug}");
         assert!(!debug.contains("secret"), "{debug}");

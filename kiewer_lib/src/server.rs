@@ -70,9 +70,11 @@ fn purge(config: &Config) -> Result<Arc<dyn Purge>> {
     Ok(if let Some(fastly) = &config.fastly {
         let prefix = &config.surrogate_key_prefix;
         tracing::info!(service_id = %fastly.service_id, ?prefix, "purging on Fastly");
-        Arc::new(
-            Fastly::new(&fastly.service_id, &fastly.api_token)?.with_key_prefix(prefix.clone()),
-        )
+        Arc::new(Fastly::new(
+            &fastly.service_id,
+            &fastly.api_token,
+            prefix.clone(),
+        )?)
     } else {
         tracing::info!("no edge to purge: FASTLY_SERVICE_ID and FASTLY_API_TOKEN are not both set");
         Arc::new(NoPurge)

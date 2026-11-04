@@ -155,7 +155,7 @@ pub fn router(state: AppState) -> Router {
         // get the environment's prefix on the way out.
         .layer(map_response_with_state(
             state.key_prefix.clone(),
-            cache::prefixed,
+            cache::prefix_surrogate_keys,
         ))
         .with_state(state)
 }
