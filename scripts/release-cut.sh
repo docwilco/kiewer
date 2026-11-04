@@ -10,7 +10,9 @@
 # older code on a green run (#97).
 #
 # The Releases are git's tags of the two shapes, read from the remote: CI's
-# checkout is shallow and carries none. The read happens in an assignment,
+# checkout is shallow and carries none. A tag of neither shape (vnext, v1)
+# is no Release and takes no place, as in scripts/prune-images.sh, so a
+# stray one cannot stop every later cut. The read happens in an assignment,
 # so a failed ls-remote stops the script instead of reading as no tags,
 # which would cut a Version that may be tagged already.
 #
@@ -47,27 +49,32 @@ fi
 
 # The newest of the Versions given, by git's version order. Git sorts refs
 # only, so the Versions become tags in a throwaway repository, each on the
-# empty tree.
-newest() {
-  local repo tree v
+# empty tree. The body is a subshell, so its EXIT trap removes the
+# repository on a failure too.
+newest_by_git() (
   repo="$(mktemp -d)"
+  trap 'rm -rf "$repo"' EXIT
   git init --quiet --bare "$repo"
   tree="$(git --git-dir="$repo" mktree </dev/null)"
   for v in "$@"; do echo "create refs/tags/v$v $tree"; done |
     git --git-dir="$repo" update-ref --stdin
   git --git-dir="$repo" -c versionsort.suffix=-rc tag --list --sort=version:refname |
     tail -n 1 | sed 's/^v//'
-  rm -rf "$repo"
-}
+)
 
 versions="$(git ls-remote --refs --tags origin 'v*' | sed -n 's|^.*refs/tags/v||p')"
 mapfile -t releases < <(grep -E "$release_shape|$candidate_shape" <<<"$versions" || true)
 
-if printf '%s\n' "${releases[@]}" | grep -Fxq -- "$version"; then
+tagged=false
+for release in "${releases[@]}"; do
+  [ "$release" != "$version" ] || tagged=true
+done
+
+if [ "$tagged" = true ]; then
   echo "v$version is in git: a plain push, nothing to cut"
   cut=false
 else
-  above="$(newest "$version" "${releases[@]}")"
+  above="$(newest_by_git "$version" "${releases[@]}")"
   if [ "$above" = "$version" ]; then
     echo "v$version sorts above every Release in git: this run cuts it"
     cut=true

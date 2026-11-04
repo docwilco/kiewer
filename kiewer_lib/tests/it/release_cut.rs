@@ -3,13 +3,18 @@
 //! green run of an older commit never moves production backwards (#97).
 //!
 //! Git is real: a bare remote carrying the tags, and a checkout with no
-//! tags of its own whose `origin` is that remote, which is what CI's
-//! shallow checkout gives the script. The tags point at the empty tree,
+//! tags of its own whose `origin` is that remote. The script reads the
+//! remote's tags only, so this stands in for CI's shallow, tagless
+//! checkout without a commit to clone. The tags point at the empty tree,
 //! since the script reads only their names. The job's outputs go to the
 //! file `GITHUB_OUTPUT` names, as on a runner.
 //!
 //! No test execs a file this process wrote: the script's copy in the
-//! checkout runs through `bash` (#108).
+//! checkout runs through `bash`, for the reason `prune_images` gives
+//! (#108).
+//!
+//! A script's test, in `kiewer_lib`'s binary because the workspace has no
+//! crate for its scripts and this one needs only cargo's scratch directory.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,13 +53,15 @@ impl Fixture {
 
     /// The hook's environment holds `GIT_DIR` and `GIT_INDEX_FILE` for the
     /// commit being checked, which must reach neither this git nor the
-    /// script's.
+    /// script's. `TMPDIR` keeps the script's throwaway repository in the
+    /// scratch directory.
     fn command(&self, program: &Path) -> Command {
         let mut command = Command::new(program);
         command
             .env_clear()
             .env("PATH", std::env::var_os("PATH").expect("PATH is set"))
             .env("HOME", self.dir.path())
+            .env("TMPDIR", self.dir.path())
             .env("GIT_CONFIG_NOSYSTEM", "1");
         command
     }
@@ -92,9 +99,9 @@ impl Fixture {
             .expect("the script runs")
     }
 
-    /// The outputs of a first attempt that succeeded.
-    fn outputs_of(&self, version: &str) -> String {
-        let output = self.decide(version, 1);
+    /// The outputs of an attempt that succeeded.
+    fn outputs_of(&self, version: &str, attempt: u32) -> String {
+        let output = self.decide(version, attempt);
         assert!(
             output.status.success(),
             "stderr: {}",
@@ -138,7 +145,7 @@ fn a_version_above_every_release_is_cut(git_tags: &[&str], version: &str) {
     let fixture = Fixture::new(git_tags);
 
     assert_eq!(
-        fixture.outputs_of(version),
+        fixture.outputs_of(version, 1),
         outputs(version, kind_of(version), true, true)
     );
 }
@@ -155,21 +162,22 @@ fn a_version_not_above_every_release_is_a_plain_push(git_tags: &[&str], version:
     let fixture = Fixture::new(git_tags);
 
     assert_eq!(
-        fixture.outputs_of(version),
+        fixture.outputs_of(version, 1),
         outputs(version, kind_of(version), false, false)
     );
 }
 
 /// A failed prune comes after the tag, so the rerun that repeats it finds
 /// the Version tagged.
-#[test]
-fn a_rerun_prunes_whether_or_not_it_cuts() {
-    let fixture = Fixture::new(&["v0.2.0"]);
+#[test_case(&["v0.2.0"], "0.2.0", false; "after a failed prune")]
+#[test_case(&["v0.1.0"], "0.2.0", true; "after a failed deploy")]
+fn a_rerun_prunes_whether_or_not_it_cuts(git_tags: &[&str], version: &str, cut: bool) {
+    let fixture = Fixture::new(git_tags);
 
-    let output = fixture.decide("0.2.0", 2);
-
-    assert!(output.status.success());
-    assert_eq!(fixture.outputs(), outputs("0.2.0", "release", false, true));
+    assert_eq!(
+        fixture.outputs_of(version, 2),
+        outputs(version, "release", cut, true)
+    );
 }
 
 #[test_case("0.2"; "two numbers")]

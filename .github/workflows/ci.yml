@@ -317,18 +317,17 @@ jobs:
   # run must tag nothing. A rerun of the red job on main reaches this job.
   #
   # The Version is read from the manifest, and scripts/release-cut.sh cuts
-  # it only when it sorts above every Release tag in git. A Version already
-  # tagged, or one below the newest Release (two Bumps whose runs finish
-  # out of order, a late rerun of a red older Bump), means a plain push,
-  # and the job ends there: the run has done what every push does, and
-  # production never moves back to older code. Otherwise the job deploys
-  # the digest of the image this run pushed to the production service,
-  # names the image, makes the annotated tag and prunes the registry. The
-  # names and the tag come after the deploy because they are the record of
-  # a Release that happened: a failed deploy leaves the Version untagged
-  # and nothing pointing at the image, so a rerun of this job cuts it, and
-  # so does the green run of a fix pushed above the Bump. Every step before
-  # the tag repeats to the same result.
+  # it only when it sorts above every Release tag in git (its header says
+  # why). A Version already tagged, or one below the newest Release, means
+  # a plain push, and the job ends there: the run has done what every push
+  # does, and production never moves back to older code. Otherwise the job
+  # deploys the digest of the image this run pushed to the production
+  # service, names the image, makes the annotated tag and prunes the
+  # registry. The names and the tag come after the deploy because they are
+  # the record of a Release that happened: a failed deploy leaves the
+  # Version untagged and nothing pointing at the image, so a rerun of this
+  # job cuts it, and so does the green run of a fix pushed above the Bump.
+  # Every step before the tag repeats to the same result.
   #
   # With the tag last, it cannot settle two runs racing for one Version;
   # the concurrency group does. Release jobs run one at a time, and the

@@ -45,7 +45,7 @@ Read the plan before the apply: on the first run it creates everything; after th
    done
    ```
 
-   Done when `gh variable list --repo docwilco/kiewer` shows the three and the next push to main's Image job runs its "Push the image as its short hash" and "Deploy to staging" steps instead of skipping them. That push also cuts a Release when its run is green and the manifest's Version has no tag, which deploys production (AGENTS.md, Deploy): hold it until the steps below are done if production should wait for them.
+   Done when `gh variable list --repo docwilco/kiewer` shows the three and the next push to main's Image job runs its "Push the image as its short hash" and "Deploy to staging" steps instead of skipping them. That push also cuts a Release when its run is green and the manifest's Version sorts above every Release tag in git (with no tags yet, any Version does), which deploys production (AGENTS.md, Deploy): hold it until the steps below are done if production should wait for them.
 
 2. DNS: CNAME the two hostnames (`terraform output hostnames`) to the same Fastly target the other `*.drwil.co` names use; the certificate already covers them.
 
