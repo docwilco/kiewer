@@ -31,6 +31,7 @@ const HOOKS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../.githooks");
 const CHECKS: &str = r#"#!/usr/bin/env bash
 echo "==> fmt"
 echo "$1" >> "$KIEWER_TEST_CHECKS_RAN"
+echo "${CHECKS_SKIP-unset}" > "$KIEWER_TEST_CHECKS_SKIP"
 "#;
 
 /// The stand-in cargo: `cargo metadata` fails, `cargo sweep` records its
@@ -119,6 +120,10 @@ impl Fixture {
             .env("HOME", self.dir.path())
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("KIEWER_TEST_CHECKS_RAN", self.checks_ran())
+            .env(
+                "KIEWER_TEST_CHECKS_SKIP",
+                self.dir.path().join("checks-skip"),
+            )
             .env("BASH_FUNC_cargo%%", self.cargo)
             .env("KIEWER_TEST_SWEEPS", self.sweeps_file())
             .env("BASH_FUNC_cargo-sweep%%", "() { :; }")
@@ -130,6 +135,14 @@ impl Fixture {
     }
 
     /// What the stand-in checks script was asked to run, one line a run.
+    /// The stages the hook told the checks to skip, as it exported them.
+    fn skipped(&self) -> String {
+        fs::read_to_string(self.dir.path().join("checks-skip"))
+            .expect("the checks ran")
+            .trim_end()
+            .to_owned()
+    }
+
     fn runs(&self) -> String {
         fs::read_to_string(self.checks_ran()).unwrap_or_default()
     }
@@ -227,4 +240,31 @@ fn a_filesystem_that_records_no_reads_is_never_swept() {
     );
     assert_eq!(fixture.sweeps(), "");
     assert_eq!(fixture.runs(), "all\n");
+}
+
+#[test_case(&["main.rs"], "sqlx wasm browser" ; "a file outside every corner")]
+#[test_case(&["kiewer_viewer/src/lib.rs"], "sqlx" ; "the viewer")]
+#[test_case(&["kicad_core/src/lib.rs"], "sqlx" ; "the board parser")]
+#[test_case(&["kiewer_lib/src/db.rs"], "wasm" ; "the server")]
+#[test_case(&["kiewer_lib/templates/page.html"], "sqlx wasm" ; "a template")]
+#[test_case(&["kiewer_lib/tests/it/upload.rs"], "sqlx wasm browser" ; "a server test")]
+#[test_case(&["kiewer_lib/tests/it/browser.rs"], "sqlx wasm" ; "the browser tests")]
+#[test_case(&["migrations/0014_x.sql"], "wasm" ; "a migration")]
+#[test_case(&["main.rs", "Cargo.lock"], "" ; "the lock")]
+#[test_case(&["main.rs", ".githooks/pre-commit"], "" ; "the hook")]
+fn a_commit_skips_the_stages_whose_corner_it_leaves_alone(paths: &[&str], skipped: &str) {
+    let fixture = Fixture::new();
+    for path in paths {
+        fixture.write(path);
+    }
+    fixture.git(&["add", "--all"]);
+    fixture.git(&["commit", "--message", "change"]);
+    assert_eq!(fixture.skipped(), skipped);
+}
+
+#[test]
+fn an_amend_with_nothing_staged_skips_no_stage() {
+    let fixture = Fixture::new();
+    fixture.git(&["commit", "--amend", "--no-edit"]);
+    assert_eq!(fixture.skipped(), "");
 }

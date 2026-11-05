@@ -164,10 +164,26 @@ run() {
   echo "==> $name ok ($(( $(date +%s) - start ))s)"
 }
 
+# The stages `all` leaves out, named by the pre-commit hook for a commit
+# that touches nothing they check (.githooks/pre-commit says how it
+# decides), each with a line saying so. CI runs every stage on every push
+# and refuses the variable, so a skip never hides a stage there.
+skip_stages=" ${CHECKS_SKIP:-} "
+if [ -n "${CI:-}" ] && [ -n "${CHECKS_SKIP:-}" ]; then
+  echo "CHECKS_SKIP=$CHECKS_SKIP is refused on CI, which runs every stage." >&2
+  exit 1
+fi
+run_unless_skipped() {
+  case "$skip_stages" in
+    *" $1 "*) echo "==> $1 skipped: the commit touches nothing it checks" ;;
+    *) run "$1" ;;
+  esac
+}
+
 case "${1:-all}" in
   test) gates; run test; report_skipped ;;
   sqlx) gate DATABASE_URL KIEWER_SKIP_DB_TESTS Postgres db_tests || exit 1; run sqlx; report_skipped ;;
   fmt|clippy|docs|wasm|browser) run "$1" ;;
-  all) gates; for stage in fmt sqlx clippy test docs wasm browser; do run "$stage"; done; report_skipped ;;
+  all) gates; for stage in fmt sqlx clippy test docs wasm browser; do run_unless_skipped "$stage"; done; report_skipped ;;
   *) echo "usage: $0 [fmt|sqlx|clippy|test|docs|wasm|browser|all]" >&2; exit 2 ;;
 esac

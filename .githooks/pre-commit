@@ -44,6 +44,44 @@ if [ "$prose_only" = 1 ]; then
   exit 0
 fi
 
+# Three stages check one corner of the tree each, and a commit that touches
+# nothing in its corner skips it (scripts/checks.sh prints the skip): the
+# warm hook spent 45 s of its 95 on the browser stage alone, and a cold one
+# minutes on each. CI runs every stage on every push, so a corner drawn too
+# small costs a red CI run, never a missed check. fmt, clippy, test and
+# docs run on every checked commit. An entry ending in / is a directory,
+# any other a file. A path in build_paths (the workspace's build setup)
+# runs every stage, and so does a commit that lists no path (the amend
+# above).
+build_paths=(Cargo.toml Cargo.lock .cargo/ rust-toolchain rust-toolchain.toml clippy.toml
+  scripts/checks.sh .githooks/)
+viewer_paths=(kicad_core/ kiewer_viewer/ scripts/build-viewer.sh)
+sqlx_paths=(kiewer_lib/src/ kiewer_lib/Cargo.toml migrations/ .sqlx/ scripts/sqlx-prepare.sh)
+wasm_paths=("${viewer_paths[@]}")
+browser_paths=("${viewer_paths[@]}" kiewer_lib/src/ kiewer_lib/assets/ kiewer_lib/templates/
+  kiewer_lib/build.rs kiewer_lib/Cargo.toml kiewer_lib/tests/it/browser.rs
+  kiewer_lib/tests/it/main.rs kiewer_test_support/ migrations/ scripts/browser.sh)
+touches() {  # $1: the name of an array of entries; true when a staged path is under one
+  local -n entries=$1
+  local path entry
+  while IFS= read -r path; do
+    for entry in "${entries[@]}"; do
+      case "$entry" in
+        */) case "$path" in "$entry"*) return 0 ;; esac ;;
+        *) [ "$path" = "$entry" ] && return 0 ;;
+      esac
+    done
+  done <<<"$staged"
+  return 1
+}
+checks_skip=()
+if [ -n "$staged" ] && ! touches build_paths; then
+  for stage in sqlx wasm browser; do
+    touches "${stage}_paths" || checks_skip+=("$stage")
+  done
+fi
+export CHECKS_SKIP="${checks_skip[*]}"
+
 command -v rsync >/dev/null || {
   echo "pre-commit: rsync is required (apt install rsync)." >&2
   exit 1
