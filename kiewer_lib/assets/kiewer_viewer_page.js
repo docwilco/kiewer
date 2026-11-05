@@ -150,6 +150,29 @@ export function devicePoint(canvas, e) {
   return [(e.clientX - r.left) * scale, (e.clientY - r.top) * scale];
 }
 
+// Places the net tooltip `tip` inside `stage` for the pointer event `e`
+// (#123), after its text is set. It shows the tip first so it can be
+// measured. The tip sits TIP_GAP below and right of the pointer; where
+// that crosses the stage's right edge it moves to the pointer's left, and
+// where it crosses the bottom edge, above the pointer. A tip wider or
+// taller than the stage is clamped to the stage's left or top edge. Both
+// pages use it, so the rule is one.
+const TIP_GAP = 14;
+export function placeTip(tip, stage, e) {
+  const r = stage.getBoundingClientRect();
+  const x = e.clientX - r.left;
+  const y = e.clientY - r.top;
+  tip.hidden = false;
+  const w = tip.offsetWidth;
+  const h = tip.offsetHeight;
+  let left = x + TIP_GAP;
+  if (left + w > r.width) left = x - TIP_GAP - w;
+  let top = y + TIP_GAP;
+  if (top + h > r.height) top = y - TIP_GAP - h;
+  tip.style.left = Math.max(0, left) + "px";
+  tip.style.top = Math.max(0, top) + "px";
+}
+
 // `x` to three significant figures, with no exponent and no trailing
 // zeros: 12.5, 80, 1230.
 function figures(x) {

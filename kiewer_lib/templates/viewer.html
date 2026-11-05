@@ -664,7 +664,7 @@ window.addEventListener("kiewer-board", function (e) {
 // still ends in one is told apart by how far the pointer moved since it
 // went down (CLICK_SLOP), and ignored.
 // The pointer in device pixels is the page script's (devicePoint).
-import { devicePoint } from "{{ page_script_url }}";
+import { devicePoint, placeTip } from "{{ page_script_url }}";
 
 const CLICK_SLOP = 4;
 const netCanvas = document.getElementById("board");
@@ -689,11 +689,8 @@ netMotion.addEventListener("change", followMotion);
 function hideTip() { netTip.hidden = true; }
 function showTip(e, text) {
   if (!text) { hideTip(); return; }
-  const r = netStage.getBoundingClientRect();
   netTip.textContent = text;
-  netTip.style.left = (e.clientX - r.left + 14) + "px";
-  netTip.style.top = (e.clientY - r.top + 14) + "px";
-  netTip.hidden = false;
+  placeTip(netTip, netStage, e);
 }
 // The net block: one row per pinned net, a swatch and the name. A click
 // on a name folds that net's pads open, each a button that pans to the

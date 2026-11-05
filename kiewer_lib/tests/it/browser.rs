@@ -1011,6 +1011,104 @@ async fn the_net_block_shows_only_once_the_page_has_loaded(viewed: Viewed) {
     session.close().await;
 }
 
+/// Places the net tooltip as the pages do on a pointer move at (`x`, `y`)
+/// from the stage's corner, then reports where it lies (#123). The page
+/// script is already loaded, so the import resolves to the same module.
+const PLACE_TIP: &str = r#"async ([x, y]) => {
+  const url = performance.getEntriesByType("resource")
+    .map((entry) => entry.name)
+    .find((name) => name.includes("kiewer_viewer_page"));
+  const { placeTip } = await import(url);
+  const stage = document.getElementById("stage");
+  const tip = document.getElementById("net-tip");
+  tip.textContent = "Net-(U1-Pad1)-with-a-rather-long-name";
+  const s = stage.getBoundingClientRect();
+  placeTip(tip, stage, { clientX: s.left + x, clientY: s.top + y });
+  const t = tip.getBoundingClientRect();
+  return {
+    left: t.left - s.left, top: t.top - s.top, right: s.right - t.right,
+    bottom: s.bottom - t.bottom, width: t.width, height: t.height,
+    stageWidth: s.width, stageHeight: s.height,
+    scrollX: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    scrollY: document.documentElement.scrollHeight > document.documentElement.clientHeight,
+  };
+}"#;
+
+#[derive(Debug, serde::Deserialize)]
+struct TipAt {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+    width: f64,
+    height: f64,
+    #[serde(rename = "stageWidth")]
+    stage_width: f64,
+    #[serde(rename = "stageHeight")]
+    stage_height: f64,
+    #[serde(rename = "scrollX")]
+    scroll_x: bool,
+    #[serde(rename = "scrollY")]
+    scroll_y: bool,
+}
+
+#[test_case(Viewed::Board; "the board page")]
+#[test_case(Viewed::Schematic; "the schematic page")]
+#[tokio::test]
+async fn the_net_tooltip_stays_inside_the_stage_and_clear_of_the_pointer(viewed: Viewed) {
+    let Some(executable) = executable() else {
+        return;
+    };
+    let session = Session::with_net_recorder(executable).await;
+    session.viewport(1000, 700, 1).await;
+    session.goto(viewed).await;
+    assert!(
+        session
+            .held_within_deadline(r#"!document.getElementById("net").hidden"#)
+            .await,
+        "the page did not load within {DEADLINE:?}"
+    );
+    let place = |x: f64, y: f64| {
+        let call = format!("({PLACE_TIP})([{x}, {y}])");
+        let session = &session;
+        async move { session.read::<TipAt>(&call).await }
+    };
+
+    let near = place(100.0, 100.0).await;
+    assert!(
+        (near.left - 114.0).abs() < 1.0 && (near.top - 114.0).abs() < 1.0,
+        "away from the edges it sits below and right of the pointer: {near:?}"
+    );
+
+    let (w, h) = (near.stage_width, near.stage_height);
+    let right = place(w - 5.0, 100.0).await;
+    assert!(
+        right.left >= 0.0 && right.right >= 0.0 && !right.scroll_x,
+        "near the right edge it is inside the stage: {right:?}"
+    );
+    assert!(
+        right.left + right.width <= w - 5.0,
+        "and left of the pointer: {right:?}"
+    );
+
+    let bottom = place(100.0, h - 5.0).await;
+    assert!(
+        bottom.top >= 0.0 && bottom.bottom >= 0.0 && !bottom.scroll_y,
+        "near the bottom edge it is inside the stage: {bottom:?}"
+    );
+    assert!(
+        bottom.top + bottom.height <= h - 5.0,
+        "and above the pointer: {bottom:?}"
+    );
+
+    let corner = place(w - 2.0, h - 2.0).await;
+    assert!(
+        corner.right >= 0.0 && corner.bottom >= 0.0 && !corner.scroll_x && !corner.scroll_y,
+        "in the corner it is inside the stage: {corner:?}"
+    );
+    session.close().await;
+}
+
 /// Moves the zones slider to `value` as a person does: the value, then
 /// the input event the panel listens for.
 const MOVE_ZONES: &str = r#"(value) => {
