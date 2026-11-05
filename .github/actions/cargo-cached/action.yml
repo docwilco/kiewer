@@ -51,11 +51,10 @@
 # rebuilt ones at every save, until the runner's disk fills; `cargo sweep
 # --file` against the stamp removes every unit the run did not touch,
 # the workspace's own units kept with the rest. cargo-sweep reads a
-# unit's newest atime; without the hook's mtime-on-use switch
-# (RUSTC_BOOTSTRAP=1, off limits on plain-stable CI) only the kernel
-# moves atime, and relatime records a read only when atime is at or
-# before mtime or ctime, or a day old. The reset to the epoch makes every
-# read count; noatime would record none, so the step warns. cargo-sweep
+# unit's newest atime, which only the kernel moves, and relatime records
+# a read only when atime is at or before mtime or ctime, or a day old.
+# The reset to the epoch makes every read count, as the pre-commit hook
+# does for its snapshot; noatime would record none, so the step warns. cargo-sweep
 # comes through cargo-binstall. The crate is pinned at its minor (a
 # semver requirement, resolved to the newest match), so a patch comes in
 # on its own and a breaking release waits for a commit; the action at its
