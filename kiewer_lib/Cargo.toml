@@ -34,13 +34,17 @@ flate2 = "1"
 # The GCS store (blob/gcs.rs): Google's own client. Its data path is the
 # JSON API, which the fake-gcs-server emulator speaks (object_store's XML
 # PUT it does not); application-default credentials and the metadata
-# server on Cloud Run come with it; with_endpoint reaches an emulator. Its
-# default feature is the rustls provider the TLS needs. google-cloud-auth
-# is for the anonymous credentials an emulator takes, google-cloud-gax
-# names the client builder's error type.
+# server on Cloud Run come with it; with_endpoint reaches an emulator.
+# Without its default feature, which brings aws-lc-rs as the rustls
+# provider: aws-lc-sys is a cmake build of C, about 100 s in every cold
+# target directory, beside the ring that reqwest, oauth2 and sqlx bring
+# already. The store installs ring as the process's provider instead
+# (blob/gcs.rs), which google-cloud-auth then reads. google-cloud-auth is
+# for the anonymous credentials an emulator takes, google-cloud-gax names
+# the client builder's error type.
 google-cloud-auth = { version = "1.18", default-features = false }
 google-cloud-gax = { version = "1.15", default-features = false }
-google-cloud-storage = "1.21"
+google-cloud-storage = { version = "1.21", default-features = false }
 # The board parser and model: the server parses every uploaded board for
 # its metadata (docs/v1-scope.md, Uploads, S8).
 kicad_core = { path = "../kicad_core" }
@@ -59,6 +63,10 @@ percent-encoding = { version = "2", default-features = false }
 # 0.8, the major sqlx and oauth2 already bring: OsRng for session ids.
 rand = { version = "0.8", default-features = false, features = ["getrandom"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# The process's crypto provider for the GCS store's TLS and signing: ring,
+# the one reqwest, oauth2 and sqlx already build (google-cloud-storage
+# above). In the tree already through all of them.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
