@@ -15,14 +15,15 @@ use test_case::test_case;
 
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/checks.sh");
 
-/// The variables the gates read, removed before each run puts back its
-/// own: a run inside the hook or on CI has them set.
+/// The variables the gates and the stage skips read, removed before each
+/// run puts back its own: a run inside the hook or on CI has them set.
 const GATE_VARS: &[&str] = &[
     "DATABASE_URL",
     "KIEWER_GCS_EMULATOR",
     "KIEWER_SKIP_DB_TESTS",
     "KIEWER_SKIP_GCS_TESTS",
     "CI",
+    "CHECKS_SKIP",
 ];
 
 /// The script's stages these tests run.
@@ -201,4 +202,44 @@ fn ci_refuses_an_opt_out(gate: Gate) {
     );
     run.assert_refused_before_building();
     run.assert_stderr_names(gate.opt_out());
+}
+
+/// The stages a commit's corners leave out: the three whose real scripts
+/// the stand-in cargo cannot stand in for.
+const SKIPPED: (&str, &str) = ("CHECKS_SKIP", "sqlx wasm browser");
+
+#[test]
+fn all_runs_every_stage_but_the_skipped_and_names_each_skip() {
+    let run = checks(
+        Stage::All,
+        &[Gate::Postgres.set(), Gate::Gcs.set(), SKIPPED],
+    );
+    assert!(run.success, "stderr: {}", run.stderr);
+    for stage in ["sqlx", "wasm", "browser"] {
+        let skip = format!("==> {stage} skipped");
+        assert!(
+            run.stdout.contains(&skip),
+            "{skip} in stdout: {}",
+            run.stdout
+        );
+    }
+    for stage in ["fmt", "clippy", "test", "docs"] {
+        let ok = format!("==> {stage} ok");
+        assert!(run.stdout.contains(&ok), "{ok} in stdout: {}", run.stdout);
+    }
+}
+
+#[test]
+fn ci_refuses_a_stage_skip() {
+    let run = checks(
+        Stage::All,
+        &[
+            Gate::Postgres.set(),
+            Gate::Gcs.set(),
+            SKIPPED,
+            ("CI", "true"),
+        ],
+    );
+    run.assert_refused_before_building();
+    run.assert_stderr_names("CHECKS_SKIP");
 }

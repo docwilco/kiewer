@@ -16,20 +16,29 @@ set -euo pipefail
 # Directories nothing cargo builds lives under. A commit that touches only
 # these, or markdown files at the root, runs no checks: the snapshot below
 # could not come out red, the run would only cost the minute. Add a local
-# issue tracker's directory (.scratch) when the repo has one.
+# issue tracker's directory (.scratch) when the repo has one. A directory in
+# code_dirs is code wherever it sits: viewer-drop/board/ holds the board the
+# server and the tests embed.
 prose_dirs=(docs viewer-drop)
+code_dirs=(viewer-drop/board)
 
-# No staged path at all counts as code: `git commit --amend` with nothing
-# staged lists none, since the index matches the commit being amended, and
-# still commits that commit's whole tree (#79).
-staged="$(git diff --cached --name-only)"
+# The staged paths, as git stores them: -z, so a name git would quote (a
+# non-ASCII letter, a tab) is never quoted, and --no-renames, so a move
+# names the path it leaves as well as the one it reaches. No staged path at
+# all counts as code: `git commit --amend` with nothing staged lists none,
+# since the index matches the commit being amended, and still commits that
+# commit's whole tree (#79).
+mapfile -d '' -t staged < <(git diff --cached --name-only --no-renames -z)
 prose_only=0
-if [ -n "$staged" ]; then
+if [ "${#staged[@]}" -gt 0 ]; then
   prose_only=1
-  while IFS= read -r path; do
+  for path in "${staged[@]}"; do
     under_prose=0
     for dir in "${prose_dirs[@]}"; do
       case "$path" in "$dir"/*) under_prose=1 ;; esac
+    done
+    for dir in "${code_dirs[@]}"; do
+      case "$path" in "$dir"/*) under_prose=0 ;; esac
     done
     [ "$under_prose" = 1 ] && continue
     case "$path" in
@@ -37,7 +46,7 @@ if [ -n "$staged" ]; then
       *.md) ;;
       *) prose_only=0; break ;;
     esac
-  done <<<"$staged"
+  done
 fi
 if [ "$prose_only" = 1 ]; then
   echo "pre-commit: prose only (${prose_dirs[*]}/, root *.md); checks skipped."
@@ -52,35 +61,40 @@ fi
 # docs run on every checked commit. An entry ending in / is a directory,
 # any other a file. A path in build_paths (the workspace's build setup)
 # runs every stage, and so does a commit that lists no path (the amend
-# above).
+# above). An amend that stages paths is judged by those paths alone: the
+# commit it amends passed this hook on its own.
 build_paths=(Cargo.toml Cargo.lock .cargo/ rust-toolchain rust-toolchain.toml clippy.toml
   scripts/checks.sh .githooks/)
-viewer_paths=(kicad_core/ kiewer_viewer/ scripts/build-viewer.sh)
-sqlx_paths=(kiewer_lib/src/ kiewer_lib/Cargo.toml migrations/ .sqlx/ scripts/sqlx-prepare.sh)
+viewer_paths=(kicad_core/ kiewer_viewer/ kiewer_assert/ scripts/build-viewer.sh
+  scripts/wasm-bindgen-version.sh)
+sqlx_paths=(kiewer_lib/src/ kiewer_lib/Cargo.toml migrations/ .sqlx/ scripts/sqlx-prepare.sh
+  scripts/sqlx-version.sh)
 wasm_paths=("${viewer_paths[@]}")
+# browser.rs takes its fixtures from upload.rs, which embeds the board
+# under viewer-drop/board/, as the server does.
 browser_paths=("${viewer_paths[@]}" kiewer_lib/src/ kiewer_lib/assets/ kiewer_lib/templates/
   kiewer_lib/build.rs kiewer_lib/Cargo.toml kiewer_lib/tests/it/browser.rs
-  kiewer_lib/tests/it/main.rs kiewer_test_support/ migrations/ scripts/browser.sh)
+  kiewer_lib/tests/it/main.rs kiewer_lib/tests/it/upload.rs viewer-drop/board/
+  kiewer_test_support/ migrations/ scripts/browser.sh)
 touches() {  # $1: the name of an array of entries; true when a staged path is under one
   local -n entries=$1
   local path entry
-  while IFS= read -r path; do
+  for path in "${staged[@]}"; do
     for entry in "${entries[@]}"; do
       case "$entry" in
         */) case "$path" in "$entry"*) return 0 ;; esac ;;
         *) [ "$path" = "$entry" ] && return 0 ;;
       esac
     done
-  done <<<"$staged"
+  done
   return 1
 }
 checks_skip=()
-if [ -n "$staged" ] && ! touches build_paths; then
+if [ "${#staged[@]}" -gt 0 ] && ! touches build_paths; then
   for stage in sqlx wasm browser; do
     touches "${stage}_paths" || checks_skip+=("$stage")
   done
 fi
-export CHECKS_SKIP="${checks_skip[*]}"
 
 command -v rsync >/dev/null || {
   echo "pre-commit: rsync is required (apt install rsync)." >&2
@@ -234,7 +248,9 @@ fi
 # run inherits the lock and blocks the next commit, long after the hook that
 # took it has exited.
 echo "pre-commit: checking the staged tree in $snapshot"
-bash "$snapshot/scripts/checks.sh" all 9>&- || {
+# CHECKS_SKIP goes to the checks alone, never into the environment their
+# tests inherit.
+CHECKS_SKIP="${checks_skip[*]}" bash "$snapshot/scripts/checks.sh" all 9>&- || {
   stop_server
   echo >&2
   echo "pre-commit: checks failed against the staged tree, which is still in" >&2

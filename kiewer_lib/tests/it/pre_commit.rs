@@ -247,7 +247,13 @@ fn a_filesystem_that_records_no_reads_is_never_swept() {
 #[test_case(&["kicad_core/src/lib.rs"], "sqlx" ; "the board parser")]
 #[test_case(&["kiewer_lib/src/db.rs"], "wasm" ; "the server")]
 #[test_case(&["kiewer_lib/templates/page.html"], "sqlx wasm" ; "a template")]
-#[test_case(&["kiewer_lib/tests/it/upload.rs"], "sqlx wasm browser" ; "a server test")]
+#[test_case(&["kiewer_lib/tests/it/upload.rs"], "sqlx wasm" ; "the browser tests' fixtures")]
+#[test_case(&["kiewer_lib/tests/it/accounts.rs"], "sqlx wasm browser" ; "a server test")]
+#[test_case(&["kiewer_assert/src/lib.rs"], "sqlx" ; "the assertion helpers")]
+#[test_case(&["scripts/wasm-bindgen-version.sh"], "sqlx" ; "the wasm-bindgen pin")]
+#[test_case(&["scripts/sqlx-version.sh"], "wasm browser" ; "the sqlx-cli pin")]
+#[test_case(&["viewer-drop/board/b.kicad_pcb"], "sqlx wasm" ; "the embedded board")]
+#[test_case(&["kicad_core/src/ü.rs"], "sqlx" ; "a name git would quote")]
 #[test_case(&["kiewer_lib/tests/it/browser.rs"], "sqlx wasm" ; "the browser tests")]
 #[test_case(&["migrations/0014_x.sql"], "wasm" ; "a migration")]
 #[test_case(&["main.rs", "Cargo.lock"], "" ; "the lock")]
@@ -267,4 +273,26 @@ fn an_amend_with_nothing_staged_skips_no_stage() {
     let fixture = Fixture::new();
     fixture.git(&["commit", "--amend", "--no-edit"]);
     assert_eq!(fixture.skipped(), "");
+}
+
+#[test]
+fn a_move_counts_the_path_it_leaves() {
+    let fixture = Fixture::new();
+    fixture.write("kicad_core/src/moved.rs");
+    fixture.write("kiewer_lib/tests/it/accounts.rs");
+    fixture.git(&["add", "--all"]);
+    fixture.git(&[
+        "commit",
+        "--quiet",
+        "--no-verify",
+        "--message",
+        "seed the viewer",
+    ]);
+    fixture.git(&[
+        "mv",
+        "kicad_core/src/moved.rs",
+        "kiewer_lib/tests/it/moved.rs",
+    ]);
+    fixture.git(&["commit", "--message", "move"]);
+    assert_eq!(fixture.skipped(), "sqlx");
 }
