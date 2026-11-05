@@ -73,7 +73,7 @@ flock -n 9 || {
 }
 
 # The checkout's own target is swept here (.githooks/sweep.sh says how),
-# before CARGO_TARGET_DIR is redirected below, so the sweep sees whatever
+# before the target is pinned below, so the sweep sees whatever
 # this shell builds into.
 . "$(dirname "${BASH_SOURCE[0]}")/sweep.sh"
 sweep_checkout pre-commit "$root"
@@ -92,9 +92,23 @@ git checkout-index --all --force --prefix="$export_dir/"
 mkdir -p "$snapshot"
 rsync -rp --checksum --delete --exclude='/target' "$export_dir/" "$snapshot/"
 
-# Never share a build directory with the working tree, whatever this shell has
-# CARGO_TARGET_DIR set to. The exclude above keeps --delete off this path.
-export CARGO_TARGET_DIR="$snapshot/target"
+# Never share a build directory with the working tree. The snapshot's own
+# target is cargo's default for the snapshot's workspace, so the variables
+# that move it are unset, never pointed there: sccache puts every CARGO_*
+# variable in its cache key, and one naming this worktree's snapshot gave
+# every worktree a compile cache of its own, cold on its first commit. A
+# config file can still move it, which the check below refuses; where cargo
+# cannot say (no metadata), the checks' own cargo fails first. The exclude
+# above keeps --delete off this path.
+unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR
+target_dir="$snapshot/target"
+if actual_target="$(cd "$snapshot" &&
+  cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r .target_directory)" &&
+  [ "$actual_target" != "$target_dir" ]; then
+  echo "pre-commit: cargo builds the snapshot into $actual_target, not" >&2
+  echo "  $target_dir; a config file sets build.target-dir." >&2
+  exit 1
+fi
 
 # The snapshot's target is swept by use, not age: a stamp before the checks,
 # and once they pass everything they did not touch goes. Cargo marks a fresh
@@ -113,19 +127,55 @@ if command -v cargo-sweep >/dev/null; then
   cargo sweep --stamp "$snapshot"
 fi
 
-# 9>&- keeps the lock fd out of the checks and everything they spawn. Without
-# it a test daemon that outlives its run inherits the lock and blocks the next
-# commit, long after the hook that took it has exited.
+# sccache shares a compile between worktrees only when the paths in it are
+# stripped to the same ones; SCCACHE_BASEDIRS names the prefix to strip.
+# The server, not the rustc wrapper, does the hashing, and it reads the
+# variable once, when it starts (mozilla/sccache#2984 would read it per
+# compile), so a server every checkout shares strips only the path of the
+# build that started it. The checks get a server of their own, started with
+# the snapshot as its base directory, on a socket in the snapshot, sharing
+# the disk cache with every other server; it stops when the checks end. A
+# client that finds it gone mid-run (its idle timeout) starts another with
+# the same environment. Stripping the env!("OUT_DIR") value that
+# serde_core, thiserror and serde_json read, a miss every crate above them
+# inherits, takes an sccache after 0.19.0 (mozilla/sccache#2918). Where the
+# server cannot start (no sccache, a socket path past the limit), the
+# checks use whatever compiler wrapper cargo is set up with.
+server=0
+if command -v sccache >/dev/null; then
+  export SCCACHE_SERVER_UDS="$snapshot/.sccache.sock" SCCACHE_BASEDIRS="$snapshot"
+  rm -f "$SCCACHE_SERVER_UDS"
+  if sccache --start-server >/dev/null 2>&1 9>&-; then
+    server=1
+  else
+    unset SCCACHE_SERVER_UDS SCCACHE_BASEDIRS
+  fi
+fi
+stop_server() {
+  [ "$server" = 1 ] || return 0
+  sccache --show-stats | awk '
+    /^Cache hits  /{h=$3} /^Cache misses  /{m=$3} /^Non-cacheable calls/{n=$3}
+    END{printf "pre-commit: sccache %d hits, %d misses, %d not cacheable\n", h, m, n}'
+  sccache --stop-server >/dev/null 2>&1 || true
+  rm -f "$SCCACHE_SERVER_UDS"
+}
+
+# 9>&- keeps the lock fd out of the checks and everything they spawn, the
+# sccache server above included. Without it a test daemon that outlives its
+# run inherits the lock and blocks the next commit, long after the hook that
+# took it has exited.
 echo "pre-commit: checking the staged tree in $snapshot"
 bash "$snapshot/scripts/checks.sh" all 9>&- || {
+  stop_server
   echo >&2
   echo "pre-commit: checks failed against the staged tree, which is still in" >&2
   echo "  $snapshot" >&2
   echo "Reproduce there: (cd $snapshot && scripts/checks.sh <stage>)" >&2
   exit 1
 }
+stop_server
 
-sweep_incremental pre-commit "$CARGO_TARGET_DIR"
+sweep_incremental pre-commit "$target_dir"
 if [ "$have_sweep" = 1 ]; then
   cargo sweep --file "$snapshot"
 fi
