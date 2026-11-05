@@ -68,9 +68,43 @@ const PAGE_SCRIPT_NEWSTROKE: &str = "\"./kiewer_viewer_newstroke.txt\"";
 /// past any chance of two builds colliding, and short enough to read.
 const HASH_LEN: usize = 16;
 
-/// The brotli quality (0 to 11): the best, since the files are compressed
-/// once per build and served for a year.
-const BROTLI_QUALITY: u32 = 11;
+/// How hard the variants are compressed. A release's are served for a
+/// year and compressed once per build, so the best. Every other profile's
+/// serve a check (the browser stage) or a dev server, where any valid
+/// coding will do, and the best cost: quality 11 took about 34 s of a
+/// 44 s build of the debug viewer (7 MB).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Effort {
+    Best,
+    Fast,
+}
+
+impl Effort {
+    /// The release profile's is the best, every other's fast.
+    fn of_profile(profile: &str) -> Self {
+        if profile == "release" {
+            Effort::Best
+        } else {
+            Effort::Fast
+        }
+    }
+
+    /// The brotli quality (0 to 11).
+    fn brotli_quality(self) -> u32 {
+        match self {
+            Effort::Best => 11,
+            Effort::Fast => 5,
+        }
+    }
+
+    fn gzip_level(self) -> flate2::Compression {
+        match self {
+            Effort::Best => flate2::Compression::best(),
+            Effort::Fast => flate2::Compression::fast(),
+        }
+    }
+}
+
 /// The brotli window (10 to 24, a power of two of bytes): the largest,
 /// which suits one file of a few megabytes decoded by a browser.
 const BROTLI_WINDOW: u32 = 24;
@@ -82,6 +116,8 @@ fn main() {
         println!("cargo::rustc-env={to}={value}");
     }
     println!("cargo::rerun-if-changed=build.rs");
+    let effort =
+        Effort::of_profile(&env::var("PROFILE").expect("cargo sets PROFILE for a build script"));
 
     println!("cargo::rustc-check-cfg=cfg(kiewer_viewer_embedded)");
     println!("cargo::rerun-if-env-changed=KIEWER_VIEWER_REQUIRED");
@@ -120,8 +156,9 @@ fn main() {
         );
         let script_text = script_text.replace("kiewer_viewer_bg.wasm", &wasm_name);
         let script_name = hashed_name("kiewer_viewer", script_text.as_bytes(), "js");
-        emit("KIEWER_VIEWER_WASM", &out, &wasm_name, &wasm_bytes);
+        emit(effort, "KIEWER_VIEWER_WASM", &out, &wasm_name, &wasm_bytes);
         emit(
+            effort,
             "KIEWER_VIEWER_JS",
             &out,
             &script_name,
@@ -156,6 +193,7 @@ fn main() {
     let newstroke_bytes = fs::read(&newstroke).expect("the glyph table is readable");
     let newstroke_name = hashed_name("kiewer_viewer_newstroke", &newstroke_bytes, "txt");
     emit(
+        effort,
         "KIEWER_VIEWER_NEWSTROKE",
         &out,
         &newstroke_name,
@@ -168,7 +206,13 @@ fn main() {
     );
     let page_text = page_text.replace(PAGE_SCRIPT_NEWSTROKE, &format!("\"./{newstroke_name}\""));
     let page_name = hashed_name("kiewer_viewer_page", page_text.as_bytes(), "js");
-    emit("KIEWER_VIEWER_PAGE", &out, &page_name, page_text.as_bytes());
+    emit(
+        effort,
+        "KIEWER_VIEWER_PAGE",
+        &out,
+        &page_name,
+        page_text.as_bytes(),
+    );
 }
 
 /// Panics unless `text` names `name` exactly once, at the place where it
@@ -194,27 +238,31 @@ fn hashed_name(stem: &str, bytes: &[u8], extension: &str) -> String {
     format!("{stem}.{}.{extension}", &hex[..HASH_LEN])
 }
 
-/// Write `bytes` under `out` as `name`, `name.br` and `name.gz`, and
-/// tell the crate the name and the three paths: `<var>_NAME`, `<var>`,
-/// `<var>_BR`, `<var>_GZ`.
-fn emit(var: &str, out: &Path, name: &str, bytes: &[u8]) {
+/// Write `bytes` under `out` as `name`, `name.br` and `name.gz`, the two
+/// compressed with `effort`, and tell the crate the name and the three
+/// paths: `<var>_NAME`, `<var>`, `<var>_BR`, `<var>_GZ`.
+fn emit(effort: Effort, var: &str, out: &Path, name: &str, bytes: &[u8]) {
     let plain = out.join(name);
     fs::write(&plain, bytes).expect("OUT_DIR is writable");
     let br = out.join(format!("{name}.br"));
-    fs::write(&br, brotli(bytes)).expect("OUT_DIR is writable");
+    fs::write(&br, brotli(effort, bytes)).expect("OUT_DIR is writable");
     let gz = out.join(format!("{name}.gz"));
-    fs::write(&gz, gzip(bytes)).expect("OUT_DIR is writable");
+    fs::write(&gz, gzip(effort, bytes)).expect("OUT_DIR is writable");
     println!("cargo::rustc-env={var}_NAME={name}");
     println!("cargo::rustc-env={var}={}", plain.display());
     println!("cargo::rustc-env={var}_BR={}", br.display());
     println!("cargo::rustc-env={var}_GZ={}", gz.display());
 }
 
-fn brotli(bytes: &[u8]) -> Vec<u8> {
+fn brotli(effort: Effort, bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len() / 4);
     {
-        let mut writer =
-            brotli::CompressorWriter::new(&mut out, 1 << 16, BROTLI_QUALITY, BROTLI_WINDOW);
+        let mut writer = brotli::CompressorWriter::new(
+            &mut out,
+            1 << 16,
+            effort.brotli_quality(),
+            BROTLI_WINDOW,
+        );
         writer
             .write_all(bytes)
             .expect("writing to a Vec cannot fail");
@@ -223,11 +271,9 @@ fn brotli(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-fn gzip(bytes: &[u8]) -> Vec<u8> {
-    let mut encoder = flate2::write::GzEncoder::new(
-        Vec::with_capacity(bytes.len() / 3),
-        flate2::Compression::best(),
-    );
+fn gzip(effort: Effort, bytes: &[u8]) -> Vec<u8> {
+    let mut encoder =
+        flate2::write::GzEncoder::new(Vec::with_capacity(bytes.len() / 3), effort.gzip_level());
     encoder
         .write_all(bytes)
         .expect("writing to a Vec cannot fail");
