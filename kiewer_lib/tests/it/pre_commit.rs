@@ -10,8 +10,11 @@
 //! nothing. Cargo, which the hook's sweeps call, is a stand-in too: a bash
 //! function exported into git's environment, whose `cargo metadata` fails,
 //! so the hook finds no target directory to sweep and leaves the
-//! workspace's alone. So is sccache, which fails to start, so a test
-//! starts no server.
+//! workspace's alone, and whose `cargo sweep` records its arguments. So is
+//! cargo-sweep, there on every host, so the hook always reaches its sweep;
+//! and sccache, which fails to start, so a test starts no server. A stand-in
+//! stat that reports every atime as the epoch plays a filesystem that
+//! records no reads.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,8 +33,10 @@ echo "==> fmt"
 echo "$1" >> "$KIEWER_TEST_CHECKS_RAN"
 "#;
 
-/// The stand-in cargo: `cargo metadata` fails, everything else succeeds.
-const CARGO: &str = "() { [ \"$1\" != metadata ]; }";
+/// The stand-in cargo: `cargo metadata` fails, `cargo sweep` records its
+/// arguments, everything else succeeds.
+const CARGO: &str =
+    r#"() { [ "$1" != sweep ] || echo "$*" >> "$KIEWER_TEST_SWEEPS"; [ "$1" != metadata ]; }"#;
 
 /// A stand-in cargo whose `cargo metadata` names a target directory
 /// elsewhere, as a config file's `build.target-dir` would.
@@ -41,6 +46,8 @@ const CARGO_TARGET_ELSEWHERE: &str =
 struct Fixture {
     dir: TempDir,
     cargo: &'static str,
+    /// Whether the filesystem plays one that records no reads.
+    no_reads: bool,
 }
 
 impl Fixture {
@@ -55,6 +62,7 @@ impl Fixture {
         let fixture = Self {
             dir: scratch_dir!(),
             cargo,
+            no_reads: false,
         };
         let repo = fixture.repo();
         fs::create_dir_all(repo.join("scripts")).expect("the scripts directory");
@@ -79,6 +87,15 @@ impl Fixture {
         self.dir.path().join("checks-ran")
     }
 
+    fn sweeps_file(&self) -> PathBuf {
+        self.dir.path().join("sweeps")
+    }
+
+    /// What the stand-in cargo was asked to sweep, one line a call.
+    fn sweeps(&self) -> String {
+        fs::read_to_string(self.sweeps_file()).unwrap_or_default()
+    }
+
     /// Git with the hook's environment left behind: `GIT_DIR` and
     /// `GIT_INDEX_FILE` for the commit being checked must reach neither
     /// this git nor the hook it runs. Asserts that git succeeded.
@@ -94,8 +111,8 @@ impl Fixture {
 
     /// The same, whatever git's status.
     fn git_unchecked(&self, args: &[&str]) -> Output {
-        Command::new("git")
-            .args(args)
+        let mut git = Command::new("git");
+        git.args(args)
             .current_dir(self.repo())
             .env_clear()
             .env("PATH", std::env::var_os("PATH").expect("PATH is set"))
@@ -103,9 +120,13 @@ impl Fixture {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("KIEWER_TEST_CHECKS_RAN", self.checks_ran())
             .env("BASH_FUNC_cargo%%", self.cargo)
-            .env("BASH_FUNC_sccache%%", "() { return 1; }")
-            .output()
-            .expect("git runs")
+            .env("KIEWER_TEST_SWEEPS", self.sweeps_file())
+            .env("BASH_FUNC_cargo-sweep%%", "() { :; }")
+            .env("BASH_FUNC_sccache%%", "() { return 1; }");
+        if self.no_reads {
+            git.env("BASH_FUNC_stat%%", "() { echo 0; }");
+        }
+        git.output().expect("git runs")
     }
 
     /// What the stand-in checks script was asked to run, one line a run.
@@ -176,4 +197,34 @@ fn a_target_directory_elsewhere_is_refused() {
         hook_output(&output)
     );
     assert_eq!(fixture.runs(), "");
+}
+
+#[test]
+fn a_checked_commit_stamps_its_target_and_sweeps_it() {
+    let fixture = Fixture::new();
+    fixture.write("main.rs");
+    fixture.git(&["add", "--all"]);
+    fixture.git(&["commit", "--message", "change"]);
+    let sweeps = fixture.sweeps();
+    let calls: Vec<&str> = sweeps
+        .lines()
+        .map(|line| line.split_whitespace().take(2).last().unwrap_or(""))
+        .collect();
+    assert_eq!(calls, ["--stamp", "--file"], "{sweeps}");
+}
+
+#[test]
+fn a_filesystem_that_records_no_reads_is_never_swept() {
+    let mut fixture = Fixture::new();
+    fixture.no_reads = true;
+    fixture.write("main.rs");
+    fixture.git(&["add", "--all"]);
+    let output = fixture.git(&["commit", "--message", "change"]);
+    assert!(
+        hook_output(&output).contains("records no reads"),
+        "{}",
+        hook_output(&output)
+    );
+    assert_eq!(fixture.sweeps(), "");
+    assert_eq!(fixture.runs(), "all\n");
 }

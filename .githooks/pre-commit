@@ -128,37 +128,39 @@ fi
 # The snapshot's target is swept by use, not age: a stamp before the checks,
 # and once they pass everything they did not touch goes. cargo-sweep takes
 # a unit's last use from the newest atime among its fingerprint files, and
-# cargo reads one of them for every unit it checks, fresh ones included.
-# Relatime records a read only when atime is at or before mtime, or a day
-# old, so every fingerprint's atime is reset to the epoch first and the
-# run's reads all count; the cargo-cached action does the same on CI. This
-# keeps the environment as plain stable cargo sees it everywhere else:
-# mtime-on-use, the switch this replaced, needed RUSTC_BOOTSTRAP=1, which
-# gave proc-macro2 another build and every compile in the snapshot cache
-# keys of their own. Where the filesystem records no read (noatime), a
-# probe file says so and the sweep is skipped, since every unit would look
-# unused and the target would empty. The stamp file lands in the snapshot
-# root; the sweep consumes it, and after a failed run the rsync above
-# deletes it, so nothing older than the run in hand is ever read.
+# cargo reads one of them for every unit it checks, fresh ones included: a
+# warm run of every stage (host, wasm32, build scripts, clippy, docs) swept
+# nothing. Relatime records a read only when atime is at or before mtime or
+# ctime, or a day old, so every fingerprint's atime is reset to the epoch
+# first and the run's reads all count; the cargo-cached action resets the
+# same way on CI. This keeps the environment as plain stable cargo sees it
+# everywhere else: mtime-on-use, the switch this replaced, needed
+# RUSTC_BOOTSTRAP=1, which gave proc-macro2 another build, and every crate
+# built on it cache keys no build outside the hook shared. Where the
+# filesystem records no read (noatime), or the probe or the reset fails, a
+# line says so and the sweep is skipped, since every unit would look unused
+# and the target would empty. The stamp file lands in the snapshot root;
+# the sweep consumes it, and after a failed run the rsync above deletes it,
+# so nothing older than the run in hand is ever read.
 reads_recorded() {  # $1: a directory on the target's filesystem
   local probe="$1/.atime-probe" atime
-  : > "$probe"
-  touch -a -d @0 "$probe"
+  echo x > "$probe" || return 1
+  touch -a -d @0 "$probe" || { rm -f "$probe"; return 1; }
   cat "$probe" > /dev/null
-  atime=$(stat -c %X "$probe")
+  atime=$(stat -c %X "$probe") || atime=""
   rm -f "$probe"
-  [ "$atime" != 0 ]
+  case "$atime" in '' | 0) return 1 ;; esac
 }
 have_sweep=0
 if command -v cargo-sweep >/dev/null; then
-  if reads_recorded "$snapshot"; then
-    have_sweep=1
-    if [ -d "$target_dir" ]; then
-      find "$target_dir" -path '*/.fingerprint/*' -type f -exec touch -a -d @0 {} +
-    fi
-    cargo sweep --stamp "$snapshot"
-  else
+  if ! reads_recorded "$snapshot"; then
     echo "pre-commit: this filesystem records no reads (noatime?); no sweep of $target_dir."
+  elif [ -d "$target_dir" ] &&
+    ! find "$target_dir" -path '*/.fingerprint/*' -type f -exec touch -a -d @0 {} +; then
+    echo "pre-commit: the fingerprints' atimes could not all be reset; no sweep of $target_dir."
+  else
+    have_sweep=1
+    cargo sweep --stamp "$snapshot"
   fi
 fi
 
