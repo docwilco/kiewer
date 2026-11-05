@@ -40,6 +40,7 @@ use chromiumoxide::cdp::browser_protocol::fetch::{
 use chromiumoxide::cdp::browser_protocol::network::{
     CookieParam, EventRequestWillBeSent, EventResponseReceived, GetRequestPostDataParams, RequestId,
 };
+use chromiumoxide::layout::Point;
 use chromiumoxide::listeners::EventStream;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::{Browser, BrowserConfig, Page};
@@ -52,7 +53,7 @@ use kiewer_lib::blob::fs::FsBlobStore;
 use kiewer_lib::design;
 use kiewer_lib::session;
 use kiewer_lib::web::beacon::{BEACON_PATH, Backend, Beacon, Outcome};
-use kiewer_lib::web::viewer::{embedded, newstroke_url, script_url};
+use kiewer_lib::web::viewer::{embedded, newstroke_url, page_script_url, script_url};
 use kiewer_test_support::db::pool_from_env;
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use serde::Deserialize;
@@ -1011,19 +1012,20 @@ async fn the_net_block_shows_only_once_the_page_has_loaded(viewed: Viewed) {
     session.close().await;
 }
 
-/// Places the net tooltip as the pages do on a pointer move at (`x`, `y`)
-/// from the stage's corner, then reports where it lies (#123). The page
-/// script is already loaded, so the import resolves to the same module.
-const PLACE_TIP: &str = r#"async ([x, y]) => {
-  const url = performance.getEntriesByType("resource")
-    .map((entry) => entry.name)
-    .find((name) => name.includes("kiewer_viewer_page"));
-  const { placeTip } = await import(url);
+/// The gap the page script keeps between the pointer and the net tooltip,
+/// `TIP_GAP` in `kiewer_viewer_page.js`.
+const TIP_GAP: f64 = 14.0;
+
+/// Places the net tooltip, holding `text`, as the pages do on a pointer
+/// move at (`x`, `y`) from the stage's corner, then reports where it lies
+/// (#123). The page script is already loaded, so the import resolves to
+/// the same module. Format the page script's URL in with [`place_tip`].
+const PLACE_TIP: &str = r#"async ([x, y, text]) => {
+  const { placeTip } = await import("{page_script}");
   const stage = document.getElementById("stage");
   const tip = document.getElementById("net-tip");
-  tip.textContent = "Net-(U1-Pad1)-with-a-rather-long-name";
   const s = stage.getBoundingClientRect();
-  placeTip(tip, stage, { clientX: s.left + x, clientY: s.top + y });
+  placeTip(tip, stage, { clientX: s.left + x, clientY: s.top + y }, text);
   const t = tip.getBoundingClientRect();
   return {
     left: t.left - s.left, top: t.top - s.top, right: s.right - t.right,
@@ -1034,7 +1036,13 @@ const PLACE_TIP: &str = r#"async ([x, y]) => {
   };
 }"#;
 
-#[derive(Debug, serde::Deserialize)]
+/// The tooltip text the placement cases use: a net name of ordinary length.
+const TIP_TEXT: &str = "Net-(U1-Pad1)-with-a-rather-long-name";
+
+/// Where the net tooltip lies in the stage, in CSS pixels from the stage's
+/// corner, and the stage's size.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TipAt {
     left: f64,
     top: f64,
@@ -1042,14 +1050,16 @@ struct TipAt {
     bottom: f64,
     width: f64,
     height: f64,
-    #[serde(rename = "stageWidth")]
     stage_width: f64,
-    #[serde(rename = "stageHeight")]
     stage_height: f64,
-    #[serde(rename = "scrollX")]
     scroll_x: bool,
-    #[serde(rename = "scrollY")]
     scroll_y: bool,
+}
+
+/// The expression that places a tooltip of `text` at (`x`, `y`).
+fn place_tip(x: f64, y: f64, text: &str) -> String {
+    let function = PLACE_TIP.replace("{page_script}", &page_script_url());
+    format!("({function})([{x}, {y}, {text:?}])")
 }
 
 #[test_case(Viewed::Board; "the board page")]
@@ -1069,14 +1079,14 @@ async fn the_net_tooltip_stays_inside_the_stage_and_clear_of_the_pointer(viewed:
         "the page did not load within {DEADLINE:?}"
     );
     let place = |x: f64, y: f64| {
-        let call = format!("({PLACE_TIP})([{x}, {y}])");
+        let call = place_tip(x, y, TIP_TEXT);
         let session = &session;
         async move { session.read::<TipAt>(&call).await }
     };
 
     let near = place(100.0, 100.0).await;
     assert!(
-        (near.left - 114.0).abs() < 1.0 && (near.top - 114.0).abs() < 1.0,
+        (near.left - (100.0 + TIP_GAP)).abs() < 1.0 && (near.top - (100.0 + TIP_GAP)).abs() < 1.0,
         "away from the edges it sits below and right of the pointer: {near:?}"
     );
 
@@ -1105,6 +1115,124 @@ async fn the_net_tooltip_stays_inside_the_stage_and_clear_of_the_pointer(viewed:
     assert!(
         corner.right >= 0.0 && corner.bottom >= 0.0 && !corner.scroll_x && !corner.scroll_y,
         "in the corner it is inside the stage: {corner:?}"
+    );
+
+    let wide = session
+        .read::<TipAt>(&place_tip(300.0, 100.0, &"W".repeat(400)))
+        .await;
+    assert!(
+        wide.left.abs() < 0.5 && wide.width > w,
+        "a tip wider than the stage clamps to its left edge: {wide:?}"
+    );
+    session.close().await;
+}
+
+/// Whether the net tooltip shows, and the stage's corner in the viewport.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HoverState {
+    shown: bool,
+    stage_left: f64,
+    stage_top: f64,
+}
+
+const HOVER_STATE: &str = r#"(() => {
+  const s = document.getElementById("stage").getBoundingClientRect();
+  return {
+    shown: !document.getElementById("net-tip").hidden,
+    stageLeft: s.left, stageTop: s.top,
+  };
+})()"#;
+
+/// Each page places the tooltip on a real pointer move through the shared
+/// rule (#123): a page keeping its own inline placement fails here, which
+/// calling `placeTip` directly cannot catch. The pointer is swept from the
+/// stage's far corner back until a net shows its tooltip; the tooltip is
+/// then made wide and tall enough to cross the right and bottom edges, so
+/// it must lie left of and above the pointer.
+#[test_case(Viewed::Board; "the board page")]
+#[test_case(Viewed::Schematic; "the schematic page")]
+#[tokio::test]
+async fn a_real_hover_near_the_far_edges_places_the_net_tooltip_by_the_shared_rule(viewed: Viewed) {
+    let Some(executable) = executable() else {
+        return;
+    };
+    let session = Session::with_net_recorder(executable).await;
+    session.viewport(1000, 700, 1).await;
+    session.goto(viewed).await;
+    assert!(
+        session
+            .held_within_deadline(r#"!document.getElementById("net").hidden"#)
+            .await,
+        "the page did not load within {DEADLINE:?}"
+    );
+    let stage: HoverState = session.read(HOVER_STATE).await;
+    let size: TipAt = session.read(&place_tip(0.0, 0.0, TIP_TEXT)).await;
+    let (w, h) = (size.stage_width, size.stage_height);
+    let mut hit = None;
+    'sweep: for row in (1..=20).rev() {
+        for col in (1..=20).rev() {
+            let (x, y) = (
+                w * f64::from(col) / 20.0 - 1.0,
+                h * f64::from(row) / 20.0 - 1.0,
+            );
+            session
+                .page
+                .move_mouse(Point::new(stage.stage_left + x, stage.stage_top + y))
+                .await
+                .expect("the pointer moves");
+            let now: HoverState = session.read(HOVER_STATE).await;
+            if now.shown && x >= w / 2.0 + TIP_GAP && y >= h / 2.0 + TIP_GAP {
+                hit = Some((x, y));
+                break 'sweep;
+            }
+        }
+    }
+    let (x, y) = hit.expect("a net under the pointer in the stage's far half shows its tooltip");
+    // Just wider and taller than the room right of and below the pointer,
+    // yet within the room left of and above it.
+    session
+        .read::<bool>(&format!(
+            r#"(() => {{
+  const tip = document.getElementById("net-tip");
+  tip.style.minWidth = "{}px";
+  tip.style.minHeight = "{}px";
+  return true;
+}})()"#,
+            w - x,
+            h - y
+        ))
+        .await;
+    session
+        .page
+        .move_mouse(Point::new(stage.stage_left, stage.stage_top))
+        .await
+        .expect("the pointer moves away");
+    session
+        .page
+        .move_mouse(Point::new(stage.stage_left + x, stage.stage_top + y))
+        .await
+        .expect("the pointer moves back");
+    let at: TipAt = session
+        .read(
+            r#"(() => {
+  const s = document.getElementById("stage").getBoundingClientRect();
+  const t = document.getElementById("net-tip").getBoundingClientRect();
+  return {
+    left: t.left - s.left, top: t.top - s.top, right: s.right - t.right,
+    bottom: s.bottom - t.bottom, width: t.width, height: t.height,
+    stageWidth: s.width, stageHeight: s.height, scrollX: false, scrollY: false,
+  };
+})()"#,
+        )
+        .await;
+    assert!(
+        at.left >= 0.0 && at.top >= 0.0 && at.right >= 0.0 && at.bottom >= 0.0,
+        "the tooltip is inside the stage: {at:?} for a pointer at ({x}, {y})"
+    );
+    assert!(
+        at.left + at.width <= x && at.top + at.height <= y,
+        "left of and above the pointer at ({x}, {y}): {at:?}"
     );
     session.close().await;
 }

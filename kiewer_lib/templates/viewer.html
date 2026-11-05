@@ -686,12 +686,6 @@ function netPoint(e) { return devicePoint(netCanvas, e); }
 const netMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 function followMotion() { if (netViewer) netViewer.set_reduced_motion(netMotion.matches); }
 netMotion.addEventListener("change", followMotion);
-function hideTip() { netTip.hidden = true; }
-function showTip(e, text) {
-  if (!text) { hideTip(); return; }
-  netTip.textContent = text;
-  placeTip(netTip, netStage, e);
-}
 // The net block: one row per pinned net, a swatch and the name. A click
 // on a name folds that net's pads open, each a button that pans to the
 // pad. Rows are rebuilt only when what they show changed.
@@ -754,13 +748,13 @@ function refreshPinned() {
 }
 netCanvas.addEventListener("pointermove", function (e) {
   if (!netViewer) return;
-  if (e.pointerType !== "mouse" || e.buttons) { hideTip(); return; }
+  if (e.pointerType !== "mouse" || e.buttons) { netTip.hidden = true; return; }
   const [x, y] = netPoint(e);
   if (netViewer.hover(x, y)) netSchedule();
-  showTip(e, netViewer.hover_text());
+  placeTip(netTip, netStage, e, netViewer.hover_text());
 });
 netCanvas.addEventListener("pointerleave", function () {
-  hideTip();
+  netTip.hidden = true;
   if (netViewer && netViewer.hover_leave()) netSchedule();
 });
 netCanvas.addEventListener("pointerdown", function (e) {
@@ -784,7 +778,7 @@ function netPress(e, x, y) {
 }
 function clearNet() {
   if (!netViewer) return;
-  hideTip();
+  netTip.hidden = true;
   if (netViewer.clear_net()) netSchedule();
   refreshPinned();
 }
