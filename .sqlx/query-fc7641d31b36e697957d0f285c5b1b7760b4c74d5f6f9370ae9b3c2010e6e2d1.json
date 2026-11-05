@@ -6,12 +6,24 @@
       {
         "ordinal": 0,
         "name": "large_hash",
-        "type_info": "Bytea"
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "thumbnail",
+            "name": "large_hash"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "small_hash",
-        "type_info": "Bytea"
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "thumbnail",
+            "name": "small_hash"
+          }
+        }
       }
     ],
     "parameters": {

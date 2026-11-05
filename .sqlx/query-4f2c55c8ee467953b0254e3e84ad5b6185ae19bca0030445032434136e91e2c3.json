@@ -6,82 +6,163 @@
       {
         "ordinal": 0,
         "name": "behind!",
-        "type_info": "Int8"
+        "type_info": "Int8",
+        "origin": "Expression"
       },
       {
         "ordinal": 1,
         "name": "length!",
-        "type_info": "Int8"
+        "type_info": "Int8",
+        "origin": "Expression"
       },
       {
         "ordinal": 2,
         "name": "hash",
-        "type_info": "Bytea"
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "hash"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "tree_hash",
-        "type_info": "Bytea"
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "tree_hash"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "parent_hash",
-        "type_info": "Bytea"
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "parent_hash"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "author_handle",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "author_handle"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "created_at!",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": "Expression"
       },
       {
         "ordinal": 7,
         "name": "message",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "message"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "format_version",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "format_version"
+          }
+        }
       },
       {
         "ordinal": 9,
         "name": "layer_count",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "layer_count"
+          }
+        }
       },
       {
         "ordinal": 10,
         "name": "copper_layer_count",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "copper_layer_count"
+          }
+        }
       },
       {
         "ordinal": 11,
         "name": "board_width_mm",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "board_width_mm"
+          }
+        }
       },
       {
         "ordinal": 12,
         "name": "board_height_mm",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "board_height_mm"
+          }
+        }
       },
       {
         "ordinal": 13,
         "name": "fonts",
-        "type_info": "TextArray"
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "fonts"
+          }
+        }
       },
       {
         "ordinal": 14,
         "name": "net_count",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "net_count"
+          }
+        }
       },
       {
         "ordinal": 15,
         "name": "footprint_count",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "footprint_count"
+          }
+        }
       }
     ],
     "parameters": {

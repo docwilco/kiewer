@@ -6,72 +6,151 @@
       {
         "ordinal": 0,
         "name": "hash",
-        "type_info": "Bytea"
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "hash"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "tree_hash",
-        "type_info": "Bytea"
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "tree_hash"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "parent_hash",
-        "type_info": "Bytea"
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "parent_hash"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "author_handle",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "author_handle"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "created_at!",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": "Expression"
       },
       {
         "ordinal": 5,
         "name": "message",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "message"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "format_version",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "format_version"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "layer_count",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "layer_count"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "copper_layer_count",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "copper_layer_count"
+          }
+        }
       },
       {
         "ordinal": 9,
         "name": "board_width_mm",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "board_width_mm"
+          }
+        }
       },
       {
         "ordinal": 10,
         "name": "board_height_mm",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "board_height_mm"
+          }
+        }
       },
       {
         "ordinal": 11,
         "name": "fonts",
-        "type_info": "TextArray"
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "fonts"
+          }
+        }
       },
       {
         "ordinal": 12,
         "name": "net_count",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "net_count"
+          }
+        }
       },
       {
         "ordinal": 13,
         "name": "footprint_count",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "revision",
+            "name": "footprint_count"
+          }
+        }
       }
     ],
     "parameters": {

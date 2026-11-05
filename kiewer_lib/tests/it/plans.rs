@@ -144,17 +144,23 @@ fn parenthesised(items: &[impl AsRef<str>]) -> String {
 /// fold `id = NULL` to false and plan no scan at all.
 async fn plan(db: &mut PgConnection, query: &str, types: &[String]) -> Value {
     let declared = parenthesised(types);
-    sqlx::raw_sql(&format!("PREPARE planned{declared} AS {query}"))
-        .execute(&mut *db)
-        .await
-        .unwrap_or_else(|error| panic!("preparing {query}: {error}"));
+    // AssertSqlSafe below: `query` is a statement from .sqlx/ and the rest
+    // is parameter type names and NULLs the test builds.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "PREPARE planned{declared} AS {query}"
+    )))
+    .execute(&mut *db)
+    .await
+    .unwrap_or_else(|error| panic!("preparing {query}: {error}"));
     let nulls = parenthesised(&vec!["NULL"; types.len()]);
     // Not kept prepared: the statement it executes is a new one each time.
-    let row = sqlx::query(&format!("EXPLAIN (FORMAT JSON) EXECUTE planned{nulls}"))
-        .persistent(false)
-        .fetch_one(&mut *db)
-        .await
-        .unwrap_or_else(|error| panic!("planning {query}: {error}"));
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN (FORMAT JSON) EXECUTE planned{nulls}"
+    )))
+    .persistent(false)
+    .fetch_one(&mut *db)
+    .await
+    .unwrap_or_else(|error| panic!("planning {query}: {error}"));
     // The column is json, which this crate's sqlx has no type for; json's
     // wire form, binary or text, is its text.
     let text: String = row.try_get_unchecked(0).expect("the plan's text");

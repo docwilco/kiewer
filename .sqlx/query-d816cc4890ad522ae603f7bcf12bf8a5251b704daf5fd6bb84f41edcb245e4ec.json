@@ -6,7 +6,13 @@
       {
         "ordinal": 0,
         "name": "id: PendingId",
-        "type_info": "Int8"
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pending_revision",
+            "name": "id"
+          }
+        }
       }
     ],
     "parameters": {

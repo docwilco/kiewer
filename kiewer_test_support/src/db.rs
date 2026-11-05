@@ -53,8 +53,13 @@ pub async fn pool_of_its_own(suffix: &str) -> Option<PgPool> {
     // first. A concurrent creator surfaces as duplicate_database (42P04)
     // or, when both pass the name check, as the unique violation (23505)
     // on pg_database's name index.
+    // AssertSqlSafe: the name is a quoted identifier with its quotes doubled,
+    // and CREATE DATABASE takes no bind parameter.
     let create = format!("CREATE DATABASE \"{}\"", own.replace('"', "\"\""));
-    match sqlx::raw_sql(&create).execute(&mut on_shared).await {
+    match sqlx::raw_sql(sqlx::AssertSqlSafe(create))
+        .execute(&mut on_shared)
+        .await
+    {
         Ok(_) => {}
         Err(sqlx::Error::Database(error))
             if matches!(error.code().as_deref(), Some("42P04" | "23505")) => {}

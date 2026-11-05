@@ -5,8 +5,8 @@ members = ["kicad_core", "kiewer_viewer", "kiewer_lib", "kiewer", "kiewer_render
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# google-cloud-auth 1.18 (kiewer_lib, the GCS store) needs 1.91; wgpu 30 needs 1.87
-rust-version = "1.91.0"
+# sqlx 0.9 (kiewer_lib) needs 1.94; google-cloud-auth 1.18 needs 1.91; wgpu 30 needs 1.87
+rust-version = "1.94.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/docwilco/kiewer"
 

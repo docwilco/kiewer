@@ -467,8 +467,9 @@ async fn a_sweep_reads_its_index(statement: &str, grace: Option<i32>, index: &st
         .execute(&mut *tx)
         .await
         .expect("set");
+    // AssertSqlSafe: `statement` is one of the crate's own constants.
     let explain = format!("EXPLAIN {statement}");
-    let mut query = sqlx::query_scalar(&explain);
+    let mut query = sqlx::query_scalar(sqlx::AssertSqlSafe(explain));
     if let Some(grace) = grace {
         query = query.bind(grace);
     }

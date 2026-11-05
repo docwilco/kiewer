@@ -60,7 +60,7 @@ oauth2 = { version = "5", default-features = false, features = ["reqwest", "rust
 # of its Content-Disposition (web/files.rs). In the tree already through
 # url and askama.
 percent-encoding = { version = "2", default-features = false }
-# 0.8, the major sqlx and oauth2 already bring: OsRng for session ids.
+# 0.8, the major oauth2 already brings (sqlx 0.9 no longer does): OsRng for session ids.
 rand = { version = "0.8", default-features = false, features = ["getrandom"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # The process's crypto provider for the Google clients (src/tls.rs): ring,
@@ -74,7 +74,7 @@ sha2 = "0.11"
 # system's temporary directory, removed with it, named so two uploads
 # never collide. In the tree already through kiewer_test_support.
 tempfile = "3"
-sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "tls-rustls"] }
+sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "tls-rustls"] }
 # The Duration type a cookie's Max-Age takes (the cookie crate's, which
 # axum-extra does not re-export). Nothing else: the clock is Postgres's.
 time = { version = "0.3", default-features = false }
