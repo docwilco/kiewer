@@ -250,18 +250,35 @@ async fn the_board_page_draws_on_webgl2_and_its_ok_beacon_arrives() {
 /// once: each draws on SwiftShader, on the CPU, and the capped ones draw
 /// a canvas thousands of pixels wide with 4x MSAA.
 ///
-/// The stage's wall time is the cap's to set: the sessions hold a permit
-/// for about 60 s in all, nearly half of it in [`SETTLE`]'s sleeps, and
-/// their browsers start in hundredths of a second, so the tests take that
-/// sum over the cap. Measured on 8 cores under a load average of 7 to 18,
-/// a cap of 2 ran the tests in 30 to 39 s, 4 in 16 to 25 s with each
-/// session held an eighth longer, and 6 or 8 bought about 3 s more with
-/// the browsers' summed resident memory peaking at up to 7.6 GB, against
-/// 5.1 at 4.
+/// Where libtest runs more test threads than the cap, the cap sets the
+/// stage's wall time: the sessions hold a permit for about a minute in
+/// all, nearly half of it in [`SETTLE`]'s sleeps, and their browsers start
+/// in hundredths of a second, so the tests take that sum over the cap. On
+/// CI's 4 vCPUs libtest runs 4 threads, the cap never binds, and the
+/// thread count sets it. Measured 2026-11-05 on 8 cores, 33 sessions,
+/// chrome-headless-shell 156.0.8078.80, three interleaved runs of each
+/// under a load average of 3.5 to 7.4: at a cap of 2 the sessions held a
+/// permit 58 to 60 s in all and the tests ran 29 to 30 s; at 4, 61 to
+/// 63 s and 16 to 17 s. The summed resident memory of every
+/// chrome-headless-shell process, the one
+/// `the_board_page_draws_on_webgl2_and_its_ok_beacon_arrives` launches
+/// outside the cap included, peaked at 3.5 to 4.3 GB at either cap.
 static BROWSERS: Semaphore = Semaphore::const_new(4);
 
+/// At most this many of the cases that draw past the adapter's limit, the
+/// heaviest on SwiftShader (a canvas near the limit with 4x MSAA), hold a
+/// browser at once, each also holding one of [`BROWSERS`]: as many as the
+/// cap of 2 allowed when [`SETTLE`] was chosen, since a capped beacon that
+/// comes past it goes uncounted and lets these cases pass where they
+/// should fail. libtest's order kept them to 2 at once in every measured
+/// run, even with no cap at all, so this never waited there; it holds
+/// where the order or the thread count differs.
+static PAST_THE_LIMIT: Semaphore = Semaphore::const_new(2);
+
 /// How long a page gets to settle after its last beacon or resize before
-/// the beacons are counted, so one sent late is counted too.
+/// the beacons are counted, so one sent late is counted too. It is fixed
+/// and does not stretch when the CPU is shared: [`PAST_THE_LIMIT`] keeps
+/// the heaviest drawing as shared as it was when this was chosen.
 const SETTLE: Duration = Duration::from_millis(1500);
 
 /// The canvas's displayed width in the capped cases, in CSS pixels.
@@ -328,6 +345,8 @@ struct Session {
     _blobs: TempDir,
     _profile: TempDir,
     _permit: SemaphorePermit<'static>,
+    /// One of [`PAST_THE_LIMIT`], for a case that draws past the limit.
+    _past_the_limit: Option<SemaphorePermit<'static>>,
 }
 
 /// The canvas as the page holds it: its backing size and its displayed
@@ -372,6 +391,20 @@ impl Session {
             _blobs: blobs,
             _profile: profile,
             _permit: permit,
+            _past_the_limit: None,
+        }
+    }
+
+    /// As [`Session::new`], for a case that draws past the adapter's
+    /// limit: one of [`PAST_THE_LIMIT`] first, then one of [`BROWSERS`].
+    async fn past_the_limit(executable: PathBuf) -> Session {
+        let permit = PAST_THE_LIMIT
+            .acquire()
+            .await
+            .expect("the semaphore stays open");
+        Session {
+            _past_the_limit: Some(permit),
+            ..Session::new(executable).await
         }
     }
 
@@ -616,7 +649,7 @@ async fn a_canvas_past_the_adapters_limit_is_capped_with_its_aspect_kept(viewed:
     let Some(executable) = executable() else {
         return;
     };
-    let session = Session::new(executable).await;
+    let session = Session::past_the_limit(executable).await;
     let limit = session.texture_limit().await;
     let dpr = dpr_past(limit);
     session
@@ -672,7 +705,7 @@ async fn a_window_that_grows_past_the_limit_after_startup_is_capped_once(viewed:
     let Some(executable) = executable() else {
         return;
     };
-    let session = Session::new(executable).await;
+    let session = Session::past_the_limit(executable).await;
     let limit = session.texture_limit().await;
     let dpr = dpr_past(limit);
     let start_width = limit / dpr - 200;
