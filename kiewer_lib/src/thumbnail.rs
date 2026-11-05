@@ -50,6 +50,7 @@ use crate::blob::{BlobHash, BlobStore, blocking};
 use crate::error::{Error, Result};
 use crate::revision::{RevisionHash, TreeEntry};
 use crate::sql::statement;
+use crate::tls::install_crypto_provider;
 use crate::{collector, design};
 
 /// The render budget: how long the upload request waits for the
@@ -268,6 +269,7 @@ impl CloudTasks {
     /// API with, so a server without any fails at start, not at the
     /// first retry.
     pub fn new(queue: &str, public_url: &str, account: &str) -> Result<Self> {
+        install_crypto_provider();
         let credentials = google_cloud_auth::credentials::Builder::default()
             .build()
             .map_err(|source| Error::Failed {

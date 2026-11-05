@@ -27,6 +27,7 @@ pub mod slug;
 mod sql;
 pub mod takedown;
 pub mod thumbnail;
+mod tls;
 pub mod upload;
 pub mod web;
 

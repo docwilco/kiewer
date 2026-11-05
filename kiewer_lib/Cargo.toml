@@ -38,8 +38,8 @@ flate2 = "1"
 # Without its default feature, which brings aws-lc-rs as the rustls
 # provider: aws-lc-sys is a cmake build of C, about 100 s in every cold
 # target directory, beside the ring that reqwest, oauth2 and sqlx bring
-# already. The store installs ring as the process's provider instead
-# (blob/gcs.rs), which google-cloud-auth then reads. google-cloud-auth is
+# already. Every Google client installs ring as the process's provider
+# first (src/tls.rs), which the Google crates then read. google-cloud-auth is
 # for the anonymous credentials an emulator takes, google-cloud-gax names
 # the client builder's error type.
 google-cloud-auth = { version = "1.18", default-features = false }
@@ -63,7 +63,7 @@ percent-encoding = { version = "2", default-features = false }
 # 0.8, the major sqlx and oauth2 already bring: OsRng for session ids.
 rand = { version = "0.8", default-features = false, features = ["getrandom"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-# The process's crypto provider for the GCS store's TLS and signing: ring,
+# The process's crypto provider for the Google clients (src/tls.rs): ring,
 # the one reqwest, oauth2 and sqlx already build (google-cloud-storage
 # above). In the tree already through all of them.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

@@ -24,6 +24,7 @@ use google_cloud_storage::model_ext::ReadRange;
 
 use super::{BlobHash, BlobStore, Put, PutReceipt, blocking, gunzip, gzip, object_name, verified};
 use crate::error::{Error, Result};
+use crate::tls::install_crypto_provider;
 
 /// What the store was doing when GCS failed it; the `op` of
 /// [`Error::Gcs`].
@@ -51,18 +52,6 @@ const PRECONDITION_FAILED: u16 = 412;
 const NOT_FOUND: u16 = 404;
 /// Where the JSON API is, unless an emulator stands in for it.
 const JSON_API: &str = "https://storage.googleapis.com";
-
-/// Make ring the process's rustls provider, unless one is installed
-/// already. google-cloud-storage is built without its default feature,
-/// which would bring aws-lc-rs (Cargo.toml says why), and so reads the
-/// provider from the process: its client's TLS, and google-cloud-auth's
-/// signing with a service account key, which panics without one. Before
-/// either builder runs, so both find it; a second store, or a provider
-/// installed elsewhere first, leaves it as it is.
-fn install_crypto_provider() {
-    // Err only means a provider is installed already, which is the aim.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-}
 
 /// Blobs in one bucket. Cheap to clone: the client is shared.
 #[derive(Debug, Clone)]

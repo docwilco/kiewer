@@ -1,7 +1,8 @@
 //! `.githooks/pre-commit`: which commits it checks. A commit of prose
 //! alone skips the checks; every other commit runs them, an amend with
 //! nothing staged included, which lists no staged path and still commits
-//! the amended commit's whole tree (#79).
+//! the amended commit's whole tree (#79). A snapshot whose target cargo
+//! puts anywhere but the snapshot's own is refused before any check.
 //!
 //! Git is real, in a scratch repository whose `core.hooksPath` is the
 //! workspace's own `.githooks`. Its `scripts/checks.sh` is a stand-in that
@@ -9,7 +10,8 @@
 //! nothing. Cargo, which the hook's sweeps call, is a stand-in too: a bash
 //! function exported into git's environment, whose `cargo metadata` fails,
 //! so the hook finds no target directory to sweep and leaves the
-//! workspace's alone.
+//! workspace's alone. So is sccache, which fails to start, so a test
+//! starts no server.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,16 +30,31 @@ echo "==> fmt"
 echo "$1" >> "$KIEWER_TEST_CHECKS_RAN"
 "#;
 
+/// The stand-in cargo: `cargo metadata` fails, everything else succeeds.
+const CARGO: &str = "() { [ \"$1\" != metadata ]; }";
+
+/// A stand-in cargo whose `cargo metadata` names a target directory
+/// elsewhere, as a config file's `build.target-dir` would.
+const CARGO_TARGET_ELSEWHERE: &str =
+    r#"() { [ "$1" != metadata ] || echo '{"target_directory":"/elsewhere"}'; }"#;
+
 struct Fixture {
     dir: TempDir,
+    cargo: &'static str,
 }
 
 impl Fixture {
     /// A repository with a stand-in checks script and one code file,
     /// committed without the hook.
     fn new() -> Self {
+        Self::with_cargo(CARGO)
+    }
+
+    /// The same, with `cargo` as the stand-in cargo.
+    fn with_cargo(cargo: &'static str) -> Self {
         let fixture = Self {
             dir: scratch_dir!(),
+            cargo,
         };
         let repo = fixture.repo();
         fs::create_dir_all(repo.join("scripts")).expect("the scripts directory");
@@ -66,7 +83,18 @@ impl Fixture {
     /// `GIT_INDEX_FILE` for the commit being checked must reach neither
     /// this git nor the hook it runs. Asserts that git succeeded.
     fn git(&self, args: &[&str]) -> Output {
-        let output = Command::new("git")
+        let output = self.git_unchecked(args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    /// The same, whatever git's status.
+    fn git_unchecked(&self, args: &[&str]) -> Output {
+        Command::new("git")
             .args(args)
             .current_dir(self.repo())
             .env_clear()
@@ -74,15 +102,10 @@ impl Fixture {
             .env("HOME", self.dir.path())
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("KIEWER_TEST_CHECKS_RAN", self.checks_ran())
-            .env("BASH_FUNC_cargo%%", "() { [ \"$1\" != metadata ]; }")
+            .env("BASH_FUNC_cargo%%", self.cargo)
+            .env("BASH_FUNC_sccache%%", "() { return 1; }")
             .output()
-            .expect("git runs");
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        output
+            .expect("git runs")
     }
 
     /// What the stand-in checks script was asked to run, one line a run.
@@ -138,4 +161,19 @@ fn a_commit_runs_every_check_unless_it_is_prose_alone(paths: &[&str], checked: b
             hook_output(&output)
         );
     }
+}
+
+#[test]
+fn a_target_directory_elsewhere_is_refused() {
+    let fixture = Fixture::with_cargo(CARGO_TARGET_ELSEWHERE);
+    fixture.write("main.rs");
+    fixture.git(&["add", "--all"]);
+    let output = fixture.git_unchecked(&["commit", "--message", "change"]);
+    assert!(!output.status.success(), "{}", hook_output(&output));
+    assert!(
+        hook_output(&output).contains("a config file sets build.target-dir"),
+        "{}",
+        hook_output(&output)
+    );
+    assert_eq!(fixture.runs(), "");
 }

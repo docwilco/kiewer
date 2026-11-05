@@ -82,7 +82,21 @@ sweep_checkout pre-commit "$root"
 # temporary index for partial commits, and checkout-index honours it, so the
 # snapshot tracks the real commit content in every commit mode.
 export_dir="$(mktemp -d "$git_dir/pre-commit-export.XXXXXX")"
-trap 'rm -rf "$export_dir"' EXIT
+# One exit trap for both: the export goes, and the sccache server the checks
+# get (below) stops, however the hook ends.
+server=0
+stop_server() {
+  [ "$server" = 1 ] || return 0
+  server=0
+  # 9>&-: a command that finds the server gone starts another, which would
+  # hold the lock for its idle lifetime.
+  sccache --show-stats 9>&- | awk '
+    /^Cache hits  /{h=$3} /^Cache misses  /{m=$3} /^Non-cacheable calls/{n=$3}
+    END{printf "pre-commit: sccache %d hits, %d misses, %d not cacheable\n", h, m, n}' || true
+  sccache --stop-server >/dev/null 2>&1 9>&- || true
+  rm -f "$SCCACHE_SERVER_UDS"
+}
+trap 'rm -rf "$export_dir"; stop_server' EXIT
 git checkout-index --all --force --prefix="$export_dir/"
 
 # Sync the export onto the persistent snapshot. The export stamps every file
@@ -98,10 +112,11 @@ rsync -rp --checksum --delete --exclude='/target' "$export_dir/" "$snapshot/"
 # variable in its cache key, and one naming this worktree's snapshot gave
 # every worktree a compile cache of its own, cold on its first commit. A
 # config file can still move it, which the check below refuses; where cargo
-# cannot say (no metadata), the checks' own cargo fails first. The exclude
+# or jq cannot say, the checks fail first, needing both. Cargo names the
+# path with symlinks resolved, so the comparison does too. The exclude
 # above keeps --delete off this path.
 unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR
-target_dir="$snapshot/target"
+target_dir="$(cd "$snapshot" && pwd -P)/target"
 if actual_target="$(cd "$snapshot" &&
   cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r .target_directory)" &&
   [ "$actual_target" != "$target_dir" ]; then
@@ -139,26 +154,20 @@ fi
 # the same environment. Stripping the env!("OUT_DIR") value that
 # serde_core, thiserror and serde_json read, a miss every crate above them
 # inherits, takes an sccache after 0.19.0 (mozilla/sccache#2918). Where the
-# server cannot start (no sccache, a socket path past the limit), the
-# checks use whatever compiler wrapper cargo is set up with.
-server=0
+# server cannot start (a socket path past the 108-byte limit, among
+# others), a line says so and the checks use the shared server, sharing
+# less. stop_server is above, with the exit trap.
 if command -v sccache >/dev/null; then
   export SCCACHE_SERVER_UDS="$snapshot/.sccache.sock" SCCACHE_BASEDIRS="$snapshot"
   rm -f "$SCCACHE_SERVER_UDS"
   if sccache --start-server >/dev/null 2>&1 9>&-; then
     server=1
   else
+    echo "pre-commit: no sccache server of its own at $SCCACHE_SERVER_UDS;" \
+      "the checks use the shared one."
     unset SCCACHE_SERVER_UDS SCCACHE_BASEDIRS
   fi
 fi
-stop_server() {
-  [ "$server" = 1 ] || return 0
-  sccache --show-stats | awk '
-    /^Cache hits  /{h=$3} /^Cache misses  /{m=$3} /^Non-cacheable calls/{n=$3}
-    END{printf "pre-commit: sccache %d hits, %d misses, %d not cacheable\n", h, m, n}'
-  sccache --stop-server >/dev/null 2>&1 || true
-  rm -f "$SCCACHE_SERVER_UDS"
-}
 
 # 9>&- keeps the lock fd out of the checks and everything they spawn, the
 # sccache server above included. Without it a test daemon that outlives its
