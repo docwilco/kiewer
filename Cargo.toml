@@ -26,9 +26,11 @@ opt-level = 1
 opt-level = 3
 # Dependencies keep their line tables (file and line in a backtrace) and
 # drop the rest of their debug info, which the linker copied into every
-# binary: on 2026-11-05 the it test binary went from 732 MB to 403 MB and
-# the server from 515 MB to 256 MB, in every target directory. A rebuild
-# after a one-line change took the same 6 s either way.
+# binary: on 2026-11-05 kiewer_lib's integration test binary (tests/it)
+# went from 732 MB to 403 MB and the server from 515 MB to 256 MB, in every
+# target directory. A rebuild after a one-line change took the same 6 s
+# either way. The price was one cold rebuild of the dependencies per
+# target directory.
 debug = "line-tables-only"
 
 [workspace.lints.rust]
