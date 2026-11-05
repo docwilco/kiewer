@@ -246,10 +246,19 @@ async fn the_board_page_draws_on_webgl2_and_its_ok_beacon_arrives() {
 // real panic inside Viewer.create shows and sends. The viewer is the
 // stage's debug build with panic-probe on (scripts/checks.sh browser).
 
-/// At most this many of the canvas cases hold a browser at once: each
-/// draws on SwiftShader, on the CPU, and the capped ones draw a canvas
-/// thousands of pixels wide with 4x MSAA.
-static BROWSERS: Semaphore = Semaphore::const_new(2);
+/// At most this many of the cases on a [`Session`] hold a browser at
+/// once: each draws on SwiftShader, on the CPU, and the capped ones draw
+/// a canvas thousands of pixels wide with 4x MSAA.
+///
+/// The stage's wall time is the cap's to set: the sessions hold a permit
+/// for about 60 s in all, nearly half of it in [`SETTLE`]'s sleeps, and
+/// their browsers start in hundredths of a second, so the tests take that
+/// sum over the cap. Measured on 8 cores under a load average of 7 to 18,
+/// a cap of 2 ran the tests in 30 to 39 s, 4 in 16 to 25 s with each
+/// session held an eighth longer, and 6 or 8 bought about 3 s more with
+/// the browsers' summed resident memory peaking at up to 7.6 GB, against
+/// 5.1 at 4.
+static BROWSERS: Semaphore = Semaphore::const_new(4);
 
 /// How long a page gets to settle after its last beacon or resize before
 /// the beacons are counted, so one sent late is counted too.
