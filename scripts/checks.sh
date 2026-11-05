@@ -46,14 +46,43 @@ stage_clippy() { cargo clippy --workspace --all-targets -- -D warnings; }
 # feature set, another hash and a second compile under `cargo test`.
 stage_test()   { cargo build --workspace --all-targets && cargo test --workspace; }
 stage_docs()   { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps; }
+
+# Set to 1 by prebuild_viewer: every stage of this run embeds the viewer
+# (KIEWER_VIEWER_DIST, exported), and the wasm and browser stages have
+# nothing of their own to build.
+viewer_prebuilt=0
+# The viewer all of `all`'s stages embed, built once before the first of
+# them, whatever the hook skips: kiewer_lib's build script reads
+# KIEWER_VIEWER_DIST, so the stages that compile kiewer_lib (sqlx's
+# prepare, clippy, test, docs, the wasm clippy, browser) must all see the
+# same one, or each change of the variable recompiles kiewer_lib and what
+# links it. It is the probe viewer (scripts/build-viewer.sh probe), the
+# one the browser stage tests; the wasm stage lints and builds the same
+# output. A KIEWER_VIEWER_DIST already in the environment names a viewer
+# that is already built, and is used as it stands: the seam
+# kiewer_lib/tests/it/checks.rs uses, whose stand-in cargo builds nothing.
+prebuild_viewer() {
+  if [ -z "${KIEWER_VIEWER_DIST:-}" ]; then
+    local target_dir
+    target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+    echo "==> viewer (probe, for every stage)"
+    scripts/build-viewer.sh probe "$target_dir/viewer-probe"
+    export KIEWER_VIEWER_DIST="$target_dir/viewer-probe"
+  fi
+  viewer_prebuilt=1
+}
 # The viewer for the browser: the wasm32 build of kiewer_viewer (and so
 # of kicad_core) through scripts/build-viewer.sh, which also runs
 # wasm-bindgen over it, so the pinned tool is proved to read what the
-# crate wrote. The debug profile, into the target directory: the release
-# output under kiewer_viewer/dist is what the server embeds, and a check
-# never overwrites it. The target and the tool come from rustup and cargo
-# install (README, Development; the CI workflow's wasm job); the script
-# names what is missing.
+# crate wrote. Run on its own, the debug profile into the target
+# directory: the release output under kiewer_viewer/dist is what the
+# server embeds, and a check never overwrites it. Under `all` there is
+# nothing to build here: prebuild_viewer made the probe viewer (the debug
+# profile with panic-probe) before the first stage, which is the build
+# this stage would have made, so kiewer_viewer compiles for wasm32 once
+# per run. The target and the tool come from rustup and cargo install
+# (README, Development; the CI workflow's wasm job); the script names
+# what is missing.
 #
 # Clippy after the build, so a missing target or tool is still named by
 # scripts/build-viewer.sh: code behind cfg(target_arch = "wasm32") is
@@ -67,7 +96,9 @@ stage_docs()   { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps; }
 stage_wasm() {
   local target_dir
   target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
-  scripts/build-viewer.sh debug "$target_dir/viewer-check"
+  if [ "$viewer_prebuilt" != 1 ]; then
+    scripts/build-viewer.sh debug "$target_dir/viewer-check"
+  fi
   cargo clippy -p kiewer_viewer --lib --target wasm32-unknown-unknown -- -D warnings
   cargo clippy -p kiewer_viewer --lib --target wasm32-unknown-unknown --features panic-probe -- -D warnings
 }
@@ -77,15 +108,25 @@ stage_wasm() {
 # scripts/browser.sh pins, drawing WebGL2 on SwiftShader, against a
 # server built with the viewer in it. The viewer is the debug build with
 # panic-probe on (scripts/build-viewer.sh probe), so a test can make a
-# real panic inside Viewer.create: beside the wasm stage's build in the
-# target directory, which costs one more compile of kiewer_viewer alone.
-# It is named to kiewer_lib/build.rs by KIEWER_VIEWER_DIST: the snapshot
-# and CI have no kiewer_viewer/dist, and a check never writes there.
+# real panic inside Viewer.create, in viewer-probe under the target
+# directory; it is named to kiewer_lib/build.rs by KIEWER_VIEWER_DIST: the
+# snapshot and CI have no kiewer_viewer/dist, and a check never writes
+# there.
 #
-# The variable changes kiewer_lib's build script output, so kiewer_lib
-# and what links it compile once here and once more in the next test
-# stage, in the same target directory: a compile each way, where a
-# directory of its own would hold a second copy of every dependency.
+# The variable changes kiewer_lib's build script output, so the stages
+# that compile kiewer_lib must agree on it, or kiewer_lib and what links
+# it compile once with the viewer and once more without, in the same
+# target directory, on every commit. Under `all`, prebuild_viewer builds
+# the probe viewer once and exports the variable for every stage, so the
+# build script sees one input in every stage and every commit and reruns
+# only when the viewer's files change (scripts/build-viewer.sh leaves the
+# files of an unchanged viewer alone, mtime included); this stage then
+# builds nothing. Run on its own, as CI's job does after the test job's
+# stage, it builds the probe viewer itself and sets the variable for its
+# one cargo test: a compile of kiewer_lib with the viewer embedded, in
+# the test stage's target directory, where a directory of its own would
+# hold a second copy of every dependency. CI's test stage stays without
+# the viewer on purpose, so the viewer routes' 503 stays covered there.
 # No workspace build first, unlike the test stage: the test spawns no
 # binary of the workspace, and a build would relink every binary with
 # the variable set, for nothing.
@@ -104,10 +145,14 @@ stage_browser() {
     echo "browser: skipped, no chrome-headless-shell at $browser (scripts/browser.sh install; README, Development)"
     return 0
   fi
-  target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
-  scripts/build-viewer.sh probe "$target_dir/viewer-probe"
-  KIEWER_VIEWER_DIST="$target_dir/viewer-probe" KIEWER_BROWSER="$browser" \
-    cargo test --workspace --test it browser::
+  if [ "$viewer_prebuilt" = 1 ]; then
+    KIEWER_BROWSER="$browser" cargo test --workspace --test it browser::
+  else
+    target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+    scripts/build-viewer.sh probe "$target_dir/viewer-probe"
+    KIEWER_VIEWER_DIST="$target_dir/viewer-probe" KIEWER_BROWSER="$browser" \
+      cargo test --workspace --test it browser::
+  fi
 }
 
 # The test stage's gates (#68). The tests on Postgres and on the GCS
@@ -184,6 +229,6 @@ case "${1:-all}" in
   test) gates; run test; report_skipped ;;
   sqlx) gate DATABASE_URL KIEWER_SKIP_DB_TESTS Postgres db_tests || exit 1; run sqlx; report_skipped ;;
   fmt|clippy|docs|wasm|browser) run "$1" ;;
-  all) gates; for stage in fmt sqlx clippy test docs wasm browser; do run_unless_skipped "$stage"; done; report_skipped ;;
+  all) gates; prebuild_viewer; for stage in fmt sqlx clippy test docs wasm browser; do run_unless_skipped "$stage"; done; report_skipped ;;
   *) echo "usage: $0 [fmt|sqlx|clippy|test|docs|wasm|browser|all]" >&2; exit 2 ;;
 esac

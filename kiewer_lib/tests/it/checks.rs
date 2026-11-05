@@ -8,6 +8,8 @@
 //! the script's environment, which shadows the cargo on PATH. A function
 //! and not a file on PATH, so no test writes an executable and then runs
 //! it while another test thread's fork may hold it open (ETXTBSY, #108).
+//! Each line it prints ends with the `KIEWER_VIEWER_DIST` the call saw, in
+//! `[viewer=...]`, so a test can say which stages embed the viewer.
 
 use std::process::{Command, Output};
 
@@ -24,6 +26,7 @@ const GATE_VARS: &[&str] = &[
     "KIEWER_SKIP_GCS_TESTS",
     "CI",
     "CHECKS_SKIP",
+    "KIEWER_VIEWER_DIST",
 ];
 
 /// The script's stages these tests run.
@@ -116,7 +119,10 @@ fn checks(stage: Stage, vars: &[(&str, &str)]) -> Run {
     for var in GATE_VARS {
         command.env_remove(var);
     }
-    command.env("BASH_FUNC_cargo%%", "() { echo \"cargo-standin $*\"; }");
+    command.env(
+        "BASH_FUNC_cargo%%",
+        "() { echo \"cargo-standin $* [viewer=${KIEWER_VIEWER_DIST:-}]\"; }",
+    );
     command.envs(vars.iter().copied());
     let Output {
         status,
@@ -205,14 +211,15 @@ fn ci_refuses_an_opt_out(gate: Gate) {
 }
 
 /// The stages a commit's corners leave out: the three whose real scripts
-/// the stand-in cargo cannot stand in for.
+/// the stand-in cargo cannot stand in for. `all` builds the probe viewer
+/// before them whatever is skipped, so a run of it also names `VIEWER`.
 const SKIPPED: (&str, &str) = ("CHECKS_SKIP", "sqlx wasm browser");
 
 #[test]
 fn all_runs_every_stage_but_the_skipped_and_names_each_skip() {
     let run = checks(
         Stage::All,
-        &[Gate::Postgres.set(), Gate::Gcs.set(), SKIPPED],
+        &[Gate::Postgres.set(), Gate::Gcs.set(), SKIPPED, VIEWER],
     );
     assert!(run.success, "stderr: {}", run.stderr);
     for stage in ["sqlx", "wasm", "browser"] {
@@ -242,4 +249,43 @@ fn ci_refuses_a_stage_skip() {
     );
     run.assert_refused_before_building();
     run.assert_stderr_names("CHECKS_SKIP");
+}
+
+/// The viewer directory `all` is told about, standing for one it already
+/// built: the stand-in cargo builds nothing, so the real pre-build of the
+/// probe viewer (scripts/build-viewer.sh) is left out by naming one.
+const VIEWER: (&str, &str) = ("KIEWER_VIEWER_DIST", "/viewer/for/the/stand-in");
+
+/// The directory each stand-in cargo call saw, one per call.
+fn viewer_seen(run: &Run) -> Vec<&str> {
+    run.stdout
+        .lines()
+        .filter(|line| line.starts_with("cargo-standin "))
+        .map(|line| line.rsplit_once("[viewer=").map_or("", |(_, seen)| seen))
+        .collect()
+}
+
+#[test]
+fn all_gives_every_stage_the_same_viewer() {
+    let run = checks(
+        Stage::All,
+        &[Gate::Postgres.set(), Gate::Gcs.set(), SKIPPED, VIEWER],
+    );
+    assert!(run.success, "stderr: {}", run.stderr);
+    let seen = viewer_seen(&run);
+    assert!(!seen.is_empty(), "stdout: {}", run.stdout);
+    for dir in seen {
+        assert_eq!(dir, "/viewer/for/the/stand-in]", "stdout: {}", run.stdout);
+    }
+}
+
+#[test]
+fn the_test_stage_on_its_own_embeds_no_viewer() {
+    let run = checks(Stage::Test, &[Gate::Postgres.set(), Gate::Gcs.set()]);
+    assert!(run.success, "stderr: {}", run.stderr);
+    let seen = viewer_seen(&run);
+    assert!(!seen.is_empty(), "stdout: {}", run.stdout);
+    for dir in seen {
+        assert_eq!(dir, "]", "stdout: {}", run.stdout);
+    }
 }

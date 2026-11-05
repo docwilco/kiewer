@@ -10,11 +10,13 @@
 # install line, before the build runs.
 #
 # Usage: scripts/build-viewer.sh [release|debug|probe] [out-dir]
-#   default: release into kiewer_viewer/dist. scripts/checks.sh wasm runs
-#   the debug profile into the target directory, so a check never
-#   overwrites what the server embeds. probe is the debug profile with
-#   kiewer_viewer's panic-probe feature, the viewer the browser stage
-#   tests (#94); the crate refuses that feature in a release build.
+#   default: release into kiewer_viewer/dist. scripts/checks.sh wasm on
+#   its own runs the debug profile into the target directory, so a check
+#   never overwrites what the server embeds. probe is the debug profile
+#   with kiewer_viewer's panic-probe feature, the viewer the browser stage
+#   tests (#94) and the one `checks.sh all` builds once for every stage;
+#   the crate refuses that feature in a release build. Files of an
+#   unchanged viewer already in out-dir are left untouched.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -47,8 +49,25 @@ target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_direct
 # under deps, and both write the one debug/kiewer_viewer.wasm, which
 # wasm-bindgen reads right after, so each out-dir gets its own build.
 cargo build --target wasm32-unknown-unknown -p kiewer_viewer --lib "${profile_flag[@]}"
-mkdir -p "$out_dir"
 # --target web: an ES module with a default export that fetches the wasm
 # beside it, which the viewer page imports; no TypeScript, nothing reads it.
-wasm-bindgen --target web --no-typescript --out-dir "$out_dir" \
+#
+# wasm-bindgen writes into a directory of its own, and only a file whose
+# bytes differ from the one already in out-dir replaces it. kiewer_lib's
+# build script watches the files in out-dir by modification time
+# (rerun-if-changed), and wasm-bindgen rewrites its output on every run,
+# so writing in place would rerun that script, and recompile kiewer_lib
+# and what links it, on a build of a viewer that did not change. Kept
+# files keep their mtime.
+mkdir -p "$(dirname "$out_dir")"
+staging="$(mktemp -d "$out_dir.new.XXXXXX")"
+trap 'rm -rf "$staging"' EXIT
+wasm-bindgen --target web --no-typescript --out-dir "$staging" \
   "$target_dir/wasm32-unknown-unknown/$profile_dir/kiewer_viewer.wasm"
+mkdir -p "$out_dir"
+(cd "$staging" && find . -type f) | while IFS= read -r file; do
+  if ! cmp -s "$staging/$file" "$out_dir/$file"; then
+    mkdir -p "$(dirname "$out_dir/$file")"
+    mv -f "$staging/$file" "$out_dir/$file"
+  fi
+done
