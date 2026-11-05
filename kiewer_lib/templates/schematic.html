@@ -20,17 +20,18 @@
      instead of zooming the page. */
   #sheet { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
   #status { opacity: 0.7; }
-  #error { position: absolute; left: 0.8em; right: 0.8em; top: 0.8em; padding: 0.6em 0.8em; background: #f3c2c2; border-radius: 4px; white-space: pre-wrap; }
+  #error { position: absolute; left: 0.8em; right: 3.2em; top: 0.8em; padding: 0.6em 0.8em; background: #f3c2c2; border-radius: 4px; white-space: pre-wrap; }
   /* The gestures behind a (?) at the stage's top right, as on the board
-     page (viewer.html, #122): the hint shows while the (?) is hovered by
-     a mouse, has the keyboard's focus, or is toggled open by a tap
-     (aria-expanded, the page script's). Shown by display rules alone,
-     never the hidden attribute. Hover only where the pointer hovers, so a
-     tap's sticky hover cannot hold it open. */
+     page (viewer.html, #122): the hint shows while a mouse hovers the (?),
+     or while it is toggled open by a click, a tap, Enter or Space
+     (aria-expanded, the page script's, which Escape closes). Shown by display rules alone,
+     never the hidden attribute. Hover only under a
+     fine pointer that hovers, so a tap's sticky hover, on a phone or a
+     touch-screen laptop, cannot hold it open. */
   #help { position: absolute; right: 0.8em; top: 0.8em; width: 1.8em; height: 1.8em; padding: 0; border: 1px solid #999; border-radius: 50%; background: rgba(255, 255, 255, 0.9); color: inherit; font: inherit; cursor: help; }
   #hint { position: absolute; right: 0.8em; top: 2.8em; z-index: 1; max-width: min(24em, calc(100% - 3.2em)); margin: 0; padding: 0.4em 0.6em; background: rgba(255, 255, 255, 0.95); border: 1px solid #999; border-radius: 4px; display: none; }
-  #help:focus-visible + #hint, #help[aria-expanded="true"] + #hint { display: block; }
-  @media (hover: hover) { #help:hover + #hint { display: block; } }
+  #help[aria-expanded="true"] + #hint { display: block; }
+  @media (hover: hover) and (pointer: fine) { #help:hover + #hint { display: block; } }
   #zoom { position: absolute; right: 0.8em; bottom: 0.6em; opacity: 0.8; font-variant-numeric: tabular-nums; }
   /* The sheet panel: the tree, one row per sheet, indented by depth. */
   #sheets { position: absolute; left: 0.8em; top: 0.8em; max-height: 60%; overflow: auto; padding: 0.3em 0.6em; background: rgba(255, 255, 255, 0.9); border: 1px solid #ccc; border-radius: 4px; }

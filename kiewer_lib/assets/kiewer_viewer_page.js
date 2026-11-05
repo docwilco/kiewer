@@ -170,13 +170,21 @@ function perPixel(scale) {
 }
 
 // The (?) before the gesture hint (#122): the page's CSS shows the hint
-// on hover and on keyboard focus; a click or a tap on the (?) toggles it
-// open through aria-expanded, and a press anywhere else closes it.
+// while a mouse hovers it; a click, a tap, Enter or Space on the (?)
+// toggles it open through aria-expanded, and a press anywhere else or
+// Escape closes it.
 function wireHelp() {
   const help = document.getElementById("help");
   if (!help) return;
   help.addEventListener("click", function () {
     help.setAttribute("aria-expanded", String(help.getAttribute("aria-expanded") !== "true"));
+  });
+  // Escape here closes the hint only: stopped before the page's own
+  // Escape handler on the window, which would clear the pinned nets.
+  help.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    help.setAttribute("aria-expanded", "false");
+    e.stopPropagation();
   });
   window.addEventListener("pointerdown", function (e) {
     if (e.target !== help) help.setAttribute("aria-expanded", "false");
