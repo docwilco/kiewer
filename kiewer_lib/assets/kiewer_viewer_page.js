@@ -152,17 +152,19 @@ export function devicePoint(canvas, e) {
 
 // Sets the net tooltip `tip` to `text` and places it inside `stage` for
 // the pointer event `e` (#123); with no text it hides the tip instead. It
-// shows the tip first so it can be measured. The tip sits TIP_GAP below and right of the pointer; where
-// that crosses the stage's right edge it moves to the pointer's left, and
-// where it crosses the bottom edge, above the pointer. A tip wider or
-// taller than the stage is clamped to the stage's left or top edge; one
-// that fits neither below nor above the pointer takes the side with more
-// room. Both pages use it, so the rule is one.
+// shows the tip first so it can be measured. The tip sits TIP_GAP below
+// and right of the pointer; where that crosses the stage's right edge it
+// moves to the pointer's left, and where it crosses the bottom edge,
+// above the pointer. A tip wider or taller than the stage is clamped to
+// the stage's left or top edge (the stage clips the rest); one that fits
+// neither below nor above the pointer takes the side with more room and
+// is pulled inside the stage, overlapping the pointer. Both pages use
+// it, so the rule is one.
 const TIP_GAP = 14;
 export function placeTip(tip, stage, e, text) {
   if (!text) { tip.hidden = true; return; }
-  tip.textContent = text;
   const r = stage.getBoundingClientRect();
+  tip.textContent = text;
   const x = e.clientX - r.left;
   const y = e.clientY - r.top;
   tip.hidden = false;
@@ -173,12 +175,14 @@ export function placeTip(tip, stage, e, text) {
   if (left + w > r.width) left = x - TIP_GAP - w;
   let top = y + TIP_GAP;
   if (top + h > r.height) {
-    // Above if it fits there; else the side with more room, so a tip taller
-    // than either never lies over the pointer when the other side is freer.
+    // Above if it fits there; else the side with more room.
     const above = y - TIP_GAP - h;
     if (above >= 0 || y > r.height - y) top = above;
   }
   tip.style.left = Math.max(0, left) + "px";
+  // Inside the stage even when neither side fits, at the cost of lying over
+  // the pointer in that case.
+  top = Math.min(top, r.height - h);
   tip.style.top = Math.max(0, top) + "px";
 }
 

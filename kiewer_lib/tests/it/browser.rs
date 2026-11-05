@@ -1054,6 +1054,8 @@ struct TipAt {
     stage_height: f64,
     scroll_x: bool,
     scroll_y: bool,
+    #[serde(default)]
+    shown: bool,
 }
 
 /// The expression that places a tooltip of `text` at (`x`, `y`).
@@ -1121,7 +1123,7 @@ async fn the_net_tooltip_stays_inside_the_stage_and_clear_of_the_pointer(viewed:
         .read::<TipAt>(&place_tip(300.0, 100.0, &"W".repeat(400)))
         .await;
     assert!(
-        wide.left.abs() < 0.5 && wide.width > w,
+        wide.left.abs() < 0.5 && wide.width > w && !wide.scroll_x,
         "a tip wider than the stage clamps to its left edge: {wide:?}"
     );
     session.close().await;
@@ -1217,15 +1219,21 @@ async fn a_real_hover_near_the_far_edges_places_the_net_tooltip_by_the_shared_ru
         .read(
             r#"(() => {
   const s = document.getElementById("stage").getBoundingClientRect();
-  const t = document.getElementById("net-tip").getBoundingClientRect();
+  const tip = document.getElementById("net-tip");
+  const t = tip.getBoundingClientRect();
   return {
     left: t.left - s.left, top: t.top - s.top, right: s.right - t.right,
     bottom: s.bottom - t.bottom, width: t.width, height: t.height,
-    stageWidth: s.width, stageHeight: s.height, scrollX: false, scrollY: false,
+    stageWidth: s.width, stageHeight: s.height,
+    scrollX: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    scrollY: document.documentElement.scrollHeight > document.documentElement.clientHeight,
+    shown: !tip.hidden,
   };
 })()"#,
         )
         .await;
+    assert!(at.shown, "the tooltip is showing: {at:?}");
+    assert!(!at.scroll_x && !at.scroll_y, "no scrollbar: {at:?}");
     assert!(
         at.left >= 0.0 && at.top >= 0.0 && at.right >= 0.0 && at.bottom >= 0.0,
         "the tooltip is inside the stage: {at:?} for a pointer at ({x}, {y})"

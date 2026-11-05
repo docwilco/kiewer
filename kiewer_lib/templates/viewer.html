@@ -13,7 +13,7 @@
   header h1 { font-size: 1em; font-weight: normal; margin: 0; }
   header a { color: inherit; }
   header button { font: inherit; }
-  #stage { flex: 1; position: relative; min-height: 0; }
+  #stage { flex: 1; position: relative; min-height: 0; overflow: hidden; }
   /* touch-action: none, so a two-finger pinch reaches the pointer events
      instead of zooming the page. */
   #board { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
@@ -71,7 +71,7 @@
   /* The font warning and picker (docs/v1-scope.md, Fonts): over the
      stage's top right under the (?), one line per face the browser
      lacks. */
-  #fonts { position: absolute; right: 0.8em; top: 3em; max-width: 28em; padding: 0.6em 0.8em; background: #4a3f1e; border-radius: 4px; }
+  #fonts { position: absolute; right: 0.8em; top: 3em; max-width: 28em; max-height: calc(100% - 3.6em); overflow: auto; padding: 0.6em 0.8em; background: #4a3f1e; border-radius: 4px; }
   #fonts p { margin: 0.3em 0; }
   #fonts select, #fonts input { font: inherit; max-width: 100%; }
   #fonts .absent { opacity: 0.7; }
