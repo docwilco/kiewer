@@ -69,10 +69,10 @@ const PAGE_SCRIPT_NEWSTROKE: &str = "\"./kiewer_viewer_newstroke.txt\"";
 const HASH_LEN: usize = 16;
 
 /// How hard the variants are compressed. A release's are served for a
-/// year and compressed once per build, so the best. Every other profile's
-/// serve a check (the browser stage) or a dev server, where any valid
-/// coding will do, and the best cost: quality 11 took about 34 s of a
-/// 44 s build of the debug viewer (7 MB).
+/// year and compressed once per build, so they get the best. Every other
+/// profile's serve a check (the browser stage) or a dev server, where any
+/// valid coding will do and the best is slow: on 2026-11-05, quality 11
+/// took about 34 s of a 44 s build of the debug viewer (7 MB of wasm).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Effort {
     Best,
@@ -80,7 +80,8 @@ enum Effort {
 }
 
 impl Effort {
-    /// The release profile's is the best, every other's fast.
+    /// Best for a release, Fast for every other build. Cargo names a
+    /// profile that inherits from release `release` in PROFILE too.
     fn of_profile(profile: &str) -> Self {
         if profile == "release" {
             Effort::Best
@@ -97,6 +98,7 @@ impl Effort {
         }
     }
 
+    /// The gzip level.
     fn gzip_level(self) -> flate2::Compression {
         match self {
             Effort::Best => flate2::Compression::best(),
@@ -110,14 +112,12 @@ impl Effort {
 const BROTLI_WINDOW: u32 = 24;
 
 fn main() {
-    for (from, to) in [("TARGET", "KIEWER_TARGET"), ("PROFILE", "KIEWER_PROFILE")] {
-        let value =
-            env::var(from).unwrap_or_else(|_| panic!("cargo sets {from} for a build script"));
-        println!("cargo::rustc-env={to}={value}");
-    }
+    let target = env::var("TARGET").expect("cargo sets TARGET for a build script");
+    let profile = env::var("PROFILE").expect("cargo sets PROFILE for a build script");
+    println!("cargo::rustc-env=KIEWER_TARGET={target}");
+    println!("cargo::rustc-env=KIEWER_PROFILE={profile}");
     println!("cargo::rerun-if-changed=build.rs");
-    let effort =
-        Effort::of_profile(&env::var("PROFILE").expect("cargo sets PROFILE for a build script"));
+    let effort = Effort::of_profile(&profile);
 
     println!("cargo::rustc-check-cfg=cfg(kiewer_viewer_embedded)");
     println!("cargo::rerun-if-env-changed=KIEWER_VIEWER_REQUIRED");
