@@ -11,8 +11,8 @@
 // this file, so a new viewer or a new table is a new URL here too.
 //
 // The page holds the elements this script writes by their ids: `status`
-// (the backend line), `error` (the failure box), `zoom` (the read-out)
-// and `fit` (the Fit button).
+// (the backend line), `error` (the failure box), `zoom` (the read-out),
+// `fit` (the Fit button) and `help` (the (?) before the gesture hint).
 
 // Telemetry (docs/v1-scope.md, Telemetry; the server side is
 // kiewer_lib/src/web/beacon.rs): one beacon per page load, after the
@@ -150,6 +150,39 @@ export function devicePoint(canvas, e) {
   return [(e.clientX - r.left) * scale, (e.clientY - r.top) * scale];
 }
 
+// `x` to three significant figures, with no exponent and no trailing
+// zeros: 12.5, 80, 1230.
+function figures(x) {
+  return String(Number(x.toPrecision(3)));
+}
+
+// The length one device pixel covers at `scale` device pixels per
+// millimetre, in the largest of mm, µm and nm that keeps the figure at 1
+// or more once rounded (#122): 0.08 mm reads "80 µm/px", 0.0005 mm
+// "500 nm/px". Below 1 nm it stays in nm.
+function perPixel(scale) {
+  let length = 1 / scale;
+  for (const unit of ["mm", "µm"]) {
+    if (Number(length.toPrecision(3)) >= 1) return figures(length) + " " + unit + "/px";
+    length *= 1000;
+  }
+  return figures(length) + " nm/px";
+}
+
+// The (?) before the gesture hint (#122): the page's CSS shows the hint
+// on hover and on keyboard focus; a click or a tap on the (?) toggles it
+// open through aria-expanded, and a press anywhere else closes it.
+function wireHelp() {
+  const help = document.getElementById("help");
+  if (!help) return;
+  help.addEventListener("click", function () {
+    help.setAttribute("aria-expanded", String(help.getAttribute("aria-expanded") !== "true"));
+  });
+  window.addEventListener("pointerdown", function (e) {
+    if (e.target !== help) help.setAttribute("aria-expanded", "false");
+  }, true);
+}
+
 // The page owns nothing of the gestures: this hands each one to the wasm
 // in device pixels, and the camera (f64) and the drawing are Rust. The
 // bindings are KiCad's (docs/v1-scope.md, Rendering, Zoom).
@@ -157,13 +190,15 @@ export function devicePoint(canvas, e) {
 // `start(canvas, load)` creates the Viewer on `canvas`, calls
 // `load(viewer, schedule)` once it exists, and sends the beacon after;
 // `schedule` asks for a frame. A load that throws shows its message in
-// the error box. Every frame sends kiewer-frame on the window. The page
-// asks for the canvas's displayed size in device pixels; the Viewer sets
-// the canvas to it, capped to the device's limit.
+// the error box. It wires the (?) first (wireHelp). Every frame sends
+// kiewer-frame on the window. The page asks for the canvas's displayed
+// size in device pixels; the Viewer sets the canvas to it, capped to the
+// device's limit.
 export async function start(canvas, load) {
   const status = document.getElementById("status");
   const errorBox = document.getElementById("error");
   const zoomBox = document.getElementById("zoom");
+  wireHelp();
   let viewer = null;
   let frame = 0;
   let gesturing = false;
@@ -204,14 +239,14 @@ export async function start(canvas, load) {
       if (viewer.fading()) schedule();
     });
   }
-  // Lower right: the zoom relative to the fitted board or sheet and the
-  // scale in device pixels per millimetre, as the camera holds them.
+  // The zoom relative to the fitted board or sheet, and the length one
+  // device pixel covers (perPixel), as the camera holds them.
   function showZoom() {
     if (!viewer) return;
     const zoom = viewer.zoom();
-    if (!(zoom > 0)) { zoomBox.textContent = ""; return; }
-    zoomBox.textContent = zoom.toPrecision(3).replace(/\.?0+$/, "") + "x fit, "
-      + viewer.scale().toPrecision(3) + " px/mm";
+    const scale = viewer.scale();
+    if (!(zoom > 0) || !(scale > 0)) { zoomBox.textContent = ""; return; }
+    zoomBox.textContent = figures(zoom) + "x fit, " + perPixel(scale);
   }
   function resize() {
     if (!viewer) return;
