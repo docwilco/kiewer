@@ -27,6 +27,7 @@ const GATE_VARS: &[&str] = &[
     "CI",
     "CHECKS_SKIP",
     "KIEWER_VIEWER_DIST",
+    "CHECKS_VIEWER_PREBUILT",
 ];
 
 /// The script's stages these tests run.
@@ -212,14 +213,14 @@ fn ci_refuses_an_opt_out(gate: Gate) {
 
 /// The stages a commit's corners leave out: the three whose real scripts
 /// the stand-in cargo cannot stand in for. `all` builds the probe viewer
-/// before them whatever is skipped, so a run of it also names `VIEWER`.
+/// whatever is skipped, so a run of it also names `PREBUILT`.
 const SKIPPED: (&str, &str) = ("CHECKS_SKIP", "sqlx wasm browser");
 
 #[test]
 fn all_runs_every_stage_but_the_skipped_and_names_each_skip() {
     let run = checks(
         Stage::All,
-        &[Gate::Postgres.set(), Gate::Gcs.set(), SKIPPED, VIEWER],
+        &[Gate::Postgres.set(), Gate::Gcs.set(), SKIPPED, PREBUILT],
     );
     assert!(run.success, "stderr: {}", run.stderr);
     for stage in ["sqlx", "wasm", "browser"] {
@@ -251,32 +252,100 @@ fn ci_refuses_a_stage_skip() {
     run.assert_stderr_names("CHECKS_SKIP");
 }
 
-/// The viewer directory `all` is told about, standing for one it already
-/// built: the stand-in cargo builds nothing, so the real pre-build of the
-/// probe viewer (scripts/build-viewer.sh) is left out by naming one.
-const VIEWER: (&str, &str) = ("KIEWER_VIEWER_DIST", "/viewer/for/the/stand-in");
+/// The viewer directory `all` is told is already built, standing for the
+/// probe viewer: the stand-in cargo builds nothing, so the real pre-build
+/// (scripts/build-viewer.sh) is left out by this seam. `all` must turn it
+/// into `KIEWER_VIEWER_DIST` itself, which no test sets.
+const PREBUILT: (&str, &str) = ("CHECKS_VIEWER_PREBUILT", "/viewer/for/the/stand-in");
 
-/// The directory each stand-in cargo call saw, one per call.
+/// What `KIEWER_VIEWER_DIST` is, as the stand-in prints it, when `all` has
+/// exported `PREBUILT`.
+const SEEN: &str = "/viewer/for/the/stand-in]";
+
+/// The directory each stand-in cargo call saw, one per call, but the fmt
+/// stage's: it runs before the pre-build, compiles nothing, and embeds no
+/// viewer.
 fn viewer_seen(run: &Run) -> Vec<&str> {
     run.stdout
         .lines()
-        .filter(|line| line.starts_with("cargo-standin "))
+        .filter(|line| line.starts_with("cargo-standin ") && !line.contains(" fmt "))
         .map(|line| line.rsplit_once("[viewer=").map_or("", |(_, seen)| seen))
         .collect()
 }
 
 #[test]
-fn all_gives_every_stage_the_same_viewer() {
+fn all_exports_the_prebuilt_viewer_to_every_stage() {
     let run = checks(
         Stage::All,
-        &[Gate::Postgres.set(), Gate::Gcs.set(), SKIPPED, VIEWER],
+        &[Gate::Postgres.set(), Gate::Gcs.set(), SKIPPED, PREBUILT],
     );
     assert!(run.success, "stderr: {}", run.stderr);
+    assert!(
+        run.stdout.contains("==> viewer ok"),
+        "stdout: {}",
+        run.stdout
+    );
     let seen = viewer_seen(&run);
     assert!(!seen.is_empty(), "stdout: {}", run.stdout);
     for dir in seen {
-        assert_eq!(dir, "/viewer/for/the/stand-in]", "stdout: {}", run.stdout);
+        assert_eq!(dir, SEEN, "stdout: {}", run.stdout);
     }
+}
+
+#[test]
+fn all_overwrites_a_viewer_from_the_environment() {
+    let run = checks(
+        Stage::All,
+        &[
+            Gate::Postgres.set(),
+            Gate::Gcs.set(),
+            SKIPPED,
+            PREBUILT,
+            ("KIEWER_VIEWER_DIST", "/from/a/shell"),
+        ],
+    );
+    assert!(run.success, "stderr: {}", run.stderr);
+    for dir in viewer_seen(&run) {
+        assert_eq!(dir, SEEN, "stdout: {}", run.stdout);
+    }
+}
+
+/// The wasm stage under `all` builds no viewer of its own (no
+/// `cargo metadata`, no build script run) and lints with the prebuilt
+/// viewer in the environment, both with and without `panic-probe`. The
+/// browser stage needs a real browser and sqlx a real database, so those
+/// two stay skipped.
+#[test]
+fn the_wasm_stage_under_all_lints_twice_and_builds_nothing() {
+    let run = checks(
+        Stage::All,
+        &[
+            Gate::Postgres.set(),
+            Gate::Gcs.set(),
+            ("CHECKS_SKIP", "sqlx browser"),
+            PREBUILT,
+        ],
+    );
+    assert!(run.success, "stderr: {}", run.stderr);
+    assert!(run.stdout.contains("==> wasm ok"), "stdout: {}", run.stdout);
+    assert!(
+        !run.stdout.contains("cargo-standin metadata"),
+        "stdout: {}",
+        run.stdout
+    );
+    let lints: Vec<&str> = run
+        .stdout
+        .lines()
+        .filter(|line| line.contains("clippy -p kiewer_viewer"))
+        .collect();
+    assert_eq!(lints.len(), 2, "stdout: {}", run.stdout);
+    assert!(lints.iter().all(|line| line.ends_with(SEEN)), "{lints:?}");
+    assert!(
+        lints
+            .iter()
+            .any(|line| line.contains("--features panic-probe")),
+        "{lints:?}"
+    );
 }
 
 #[test]

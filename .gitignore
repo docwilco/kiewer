@@ -3,6 +3,8 @@
 # the viewer for the browser, written by scripts/build-viewer.sh and
 # embedded by kiewer_lib/build.rs
 /kiewer_viewer/dist
+# the staging directory beside it during a build (scripts/build-viewer.sh)
+/kiewer_viewer/dist.new.*
 # the filesystem blob store of a dev box (KIEWER_BLOB_DIR, default)
 /blobs
 # Terraform (infra/): the providers, plans and the operator's variables stay

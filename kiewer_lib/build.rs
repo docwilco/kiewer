@@ -15,10 +15,12 @@
 // release cannot ship without the viewer.
 //
 // KIEWER_VIEWER_DIST names another directory to embed from in place of
-// kiewer_viewer/dist, and then the files must be there: the browser stage
-// of scripts/checks.sh points it at the debug build the wasm stage writes
-// under the target directory, so a check gets a server with the viewer in
-// it and kiewer_viewer/dist stays what a release embeds.
+// kiewer_viewer/dist, and then the files must be there: `scripts/checks.sh
+// all` builds the probe viewer under the target directory once and points
+// every stage at it (the browser stage alone does the same for itself), so
+// a check gets a server with the viewer in it, the build script sees the
+// same input in every stage, and kiewer_viewer/dist stays what a release
+// embeds.
 //
 // The embedded files are the caching policy's static assets (ADR 0003;
 // docs/v1-scope.md, Caching): each is named by a prefix of the SHA-256

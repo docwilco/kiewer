@@ -22,6 +22,9 @@ cd "$(dirname "$0")/.."
 
 profile="${1:-release}"
 out_dir="${2:-kiewer_viewer/dist}"
+# No trailing slash: the staging directory is named beside out-dir, and
+# `x/.new.NNN` would be made inside a directory that may not exist.
+out_dir="${out_dir%/}"
 case "$profile" in
   release) profile_flag=(--release); profile_dir=release ;;
   debug) profile_flag=(); profile_dir=debug ;;

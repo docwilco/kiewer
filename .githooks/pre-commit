@@ -168,6 +168,9 @@ rsync -rp --checksum --delete --exclude='/target' "$export_dir/" "$snapshot/"
 # path with symlinks resolved, so the comparison does too. The exclude
 # above keeps --delete off this path.
 unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR
+# The checks name the viewer the stages embed themselves (scripts/checks.sh,
+# prebuild_viewer); one inherited from the shell must not reach them.
+unset KIEWER_VIEWER_DIST CHECKS_VIEWER_PREBUILT
 target_dir="$(cd "$snapshot" && pwd -P)/target"
 if actual_target="$(cd "$snapshot" &&
   cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r .target_directory)" &&
@@ -255,7 +258,9 @@ CHECKS_SKIP="${checks_skip[*]}" bash "$snapshot/scripts/checks.sh" all 9>&- || {
   echo >&2
   echo "pre-commit: checks failed against the staged tree, which is still in" >&2
   echo "  $snapshot" >&2
-  echo "Reproduce there: (cd $snapshot && scripts/checks.sh <stage>)" >&2
+  echo "Reproduce there: (cd $snapshot && scripts/checks.sh <stage>); a stage alone" >&2
+  echo "  embeds no viewer unless KIEWER_VIEWER_DIST=$target_dir/viewer-probe is set" >&2
+  echo "  (scripts/build-viewer.sh probe $target_dir/viewer-probe builds it)." >&2
   exit 1
 }
 stop_server
