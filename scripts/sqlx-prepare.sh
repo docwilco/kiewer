@@ -38,7 +38,7 @@ command -v jq >/dev/null || {
   exit 1
 }
 
-command -v sqlx >/dev/null || {
+command -v sqlx >/dev/null && command -v cargo-sqlx >/dev/null || {
   echo "sqlx-prepare: sqlx-cli is required:" >&2
   echo "    $install" >&2
   exit 1
@@ -46,13 +46,20 @@ command -v sqlx >/dev/null || {
 
 # The data's format is the tool's, so a tool that is not the crate's
 # version could write data the macros misread, or call fresh data stale.
+# sqlx-cli installs two binaries, and this script runs both: `sqlx` for
+# the database, `cargo-sqlx` (as `cargo sqlx`) for the prepare, which is
+# what writes and checks the data. Each is checked, since a binary
+# replaced by hand leaves the other behind (on 2026-11-05 the prepare ran
+# 0.8.6 against sqlx 0.9 under a guard that read `sqlx` alone).
 pinned="$(scripts/sqlx-version.sh)"
-installed="$(sqlx --version | awk '{print $2}')"
-[ "$installed" = "$pinned" ] || {
-  echo "sqlx-prepare: sqlx-cli is $installed; Cargo.lock's sqlx is $pinned:" >&2
-  echo "    $install" >&2
-  exit 1
-}
+for tool in "sqlx" "cargo sqlx"; do
+  installed="$($tool --version | awk '{print $2}')"
+  [ "$installed" = "$pinned" ] || {
+    echo "sqlx-prepare: \`$tool\` is sqlx-cli $installed; Cargo.lock's sqlx is $pinned:" >&2
+    echo "    $install" >&2
+    exit 1
+  }
+done
 
 # The URL with `_sqlx` after its database name, its query string kept.
 base="${DATABASE_URL%%\?*}"
