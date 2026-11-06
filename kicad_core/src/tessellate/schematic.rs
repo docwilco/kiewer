@@ -14,7 +14,9 @@
 
 use std::collections::BTreeMap;
 
-use super::{Curves, Mesh, MeshBuilder, Tessellator, arc_points, bezier, circle};
+use super::{
+    Curves, Mesh, MeshBuilder, Tessellator, Unit as MeshUnit, arc_points, bezier, circle, touches,
+};
 use crate::font::{self, Placement, block_size};
 use crate::geometry::{Bounds, Transform};
 use crate::model::{Font, Horizontal, Justify, Point, Size, Vertical};
@@ -94,63 +96,127 @@ pub enum SchematicLayer {
     Dnp,
 }
 
+/// The mesh of one item of a sheet on one layer, kept so that a region of
+/// finer tessellation builds again only the curved items it reaches (#51).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SheetUnit {
+    /// The item's place in the order the sheet draws them in.
+    pub item: usize,
+    /// The net item it is, for the highlight; `None` for one that is on
+    /// no net, or drawn with others (a symbol's body, a pin's texts).
+    pub key: Option<SheetItem>,
+    /// The triangles.
+    pub unit: MeshUnit,
+}
+
+/// Every [`SheetUnit`] of a sheet, by layer in draw order and by item
+/// within a layer.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SheetUnits {
+    layers: BTreeMap<SchematicLayer, Vec<SheetUnit>>,
+}
+
+impl SheetUnits {
+    /// Every layer that has something on it as one mesh, in draw order.
+    #[must_use]
+    pub fn layers(&self) -> Vec<(SchematicLayer, Mesh)> {
+        self.layers
+            .iter()
+            .map(|(layer, units)| {
+                let mut mesh = Mesh::default();
+                for unit in units {
+                    mesh.append(&unit.unit.mesh);
+                }
+                (*layer, mesh)
+            })
+            .filter(|(_, mesh)| !mesh.is_empty())
+            .collect()
+    }
+
+    /// The geometry of `net`, by layer in draw order: its items' units,
+    /// in the order the net lists the items.
+    #[must_use]
+    pub fn net(&self, net: &SheetNet) -> Vec<(SchematicLayer, Mesh)> {
+        let mut by_item: BTreeMap<SheetItem, Vec<(SchematicLayer, &SheetUnit)>> = BTreeMap::new();
+        for (layer, units) in &self.layers {
+            for unit in units {
+                if let Some(key) = unit.key {
+                    by_item.entry(key).or_default().push((*layer, unit));
+                }
+            }
+        }
+        let mut out: BTreeMap<SchematicLayer, Mesh> = BTreeMap::new();
+        for item in &net.items {
+            for (layer, unit) in by_item.get(item).into_iter().flatten() {
+                out.entry(*layer).or_default().append(&unit.unit.mesh);
+            }
+        }
+        out.into_iter()
+            .filter(|(_, mesh)| !mesh.is_empty())
+            .collect()
+    }
+}
+
 impl Tessellator {
     /// Every layer of `sheet` that has something on it, in draw order
     /// (the [`SchematicLayer`] order).
     #[must_use]
     pub fn sheet(&self, sheet: &Sheet) -> Vec<(SchematicLayer, Mesh)> {
+        self.sheet_units(sheet).layers()
+    }
+
+    /// Every item of `sheet` as the units it is drawn from.
+    #[must_use]
+    pub fn sheet_units(&self, sheet: &Sheet) -> SheetUnits {
         let mut layers = Layers::new(self);
-        for symbol in &sheet.symbols {
-            if let Some(library) = sheet.library_symbol(symbol) {
-                layers.symbol(symbol, library);
+        layers.sheet(sheet);
+        layers.into_units()
+    }
+
+    /// Build again, in `units`, every curved item this tessellator's
+    /// region reaches and every item built fine before: the rest keep
+    /// their meshes. True when anything changed.
+    pub fn refine_sheet(&self, sheet: &Sheet, units: &mut SheetUnits) -> bool {
+        let region = self.fine.map(|fine| fine.region);
+        // The items to build, with the tolerance a stroke's caps take.
+        let mut only: BTreeMap<usize, f64> = BTreeMap::new();
+        for unit in units.layers.values().flatten() {
+            if !unit.unit.wants(region.as_ref()) {
+                continue;
             }
-        }
-        for wire in &sheet.wires {
-            let width = default(wire.width, DEFAULT_WIRE_WIDTH);
-            layers
-                .on(SchematicLayer::Wire)
-                .stroke(&wire.points, width, false);
-        }
-        for bus in &sheet.buses {
-            let width = default(bus.width, DEFAULT_BUS_WIDTH);
-            layers
-                .on(SchematicLayer::Bus)
-                .stroke(&bus.points, width, false);
-        }
-        for entry in &sheet.bus_entries {
-            let end = Point {
-                x: entry.at.x + entry.size.x,
-                y: entry.at.y + entry.size.y,
+            let reached = region
+                .zip(unit.unit.bounds)
+                .is_some_and(|(region, bounds)| touches(&region, &bounds));
+            let round = match self.fine {
+                Some(fine) if reached => fine.tolerance,
+                _ => self.tolerance,
             };
-            let width = default(entry.width, DEFAULT_WIRE_WIDTH);
-            layers
-                .on(SchematicLayer::Wire)
-                .stroke(&[entry.at, end], width, false);
+            let entry = only.entry(unit.item).or_insert(round);
+            *entry = entry.min(round);
         }
-        for junction in &sheet.junctions {
-            let diameter = default(junction.diameter, DEFAULT_JUNCTION_DIAMETER);
-            let dot = circle(junction.at, diameter / 2.0, &layers.curves);
-            layers.on(SchematicLayer::Junction).fill(&[dot], &[]);
+        if only.is_empty() {
+            return false;
         }
-        for &at in &sheet.no_connects {
-            layers.no_connect(at);
+        let mut layers = Layers::new(self);
+        layers.only = Some(only);
+        layers.sheet(sheet);
+        let fresh = layers.into_units();
+        let built: Vec<usize> = fresh
+            .layers
+            .values()
+            .flatten()
+            .map(|unit| unit.item)
+            .collect();
+        for list in units.layers.values_mut() {
+            list.retain(|unit| !built.contains(&unit.item));
         }
-        for label in &sheet.labels {
-            layers.label(label);
+        for (layer, list) in fresh.layers {
+            units.layers.entry(layer).or_default().extend(list);
         }
-        for sheet_symbol in &sheet.sheet_symbols {
-            layers.sheet_symbol(sheet_symbol);
+        for list in units.layers.values_mut() {
+            list.sort_by_key(|unit| unit.item);
         }
-        for text in &sheet.texts {
-            if !text.hidden {
-                let placement = placement(&text.font, text.justify, text.at, text.rotation);
-                layers.text(SchematicLayer::Notes, &text.text, &placement);
-            }
-        }
-        for graphic in &sheet.graphics {
-            layers.graphic(graphic, &Carried::sheet(), SchematicLayer::Notes, None);
-        }
-        layers.finish()
+        true
     }
 
     /// The box around everything `sheet` draws, or `None` for an empty
@@ -202,12 +268,20 @@ impl From<Frame> for Carried {
     }
 }
 
-/// One mesh builder per layer, filled in any order and handed out in
-/// draw order.
+/// One mesh builder per layer, filled in any order, and the units each
+/// item of the sheet made of them.
 struct Layers {
     tessellator: Tessellator,
     curves: Curves,
     builders: BTreeMap<SchematicLayer, MeshBuilder<'static>>,
+    /// The ordinal of the next item.
+    item: usize,
+    /// The tolerance a stroke's caps take.
+    round: f64,
+    /// When building again: the items to build, by ordinal, with the
+    /// tolerance for their caps. The others are not drawn at all.
+    only: Option<BTreeMap<usize, f64>>,
+    units: Vec<(SchematicLayer, SheetUnit)>,
 }
 
 impl Layers {
@@ -216,24 +290,127 @@ impl Layers {
             tessellator: *tessellator,
             curves: Curves::of(tessellator),
             builders: BTreeMap::new(),
+            item: 0,
+            round: tessellator
+                .fine
+                .map_or(tessellator.tolerance, |fine| fine.tolerance),
+            only: None,
+            units: Vec::new(),
         }
     }
 
     fn on(&mut self, layer: SchematicLayer) -> &mut MeshBuilder<'static> {
         let tessellator = self.tessellator;
-        self.builders
+        let round = self.round;
+        let builder = self
+            .builders
             .entry(layer)
-            .or_insert_with(|| MeshBuilder::new(&tessellator))
+            .or_insert_with(|| MeshBuilder::new(&tessellator));
+        builder.set_round(round);
+        builder
     }
 
-    /// The meshes in draw order: the map iterates its keys in the
-    /// layers' order, which is the draw order.
-    fn finish(self) -> Vec<(SchematicLayer, Mesh)> {
-        self.builders
-            .into_iter()
-            .map(|(layer, builder)| (layer, builder.finish()))
-            .filter(|(_, mesh)| !mesh.is_empty())
-            .collect()
+    /// One item of the sheet: what `draw` adds, on whatever layers, is
+    /// a unit on each. `key` is the net item it is, when it is one.
+    fn item(&mut self, key: Option<SheetItem>, draw: impl FnOnce(&mut Self)) {
+        let ordinal = self.item;
+        self.item += 1;
+        if let Some(only) = &self.only {
+            let Some(&round) = only.get(&ordinal) else {
+                return;
+            };
+            self.round = round;
+        }
+        self.curves.take_touched();
+        draw(self);
+        let curved = self.curves.take_touched();
+        for (layer, builder) in &mut self.builders {
+            let unit = builder.close_unit(None, curved);
+            if !unit.mesh.positions.is_empty() {
+                self.units.push((
+                    *layer,
+                    SheetUnit {
+                        item: ordinal,
+                        key,
+                        unit,
+                    },
+                ));
+            }
+        }
+    }
+
+    fn into_units(self) -> SheetUnits {
+        let mut units = SheetUnits::default();
+        for (layer, unit) in self.units {
+            units.layers.entry(layer).or_default().push(unit);
+        }
+        units
+    }
+
+    /// Every item of `sheet`, in the order it draws them.
+    fn sheet(&mut self, sheet: &Sheet) {
+        for (index, symbol) in sheet.symbols.iter().enumerate() {
+            if let Some(library) = sheet.library_symbol(symbol) {
+                self.symbol(index, symbol, library);
+            }
+        }
+        for (index, wire) in sheet.wires.iter().enumerate() {
+            self.item(Some(SheetItem::Wire(index)), |layers| {
+                let width = default(wire.width, DEFAULT_WIRE_WIDTH);
+                layers
+                    .on(SchematicLayer::Wire)
+                    .stroke(&wire.points, width, false);
+            });
+        }
+        for bus in &sheet.buses {
+            self.item(None, |layers| {
+                let width = default(bus.width, DEFAULT_BUS_WIDTH);
+                layers
+                    .on(SchematicLayer::Bus)
+                    .stroke(&bus.points, width, false);
+            });
+        }
+        for entry in &sheet.bus_entries {
+            self.item(None, |layers| {
+                let end = Point {
+                    x: entry.at.x + entry.size.x,
+                    y: entry.at.y + entry.size.y,
+                };
+                let width = default(entry.width, DEFAULT_WIRE_WIDTH);
+                layers
+                    .on(SchematicLayer::Wire)
+                    .stroke(&[entry.at, end], width, false);
+            });
+        }
+        for (index, junction) in sheet.junctions.iter().enumerate() {
+            self.item(Some(SheetItem::Junction(index)), |layers| {
+                let diameter = default(junction.diameter, DEFAULT_JUNCTION_DIAMETER);
+                let dot = circle(junction.at, diameter / 2.0, &layers.curves);
+                layers.on(SchematicLayer::Junction).fill(&[dot], &[]);
+            });
+        }
+        for &at in &sheet.no_connects {
+            self.item(None, |layers| layers.no_connect(at));
+        }
+        for (index, label) in sheet.labels.iter().enumerate() {
+            self.item(Some(SheetItem::Label(index)), |layers| layers.label(label));
+        }
+        for (index, sheet_symbol) in sheet.sheet_symbols.iter().enumerate() {
+            self.sheet_symbol(index, sheet_symbol);
+        }
+        for text in &sheet.texts {
+            if !text.hidden {
+                self.item(None, |layers| {
+                    let placement = placement(&text.font, text.justify, text.at, text.rotation);
+                    layers.text(SchematicLayer::Notes, &text.text, &placement);
+                });
+            }
+        }
+        for graphic in &sheet.graphics {
+            self.item(None, |layers| {
+                layers.graphic(graphic, &Carried::sheet(), SchematicLayer::Notes, None);
+            });
+        }
     }
 
     /// Text at `placement` on `layer`; a stroke of one point is a dot.
@@ -327,64 +504,106 @@ impl Layers {
     /// A placed symbol: its applicable units' graphics, body texts and
     /// pins through its frame, its fields, and its cross when it is not
     /// populated.
-    fn symbol(&mut self, symbol: &Symbol, library: &LibrarySymbol) {
+    fn symbol(&mut self, index: usize, symbol: &Symbol, library: &LibrarySymbol) {
         let frame = symbol.frame();
         let carried = Carried::from(frame);
-        let mut body: Option<Bounds> = None;
-        let mut pins: Option<Bounds> = None;
-        for unit in library.units_for(symbol.unit, symbol.body_style) {
-            for graphic in &unit.graphics {
-                self.graphic(graphic, &carried, SchematicLayer::Device, Some(&mut body));
-            }
-            for text in &unit.texts {
-                if !text.hidden {
-                    let (centre, angle) = placed_text_centre(&frame, text);
-                    let placement = placement(&text.font, Justify::default(), centre, angle);
-                    self.text(SchematicLayer::Device, &text.text, &placement);
+        // A do-not-populate cross is sized by the body and the pins, which
+        // an item built on its own (a rebuild) has not drawn to measure.
+        let (body, pins) = if symbol.dnp {
+            self.symbol_extent(symbol, library, &frame)
+        } else {
+            (None, None)
+        };
+        let units = library
+            .units
+            .iter()
+            .enumerate()
+            .filter(|(_, unit)| unit.applies_to(symbol.unit, symbol.body_style));
+        for (unit_index, unit) in units {
+            self.item(None, |layers| {
+                for graphic in &unit.graphics {
+                    layers.graphic(graphic, &carried, SchematicLayer::Device, None);
                 }
-            }
-            for pin in &unit.pins {
-                if !pin.hidden {
-                    self.pin(pin, library, &frame, &mut pins);
+                for text in &unit.texts {
+                    if !text.hidden {
+                        let (centre, angle) = placed_text_centre(&frame, text);
+                        let placement = placement(&text.font, Justify::default(), centre, angle);
+                        layers.text(SchematicLayer::Device, &text.text, &placement);
+                    }
                 }
+            });
+            for (pin_index, pin) in unit.pins.iter().enumerate() {
+                if pin.hidden {
+                    continue;
+                }
+                // The pin's line is the item a net lights; its texts are
+                // another.
+                let key = SheetItem::Pin {
+                    symbol: index,
+                    unit: unit_index,
+                    pin: pin_index,
+                };
+                self.item(Some(key), |layers| {
+                    layers.pin_line(pin, &frame, &mut None);
+                });
+                let (pos, d, len) = pin_axis(pin, &frame);
+                self.item(None, |layers| layers.pin_texts(pin, library, pos, d, len));
             }
         }
-        for field in &symbol.fields {
-            if field.text.hidden {
-                continue;
+        self.item(None, |layers| {
+            for field in &symbol.fields {
+                if field.text.hidden {
+                    continue;
+                }
+                let layer = match field.name.as_str() {
+                    "Reference" => SchematicLayer::Reference,
+                    "Value" => SchematicLayer::Value,
+                    _ => SchematicLayer::Fields,
+                };
+                // The field's anchor is written on the sheet; KiCad keeps it
+                // in the library frame and places the text by the centre of
+                // its box carried through the frame, as for a body text.
+                let local = TextItem {
+                    at: frame.unapply(field.text.at),
+                    ..field.text.clone()
+                };
+                let (centre, angle) = placed_text_centre(&frame, &local);
+                let placement = placement(&field.text.font, Justify::default(), centre, angle);
+                layers.text(layer, &field.shown(), &placement);
             }
-            let layer = match field.name.as_str() {
-                "Reference" => SchematicLayer::Reference,
-                "Value" => SchematicLayer::Value,
-                _ => SchematicLayer::Fields,
-            };
-            // The field's anchor is written on the sheet; KiCad keeps it
-            // in the library frame and places the text by the centre of
-            // its box carried through the frame, as for a body text.
-            let local = TextItem {
-                at: frame.unapply(field.text.at),
-                ..field.text.clone()
-            };
-            let (centre, angle) = placed_text_centre(&frame, &local);
-            let placement = placement(&field.text.font, Justify::default(), centre, angle);
-            self.text(layer, &field.shown(), &placement);
-        }
+        });
         if symbol.dnp {
-            self.dnp_cross(body, pins);
+            self.item(None, |layers| layers.dnp_cross(body, pins));
         }
     }
 
-    /// A pin on the sheet: its line with the decoration its shape asks
-    /// for, and its name and number placed by its drawn orientation.
-    fn pin(
-        &mut self,
-        pin: &Pin,
+    /// The box around a symbol's body and the box around its pins, as
+    /// they are drawn: what a do-not-populate cross is sized by.
+    fn symbol_extent(
+        &self,
+        symbol: &Symbol,
         library: &LibrarySymbol,
         frame: &Frame,
-        bounds: &mut Option<Bounds>,
-    ) {
-        let (pos, d, len) = self.pin_line(pin, frame, bounds);
-        self.pin_texts(pin, library, pos, d, len);
+    ) -> (Option<Bounds>, Option<Bounds>) {
+        let carried = Carried::from(*frame);
+        // At the floor tolerance whatever the region, so a rebuild
+        // measures what the first build did.
+        let floor = Tessellator {
+            fine: None,
+            ..self.tessellator
+        };
+        let mut scratch = Self::new(&floor);
+        let mut body = None;
+        let mut pins = None;
+        for unit in library.units_for(symbol.unit, symbol.body_style) {
+            for graphic in &unit.graphics {
+                scratch.graphic(graphic, &carried, SchematicLayer::Device, Some(&mut body));
+            }
+            for pin in unit.pins.iter().filter(|pin| !pin.hidden) {
+                scratch.pin_line(pin, frame, &mut pins);
+            }
+        }
+        (body, pins)
     }
 
     /// A pin's line and the decoration its shape asks for, without its
@@ -396,9 +615,11 @@ impl Layers {
         frame: &Frame,
         bounds: &mut Option<Bounds>,
     ) -> (Point, Point, f64) {
-        let (pos, end) = pin_ends(pin, frame);
-        let d = pin_direction(pin, frame);
-        let len = pin.length;
+        let (pos, d, len) = pin_axis(pin, frame);
+        let end = pin_ends(pin, frame).1;
+        for point in [pos, end] {
+            *bounds = Some(bounds.map_or(Bounds::of(point), |b| b.including(point)));
+        }
         let along = |from: Point, distance: f64| Point {
             x: from.x + d.x * distance,
             y: from.y + d.y * distance,
@@ -408,9 +629,6 @@ impl Layers {
             x: from.x + perp.x * distance,
             y: from.y + perp.y * distance,
         };
-        for point in [pos, end] {
-            *bounds = Some(bounds.map_or(Bounds::of(point), |b| b.including(point)));
-        }
         // KiCad's decoration sizes: half the number's height outside the
         // body, half the name's inside.
         let outer = pin.number_size.height / 2.0;
@@ -607,7 +825,19 @@ impl Layers {
 
     /// A sheet symbol: its border, its fields, and its pins as inverted
     /// hierarchical flags with the text inside the sheet.
-    fn sheet_symbol(&mut self, sheet: &SheetSymbol) {
+    fn sheet_symbol(&mut self, index: usize, sheet: &SheetSymbol) {
+        self.item(None, |layers| layers.sheet_border(sheet));
+        for (pin_index, pin) in sheet.pins.iter().enumerate() {
+            let key = SheetItem::SheetPin {
+                sheet: index,
+                pin: pin_index,
+            };
+            self.item(Some(key), |layers| layers.sheet_pin(pin));
+        }
+    }
+
+    /// A sheet symbol's border and fields.
+    fn sheet_border(&mut self, sheet: &SheetSymbol) {
         let corners = [
             sheet.at,
             Point {
@@ -638,9 +868,6 @@ impl Layers {
             let text = &field.text;
             let placement = placement(&text.font, text.justify, text.at, text.rotation);
             self.text(layer, &field.shown(), &placement);
-        }
-        for pin in &sheet.pins {
-            self.sheet_pin(pin);
         }
     }
 
@@ -676,56 +903,17 @@ impl Tessellator {
     /// can lay them over the dimmed sheet in each layer's own colour.
     #[must_use]
     pub fn sheet_net(&self, sheet: &Sheet, net: &SheetNet) -> Vec<(SchematicLayer, Mesh)> {
-        let mut layers = Layers::new(self);
-        for &item in &net.items {
-            match item {
-                SheetItem::Wire(index) => {
-                    if let Some(wire) = sheet.wires.get(index) {
-                        let width = default(wire.width, DEFAULT_WIRE_WIDTH);
-                        layers
-                            .on(SchematicLayer::Wire)
-                            .stroke(&wire.points, width, false);
-                    }
-                }
-                SheetItem::Junction(index) => {
-                    if let Some(junction) = sheet.junctions.get(index) {
-                        let diameter = default(junction.diameter, DEFAULT_JUNCTION_DIAMETER);
-                        let dot = circle(junction.at, diameter / 2.0, &layers.curves);
-                        layers.on(SchematicLayer::Junction).fill(&[dot], &[]);
-                    }
-                }
-                SheetItem::Label(index) => {
-                    if let Some(label) = sheet.labels.get(index) {
-                        layers.label(label);
-                    }
-                }
-                SheetItem::Pin { symbol, unit, pin } => {
-                    if let Some((placed, pin)) = symbol_pin_of(sheet, symbol, unit, pin)
-                        && !pin.hidden
-                    {
-                        layers.pin_line(pin, &placed.frame(), &mut None);
-                    }
-                }
-                SheetItem::SheetPin { sheet: index, pin } => {
-                    if let Some(pin) = sheet
-                        .sheet_symbols
-                        .get(index)
-                        .and_then(|symbol| symbol.pins.get(pin))
-                    {
-                        layers.sheet_pin(pin);
-                    }
-                }
-            }
-        }
-        layers.finish()
+        self.sheet_units(sheet).net(net)
     }
 }
 
-/// The placed symbol and the library pin a pin item names.
-fn symbol_pin_of(sheet: &Sheet, symbol: usize, unit: usize, pin: usize) -> Option<(&Symbol, &Pin)> {
-    let placed = sheet.symbols.get(symbol)?;
-    let library = sheet.library_symbol(placed)?;
-    Some((placed, library.units.get(unit)?.pins.get(pin)?))
+/// Where a pin starts, the unit direction it extends in, and how far.
+fn pin_axis(pin: &Pin, frame: &Frame) -> (Point, Point, f64) {
+    (
+        pin_ends(pin, frame).0,
+        pin_direction(pin, frame),
+        pin.length,
+    )
 }
 
 /// Where a pin starts (its connection point) and ends (at the body) on

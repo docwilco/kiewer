@@ -1424,6 +1424,11 @@ impl<'p> MeshBuilder<'p> {
         }
     }
 
+    /// The tolerance lyon rounds a stroke's caps and joins to from now on.
+    pub(crate) fn set_round(&mut self, round: f64) {
+        self.round = round;
+    }
+
     fn with_prior(mut self, prior: Option<&'p [Unit]>) -> Self {
         self.prior = prior;
         self
@@ -1452,6 +1457,15 @@ impl<'p> MeshBuilder<'p> {
         self.curves.take_touched();
         draw(self);
         let curved = self.curves.take_touched();
+        let unit = self.close_unit(net, curved);
+        self.units.push(Some(unit));
+    }
+
+    /// Take what has been drawn since the last unit as one: `curved`
+    /// says whether the item holds a curve besides what this builder
+    /// flattened itself.
+    pub(crate) fn close_unit(&mut self, net: Option<NetId>, curved: bool) -> Unit {
+        let curved = self.curves.take_touched() || curved;
         let mesh = Mesh {
             positions: std::mem::take(&mut self.buffers.vertices),
             indices: std::mem::take(&mut self.buffers.indices),
@@ -1468,16 +1482,18 @@ impl<'p> MeshBuilder<'p> {
             },
         });
         let fine = curved
-            && region
+            && self
+                .curves
+                .fine
                 .zip(bounds)
-                .is_some_and(|(region, bounds)| touches(&region, &bounds));
-        self.units.push(Some(Unit {
+                .is_some_and(|(fine, bounds)| touches(&fine.region, &bounds));
+        Unit {
             mesh,
             bounds,
             curved,
             fine,
             net,
-        }));
+        }
     }
 
     /// The units built, in order.

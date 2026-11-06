@@ -22,14 +22,12 @@ use kicad_core::model::Point;
 use kicad_core::schematic::connect::{Connectivity, NetPin, SheetItem, SheetNetId, net_pins};
 use kicad_core::schematic::hit::{SheetHit, SheetIndex, find_symbol, symbol_bounds};
 use kicad_core::schematic::model::Sheet;
-use kicad_core::tessellate::Tessellator;
 use kicad_core::tessellate::schematic::SchematicLayer;
 
 use crate::camera::Camera;
 use crate::highlight::{self, Ramp, Tail};
 use crate::pick::{OnNet, Pick};
 use crate::render::{Draw, Rgb, Splice, next_group};
-use crate::scene::TOLERANCE;
 use crate::schematic::{SheetScene, palette};
 
 impl OnNet for SheetHit {
@@ -108,6 +106,17 @@ impl SheetHighlight {
         self.tail.invalidate();
     }
 
+    /// Build `scene` again over `fine` (`SheetScene::refine`) from the
+    /// sheet this holds. The lit nets' geometry is taken from the new
+    /// meshes the next time [`SheetHighlight::geometry`] is called.
+    pub fn refine(&mut self, scene: &mut SheetScene, fine: Option<(f64, Bounds)>) -> bool {
+        let changed = scene.refine(&self.sheet, fine);
+        if changed {
+            self.tail.forget();
+        }
+        changed
+    }
+
     /// The name of net `id`; empty for one the sheet lacks.
     #[must_use]
     pub fn net_name(&self, id: SheetNetId) -> &str {
@@ -174,11 +183,11 @@ impl SheetHighlight {
     pub fn geometry(&mut self, scene: &SheetScene) -> Option<Splice> {
         let nets: Vec<SheetNetId> = self.pick.lit().iter().map(|lit| lit.net).collect();
         for &net in &nets {
-            let (sheet, connectivity) = (&self.sheet, &self.connectivity);
+            let connectivity = &self.connectivity;
             self.tail.cache(net, || {
-                connectivity.net(net).map_or_else(Vec::new, |net| {
-                    Tessellator::new(TOLERANCE).sheet_net(sheet, net)
-                })
+                connectivity
+                    .net(net)
+                    .map_or_else(Vec::new, |net| scene.units.net(net))
             });
         }
         self.tail.sync(

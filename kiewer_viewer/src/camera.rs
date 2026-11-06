@@ -25,9 +25,11 @@ pub const FIT_MARGIN: f64 = 0.05;
 
 /// The scale's range in device pixels per millimetre: far enough out to
 /// see any board on any screen, far enough in for the 1000x the tracer
-/// asks for and more.
+/// asks for and more. The top is 10 nanometres a pixel, where a position
+/// in f32 still holds (#51, ADR 0006).
 const MIN_SCALE: f64 = 1e-3;
-const MAX_SCALE: f64 = 1e7;
+/// The scale the camera stops at, in device pixels per millimetre.
+pub const MAX_SCALE: f64 = 1e5;
 
 /// A view of the board: the world point at the viewport's centre, the
 /// scale in device pixels per millimetre, the viewport's size in device
@@ -114,6 +116,13 @@ impl Camera {
             x: self.center.x + self.x_sign() * (screen.x - self.viewport.width / 2.0) / self.scale,
             y: self.center.y + (screen.y - self.viewport.height / 2.0) / self.scale,
         }
+    }
+
+    /// The box of world millimetres the viewport shows.
+    #[must_use]
+    pub fn world_bounds(&self) -> Bounds {
+        let corner = |x, y| self.screen_to_world(Point { x, y });
+        Bounds::of(corner(0.0, 0.0)).including(corner(self.viewport.width, self.viewport.height))
     }
 
     /// Where a world point lands on the screen.
@@ -461,6 +470,7 @@ mod tests {
             camera.wheel(at(10.0, 10.0), -1000.0);
         }
         assert!(camera.scale() <= MAX_SCALE && camera.scale().is_finite());
+        assert!((camera.scale() - 1e5).abs() < 1e-6, "{}", camera.scale());
         for _ in 0..400 {
             camera.wheel(at(10.0, 10.0), 1000.0);
         }

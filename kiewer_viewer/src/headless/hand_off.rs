@@ -410,6 +410,7 @@ mod tests {
             views: Vec::new(),
             labels: crate::labels::LabelBatch::default(),
             unfilled_zones: 0,
+            parts: Vec::new(),
         };
         let page = page(&board(), &[5], VIEW_DENSITY);
         let tile = &page.tiles[0];

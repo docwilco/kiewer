@@ -10,7 +10,7 @@ use kicad_core::geometry::Bounds;
 use kicad_core::model::Point;
 use kicad_core::schematic::model::Sheet;
 use kicad_core::tessellate::Tessellator;
-use kicad_core::tessellate::schematic::SchematicLayer;
+use kicad_core::tessellate::schematic::{SchematicLayer, SheetUnits};
 
 use crate::render::{Draw, Rgb, Vertex};
 use crate::scene::TOLERANCE;
@@ -71,15 +71,64 @@ pub struct SheetScene {
     /// One draw per layer, bottom first, coloured for the target format
     /// the sheet was built for.
     pub draws: Vec<Draw>,
+    /// Every item's mesh, kept beside the stitched buffers: a refined
+    /// region ([`SheetScene::refine`]) builds again only the curved ones
+    /// it reaches, and the highlight takes a net's meshes from here.
+    pub(crate) units: SheetUnits,
+    format: wgpu::TextureFormat,
+}
+
+impl SheetScene {
+    /// Lay every layer's units end to end in the one vertex buffer and
+    /// the one index buffer, a draw for each layer that has something on
+    /// it.
+    fn stitch(&mut self) {
+        self.vertices.clear();
+        self.indices.clear();
+        self.draws.clear();
+        for (group, (layer, mesh)) in (0..).zip(self.units.layers()) {
+            let base = u32::try_from(self.vertices.len()).unwrap_or(u32::MAX);
+            let start = u32::try_from(self.indices.len()).unwrap_or(u32::MAX);
+            self.vertices
+                .extend(mesh.positions.iter().map(|position| Vertex {
+                    position: relative(*position, self.origin),
+                }));
+            self.indices
+                .extend(mesh.indices.iter().map(|index| index + base));
+            let end = u32::try_from(self.indices.len()).unwrap_or(u32::MAX);
+            self.draws.push(Draw {
+                range: start..end,
+                color: palette::of(layer).for_format(self.format),
+                group,
+            });
+        }
+    }
+
+    /// Build again, from `sheet`, every curved item `fine` reaches: the
+    /// tolerance and the region (millimetres) the curves inside it are
+    /// flattened to, or `None` for the floor everywhere. True when the
+    /// buffers changed.
+    pub fn refine(&mut self, sheet: &Sheet, fine: Option<(f64, Bounds)>) -> bool {
+        let base = Tessellator::new(TOLERANCE);
+        let tessellator = match fine {
+            Some((tolerance, region)) => base.refined(tolerance, region),
+            None => base,
+        };
+        let changed = tessellator.refine_sheet(sheet, &mut self.units);
+        if changed {
+            self.stitch();
+        }
+        changed
+    }
 }
 
 /// Every layer of `sheet`, coloured for a target of `format`; `None` for
 /// a sheet with nothing drawn on it.
 #[must_use]
 pub fn build(sheet: &Sheet, format: wgpu::TextureFormat) -> Option<SheetScene> {
-    let tessellator = Tessellator::new(TOLERANCE);
-    let layers = tessellator.sheet(sheet);
-    let drawn = layers
+    let units = Tessellator::new(TOLERANCE).sheet_units(sheet);
+    let drawn = units
+        .layers()
         .iter()
         .filter_map(|(_, mesh)| mesh.bounds())
         .reduce(Bounds::union)?;
@@ -91,30 +140,16 @@ pub fn build(sheet: &Sheet, format: wgpu::TextureFormat) -> Option<SheetScene> {
         },
     };
     let bounds = paper.union(drawn);
-    let origin = bounds.center();
     let mut out = SheetScene {
-        origin,
+        origin: bounds.center(),
         bounds,
         vertices: Vec::new(),
         indices: Vec::new(),
         draws: Vec::new(),
+        units,
+        format,
     };
-    for (group, (layer, mesh)) in (0..).zip(&layers) {
-        let base = u32::try_from(out.vertices.len()).unwrap_or(u32::MAX);
-        let start = u32::try_from(out.indices.len()).unwrap_or(u32::MAX);
-        out.vertices
-            .extend(mesh.positions.iter().map(|position| Vertex {
-                position: relative(*position, origin),
-            }));
-        out.indices
-            .extend(mesh.indices.iter().map(|index| index + base));
-        let end = u32::try_from(out.indices.len()).unwrap_or(u32::MAX);
-        out.draws.push(Draw {
-            range: start..end,
-            color: palette::of(*layer).for_format(format),
-            group,
-        });
-    }
+    out.stitch();
     Some(out)
 }
 
@@ -209,6 +244,38 @@ mod tests {
         )]
         let drawn = sheet.draws.iter().any(|d| d.color == color);
         assert!(drawn);
+    }
+
+    #[test]
+    fn a_region_builds_the_sheets_curves_finer_and_leaving_it_restores_the_sheet() {
+        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let source = hand_off();
+        let junction = source.junctions.first().expect("a junction").at;
+        let region = Bounds {
+            min: Point {
+                x: junction.x - 5.0,
+                y: junction.y - 5.0,
+            },
+            max: Point {
+                x: junction.x + 5.0,
+                y: junction.y + 5.0,
+            },
+        };
+        let floor = build(source, format).expect("a sheet with content");
+        let mut sheet = floor.clone();
+        assert!(!sheet.refine(source, None), "no region, nothing to do");
+        assert!(sheet.refine(source, Some((0.5 / 1024.0, region))));
+        assert!(sheet.vertices.len() > floor.vertices.len());
+        // The draws still tile the index buffer, a draw per layer as before.
+        assert_eq!(sheet.draws.len(), floor.draws.len());
+        let mut next = 0;
+        for draw in &sheet.draws {
+            assert_eq!(draw.range.start, next);
+            next = draw.range.end;
+        }
+        assert_eq!(usize::try_from(next).expect("fits"), sheet.indices.len());
+        assert!(sheet.refine(source, None));
+        assert_eq!(sheet, floor);
     }
 
     #[test]

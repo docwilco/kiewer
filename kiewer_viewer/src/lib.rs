@@ -23,6 +23,7 @@ pub mod headless;
 pub mod highlight;
 pub mod labels;
 pub mod pick;
+pub mod refine;
 pub mod render;
 pub mod scene;
 pub mod schematic;

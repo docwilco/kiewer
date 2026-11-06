@@ -281,6 +281,10 @@ export async function start(canvas, load) {
       // A fade asks for its own next frame; otherwise frames are on
       // demand. A sheet never fades.
       if (viewer.fading()) schedule();
+      // A pan that stopped is due a finer build (ADR 0006) 250 ms after
+      // its last input, with nothing else to ask for a frame then.
+      const wait = viewer.refine_wait();
+      if (wait > 0) setTimeout(schedule, wait + 1);
     });
   }
   // The zoom relative to the fitted board or sheet, and the length one

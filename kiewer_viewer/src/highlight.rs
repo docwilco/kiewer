@@ -27,14 +27,14 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use kicad_core::geometry::Bounds;
-use kicad_core::hit::{Hit, Index, Item, net_only};
+use kicad_core::hit::{Hit, Index, Item};
 use kicad_core::model::{Board, NetId, Point};
-use kicad_core::tessellate::{Mesh, Tessellator};
+use kicad_core::tessellate::Mesh;
 
 use crate::camera::Camera;
 use crate::pick::{OnNet, Pick};
 use crate::render::{Draw, Rgb, Splice, Vertex, next_group};
-use crate::scene::{Paint, Scene, TOLERANCE};
+use crate::scene::{Paint, Scene};
 use crate::view::{Layer, ViewState};
 
 /// How far from the pointer, in device pixels, an item is still hit: a
@@ -191,6 +191,13 @@ impl<N: Copy + Ord, K: Clone> Tail<N, K> {
         self.held.clear();
     }
 
+    /// Neither the GPU nor this holds any of it: the meshes it was built
+    /// from changed.
+    pub fn forget(&mut self) {
+        self.held.clear();
+        self.meshes.clear();
+    }
+
     /// Where `net`'s meshes sit, once a sync gave them to the GPU.
     #[must_use]
     pub fn runs(&self, net: N) -> Option<&[(K, Range<u32>)]> {
@@ -302,6 +309,12 @@ impl Highlight {
         self.tail.invalidate();
     }
 
+    /// The scene's meshes changed (a region was refined): the lit nets'
+    /// geometry is taken from them again, and the GPU is given it again.
+    pub fn rebuilt(&mut self) {
+        self.tail.forget();
+    }
+
     /// What the hovered item is, for the tooltip: `LED6 pad 3: GND`,
     /// `via: GND`, `track: GND`, `zone: GND`; empty over nothing.
     #[must_use]
@@ -335,10 +348,10 @@ impl Highlight {
     /// What the GPU should take for the next frame to hold the lit
     /// nets' copper after `scene`'s geometry; `None` when what it holds
     /// is right.
-    pub fn geometry(&mut self, board: &Board, scene: &Scene) -> Option<Splice> {
+    pub fn geometry(&mut self, scene: &Scene) -> Option<Splice> {
         let nets: Vec<NetId> = self.pick.lit().iter().map(|lit| lit.net).collect();
         for &net in &nets {
-            self.tail.cache(net, || net_copper(board, scene, net));
+            self.tail.cache(net, || net_copper(scene, net));
         }
         self.tail.sync(
             &nets,
@@ -439,21 +452,17 @@ impl Highlight {
 }
 
 /// `net`'s copper on each of `scene`'s copper layers, zones and the rest
-/// apart; an empty mesh has no entry.
-fn net_copper(board: &Board, scene: &Scene, net: NetId) -> Vec<((Layer, Part), Mesh)> {
-    let copper = net_only(board, net);
-    let tessellator = Tessellator::new(TOLERANCE);
+/// apart, taken from the meshes the scene was stitched from, so a lit
+/// via has the chords of the scene's via under it; an empty mesh has no
+/// entry.
+fn net_copper(scene: &Scene, net: NetId) -> Vec<((Layer, Part), Mesh)> {
     let mut meshes = Vec::new();
     for name in &scene.stack.copper {
-        let Some(id) = board.layer_named(name) else {
-            continue;
-        };
-        for (part, mesh) in [
-            (Part::Zones, tessellator.zones(&copper, id)),
-            (Part::Rest, tessellator.copper_without_zones(&copper, id)),
-        ] {
+        let layer = Layer::Copper(name.clone());
+        for (part, paint) in [(Part::Zones, Paint::Zone), (Part::Rest, Paint::Layer)] {
+            let mesh = scene.net_mesh(&layer, paint, net);
             if !mesh.is_empty() {
-                meshes.push(((Layer::Copper(name.clone()), part), mesh));
+                meshes.push(((layer.clone(), part), mesh));
             }
         }
     }
@@ -622,17 +631,13 @@ mod tests {
         let state = ViewState::new(5);
         let mut highlight = Highlight::new(board);
         highlight.pick_mut().set_instant(true);
-        assert_eq!(
-            highlight.geometry(board, scene),
-            None,
-            "the scene alone is right"
-        );
+        assert_eq!(highlight.geometry(scene), None, "the scene alone is right");
         let plain = highlight.draws(scene, &state, format);
         assert_eq!(plain, scene.draw_list(&state, format));
         let (pad, _) = gnd_pad_and_vdd_via(board, &highlight);
         highlight.pick_mut().press(Gesture::Click, Some(pad));
         let splice = highlight
-            .geometry(board, scene)
+            .geometry(scene)
             .expect("the net's copper is appended");
         assert_eq!(
             usize::try_from(splice.keep_indices).expect("fits"),
@@ -643,7 +648,7 @@ mod tests {
         let total = usize::try_from(splice.keep_vertices).expect("fits") + splice.vertices.len();
         let max_index = splice.indices.iter().max().copied().unwrap_or(0);
         assert!(usize::try_from(max_index).expect("fits") < total);
-        assert_eq!(highlight.geometry(board, scene), None, "uploaded once");
+        assert_eq!(highlight.geometry(scene), None, "uploaded once");
         let draws = highlight.draws(scene, &state, format);
         // View 5 shows one copper layer, F.Cu. GND has the rest and zones
         // there: two draws after the scene's, in the copper colour, the
@@ -676,11 +681,11 @@ mod tests {
         // Clearing leaves the scene alone in the draws, and the GPU has
         // nothing more to take: the tail past the scene just goes unused.
         highlight.pick_mut().clear();
-        assert_eq!(highlight.geometry(board, scene), None);
+        assert_eq!(highlight.geometry(scene), None);
         assert_eq!(highlight.draws(scene, &state, format), plain);
         highlight.invalidate();
         assert_eq!(
-            highlight.geometry(board, scene),
+            highlight.geometry(scene),
             None,
             "nothing lit, nothing to give"
         );
@@ -695,7 +700,7 @@ mod tests {
         highlight.pick_mut().set_instant(true);
         let (pad, _) = gnd_pad_and_vdd_via(board, &highlight);
         highlight.pick_mut().hover(Some(pad));
-        highlight.geometry(board, scene);
+        highlight.geometry(scene);
         let draws = highlight.draws(scene, &state, format);
         let plain = scene.draw_list(&state, format);
         let dimmed = plain
@@ -721,7 +726,7 @@ mod tests {
             let probe = Highlight::new(board);
             let (gnd, vdd) = gnd_pad_and_vdd_via(board, &probe);
             let mut highlight = pinned(board, &[gnd, vdd]);
-            highlight.geometry(board, scene);
+            highlight.geometry(scene);
             highlight
         };
         let draws = highlight.draws(scene, &state, format);
@@ -766,7 +771,7 @@ mod tests {
             now += 16.0;
         }
         highlight.pick_mut().press(Gesture::Click, Some(vdd));
-        highlight.geometry(board, scene);
+        highlight.geometry(scene);
         let from = Ramp::BOARD.color(1).expect("slot 1").for_format(format);
         let to = crate::view::palette::COPPER.for_format(format);
         let first = net_draws(scene, &highlight.draws(scene, &state, format));
@@ -790,17 +795,13 @@ mod tests {
         let highlight = Highlight::new(board);
         let (gnd, vdd) = gnd_pad_and_vdd_via(board, &highlight);
         let mut highlight = pinned(board, &[gnd]);
-        let pinned = highlight.geometry(board, scene).expect("the pin");
+        let pinned = highlight.geometry(scene).expect("the pin");
         let after_pin = pinned.keep_indices + u32::try_from(pinned.indices.len()).expect("fits");
         highlight.pick_mut().hover(Some(vdd));
-        let splice = highlight.geometry(board, scene).expect("the preview");
+        let splice = highlight.geometry(scene).expect("the preview");
         assert_eq!(splice.keep_indices, after_pin);
         highlight.pick_mut().hover(None);
-        assert_eq!(
-            highlight.geometry(board, scene),
-            None,
-            "only a shorter tail"
-        );
+        assert_eq!(highlight.geometry(scene), None, "only a shorter tail");
     }
 
     #[test]

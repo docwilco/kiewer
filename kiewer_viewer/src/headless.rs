@@ -278,6 +278,7 @@ mod tests {
             stack,
             unfilled_zones: 0,
             labels: LabelBatch::default(),
+            parts: Vec::new(),
         }
     }
 
@@ -639,9 +640,7 @@ mod tests {
                 .pick_mut()
                 .press(Gesture::ModifiedClick, Some(hit));
         }
-        let splice = highlight
-            .geometry(&board, &scene)
-            .expect("the lit nets' copper");
+        let splice = highlight.geometry(&scene).expect("the lit nets' copper");
         let draws = highlight.draws(&scene, &ViewState::new(5), Offscreen::FORMAT);
         let Headless {
             device,

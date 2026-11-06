@@ -27,6 +27,7 @@ use crate::camera::{Camera, DOUBLE_CLICK, Size};
 use crate::error::{Error, Result};
 use crate::highlight::{self, Highlight, SLOP_PX};
 use crate::pick::Gesture;
+use crate::refine::Refiner;
 use crate::render::atlas_pipeline::Coverage;
 use crate::render::label_pipeline::LabelFrame;
 use crate::render::{
@@ -74,6 +75,16 @@ pub struct Viewer {
     /// The same over the sheet, with the sheet as parsed, when a
     /// schematic was loaded last (`crate::sheet_highlight`).
     sheet_highlight: Option<SheetHighlight>,
+    /// When the curves are built finer, and where (`crate::refine`).
+    refiner: Refiner,
+    /// A drag, wheel or pinch came since the last frame: the next one
+    /// stamps it with its time for the refiner's pan stop.
+    input_pending: bool,
+    /// The time of the last frame, for [`Viewer::refine_wait`].
+    last_frame: f64,
+    /// The board the scene was built from when it is not `board`: the
+    /// one with the system faces' texts left out (`rebuild_scene`).
+    scene_board: Option<Board>,
 }
 
 /// A face the page rasterises (docs/v1-scope.md, Fonts), as far as the
@@ -371,6 +382,10 @@ impl Viewer {
             system_faces: BTreeMap::new(),
             highlight: Highlight::default(),
             sheet_highlight: None,
+            refiner: Refiner::default(),
+            input_pending: false,
+            last_frame: 0.0,
+            scene_board: None,
         })
     }
 
@@ -454,6 +469,8 @@ impl Viewer {
         self.sheet_highlight = None;
         self.highlight = Highlight::new(&board);
         self.board = Some(board);
+        self.scene_board = None;
+        self.refiner.reset();
         self.mirror_for_view();
         Ok(())
     }
@@ -479,6 +496,7 @@ impl Viewer {
         self.board = None;
         self.highlight = Highlight::default();
         self.sheet_highlight = Some(SheetHighlight::new(parsed));
+        self.refiner.reset();
         self.camera.set_mirrored(false);
         self.camera.fit(sheet.bounds);
         self.fit_scale = self.camera.scale();
@@ -727,7 +745,7 @@ impl Viewer {
     /// the view shows in its draw order. `None` without a board.
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "pixels per millimetre is of order 1e-3 to 1e7, well within f32"
+        reason = "pixels per millimetre is of order 1e-3 to 1e5, well within f32"
     )]
     fn label_frame(&self) -> Option<LabelFrame> {
         let scene = self.scene.as_ref()?;
@@ -740,6 +758,48 @@ impl Viewer {
             layers: highlight::shown_copper(scene, &self.state),
             dim: self.highlight.pick().dim(),
         })
+    }
+
+    /// Build the curves finer, or coarser again, where the refiner says
+    /// (`crate::refine`): the scene or the sheet is stitched afresh from
+    /// the meshes kept from load, uploaded, and the lit nets' geometry
+    /// taken from them again.
+    fn refine(&mut self, now: f64) {
+        self.last_frame = now;
+        if std::mem::take(&mut self.input_pending) {
+            self.refiner.input(now);
+        }
+        let Some(plan) = self
+            .refiner
+            .check(self.camera.world_bounds(), self.camera.scale(), now)
+        else {
+            return;
+        };
+        if let (Some(sheet), Some(highlight)) = (&mut self.sheet, &mut self.sheet_highlight) {
+            if highlight.refine(sheet, plan.fine()) {
+                self.renderer
+                    .upload(&self.device, &sheet.vertices, &sheet.indices);
+            }
+            return;
+        }
+        let board = self.scene_board.as_ref().or(self.board.as_ref());
+        if let (Some(board), Some(scene)) = (board, &mut self.scene)
+            && scene.refine(board, plan.fine())
+        {
+            self.renderer
+                .upload(&self.device, &scene.vertices, &scene.indices);
+            self.highlight.rebuilt();
+        }
+    }
+
+    /// The milliseconds from the last frame until a stopped pan is due a
+    /// rebuild, when one is waiting for it; 0 when nothing waits. The
+    /// page asks for a frame then.
+    #[must_use]
+    pub fn refine_wait(&self) -> f64 {
+        self.refiner
+            .wait(&self.camera.world_bounds(), self.last_frame)
+            .unwrap_or(0.0)
     }
 
     /// Mirror the camera as the view in force asks.
@@ -768,27 +828,32 @@ impl Viewer {
 
     /// A wheel of `delta` pixels at the pointer: zooms about it.
     pub fn wheel(&mut self, x: f64, y: f64, delta: f64) {
+        self.input_pending = true;
         self.camera.wheel(Point { x, y }, delta);
     }
 
     /// Multiply the scale by `factor` about the pointer: a Safari pinch
     /// gesture's running scale.
     pub fn zoom_at(&mut self, x: f64, y: f64, factor: f64) {
+        self.input_pending = true;
         self.camera.zoom_at(Point { x, y }, factor);
     }
 
     /// A double click: one [`DOUBLE_CLICK`] zoom about the pointer.
     pub fn double_click(&mut self, x: f64, y: f64) {
+        self.input_pending = true;
         self.camera.zoom_at(Point { x, y }, DOUBLE_CLICK);
     }
 
     /// `steps` presses of plus (positive) or minus, at the view's centre.
     pub fn step(&mut self, steps: i32) {
+        self.input_pending = true;
         self.camera.step(steps);
     }
 
     /// What was under (`from_x`, `from_y`) is now under (`to_x`, `to_y`).
     pub fn pan(&mut self, from_x: f64, from_y: f64, to_x: f64, to_y: f64) {
+        self.input_pending = true;
         self.camera.pan(
             Point {
                 x: from_x,
@@ -815,6 +880,7 @@ impl Viewer {
         bx1: f64,
         by1: f64,
     ) {
+        self.input_pending = true;
         self.camera.pinch(
             Point { x: ax0, y: ay0 },
             Point { x: bx0, y: by0 },
@@ -844,6 +910,7 @@ impl Viewer {
     /// The surface refuses a frame for a reason that is not a resize: a
     /// validation failure in the configuration.
     pub fn render(&mut self, now: f64) -> core::result::Result<(), JsError> {
+        self.refine(now);
         match &mut self.sheet_highlight {
             Some(sheet) => sheet.pick_mut().advance(now),
             None => self.highlight.pick_mut().advance(now),
@@ -871,8 +938,8 @@ impl Viewer {
         // The lit nets' copper rides after the scene's own geometry; when
         // they changed since the last write, the buffers take the change
         // before the draws name the new ranges.
-        if let (Some(board), Some(scene)) = (&self.board, &self.scene)
-            && let Some(splice) = self.highlight.geometry(board, scene)
+        if let Some(scene) = &self.scene
+            && let Some(splice) = self.highlight.geometry(scene)
         {
             self.renderer.splice(&self.device, &self.queue, &splice);
         }
@@ -1249,6 +1316,8 @@ impl Viewer {
                 .upload(&self.device, &scene.vertices, &scene.indices);
             self.renderer.upload_labels(&self.device, &scene.labels);
             self.scene = Some(scene);
+            self.scene_board = Some(stroke);
+            self.refiner.reset();
             // The scene alone is on the GPU now; the next frame appends
             // the highlighted net's copper again.
             self.highlight.invalidate();

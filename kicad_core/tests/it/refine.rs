@@ -223,3 +223,31 @@ fn a_unit_is_tagged_with_its_net() {
     let copper = Tessellator::new(FLOOR).units(&board, Part::CopperRest(layer), None);
     assert!(copper.iter().flatten().all(|unit| unit.net.is_some()));
 }
+
+#[test]
+fn a_sheet_refines_over_a_region_and_comes_back_to_the_floor() {
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../viewer-drop/board/midi8knob.kicad_sch"
+    ))
+    .expect("the hand-off schematic is in the repo");
+    let sheet = kicad_core::parse_schematic(&source).expect("it parses");
+    let floor = Tessellator::new(FLOOR);
+    let mut units = floor.sheet_units(&sheet);
+    let at = sheet.junctions.first().expect("a junction").at;
+    let fine = floor.refined(0.5 / 1024.0, around(at.x, at.y, 5.0));
+    assert!(
+        fine.refine_sheet(&sheet, &mut units),
+        "the junction is curved"
+    );
+    assert_ne!(units.layers(), floor.sheet(&sheet));
+    assert!(
+        floor.refine_sheet(&sheet, &mut units),
+        "the fine units go back"
+    );
+    assert_eq!(units.layers(), floor.sheet(&sheet));
+    assert!(
+        !floor.refine_sheet(&sheet, &mut units),
+        "and nothing is left to do"
+    );
+}
