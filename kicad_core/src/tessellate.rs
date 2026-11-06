@@ -1106,20 +1106,7 @@ fn bezier_segments([p0, p1, p2, p3]: [Point; 4], tolerance: f64) -> usize {
 /// with no circle through its points gives straight edges start, mid,
 /// end, as [`Chain::flatten`] does.
 pub(crate) fn chain_points(chain: &Chain, curves: &Curves) -> Vec<Point> {
-    let mut points = Vec::with_capacity(chain.items().len());
-    for item in chain.items() {
-        match *item {
-            ChainItem::Point(point) => points.push(point),
-            ChainItem::Arc { start, mid, end } => {
-                if Arc::through(start, mid, end).is_some() {
-                    points.extend(arc_points(start, mid, end, curves));
-                } else {
-                    points.extend([start, mid, end]);
-                }
-            }
-        }
-    }
-    points
+    chain.flatten_with(|arc| arc_flattened(arc, curves))
 }
 
 /// The points of the arc from `start` through `mid` to `end`, or its two
@@ -1127,9 +1114,14 @@ pub(crate) fn chain_points(chain: &Chain, curves: &Curves) -> Vec<Point> {
 /// flattened to the finer tolerance, outside it to the floor's, one
 /// polyline with a vertex on the arc at every joint.
 pub(crate) fn arc_points(start: Point, mid: Point, end: Point, curves: &Curves) -> Vec<Point> {
-    let Some(arc) = Arc::through(start, mid, end) else {
-        return vec![start, end];
-    };
+    match Arc::through(start, mid, end) {
+        Some(arc) => arc_flattened(&arc, curves),
+        None => vec![start, end],
+    }
+}
+
+/// `arc` flattened as [`arc_points`] says.
+fn arc_flattened(arc: &Arc, curves: &Curves) -> Vec<Point> {
     let Some(fine) = curves.refine(&arc.bounds()) else {
         return arc.flatten(curves.tolerance);
     };
@@ -1616,13 +1608,14 @@ impl<'p> MeshBuilder<'p> {
     fn primitive_polygons(&self, pad: &Pad, shape: &Transform) -> Vec<Vec<Point>> {
         pad.primitives
             .iter()
-            .flat_map(|primitive| drawing_polygons(primitive, &self.curves))
-            .map(|polygon| polygon.into_iter().map(|p| shape.apply(p)).collect())
+            .flat_map(|primitive| drawing_polygons(&transformed(primitive, shape), &self.curves))
             .collect()
     }
 
-    /// A custom pad's primitive, in the pad's `shape` frame: a filled
-    /// shape joins `positives`, a stroked one `strokes`.
+    /// A custom pad's primitive, in the pad's `shape` frame, carried onto
+    /// the board before it is flattened, so a refined region (the board's)
+    /// is compared with the curve where it sits: a filled shape joins
+    /// `positives`, a stroked one `strokes`.
     fn primitive(
         &self,
         primitive: &Drawing,
@@ -1630,16 +1623,15 @@ impl<'p> MeshBuilder<'p> {
         positives: &mut Vec<Vec<Point>>,
         strokes: &mut Vec<(Vec<Point>, f64)>,
     ) {
-        let on_board = |points: Vec<Point>| points.into_iter().map(|p| shape.apply(p)).collect();
-        let (points, closed) = outline_points(primitive, &self.curves);
+        let (points, closed) = outline_points(&transformed(primitive, shape), &self.curves);
         if primitive.filled && closed {
-            positives.push(on_board(points));
+            positives.push(points);
         } else if primitive.filled {
             // A filled open shape (an arc, a line) is its fill of the
             // chord: nothing to fill, its stroke is what shows.
-            strokes.push((on_board(points), primitive.width));
+            strokes.push((points, primitive.width));
         } else if primitive.width > 0.0 {
-            let mut points = on_board(points);
+            let mut points = points;
             if closed && let Some(first) = points.first().copied() {
                 points.push(first);
             }

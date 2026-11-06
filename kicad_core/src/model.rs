@@ -213,12 +213,22 @@ impl Chain {
     /// end.
     #[must_use]
     pub fn flatten(&self, tolerance: f64) -> Vec<Point> {
+        self.flatten_with(|arc| arc.flatten(tolerance))
+    }
+
+    /// The chain as a polygon's points, each arc (one with a circle
+    /// through its points) flattened by `arc`, which gives its points
+    /// from start to end. The one walk over the chain: [`Chain::flatten`]
+    /// is this at one tolerance, and the tessellator's refined region
+    /// passes its own.
+    #[must_use]
+    pub fn flatten_with(&self, mut arc: impl FnMut(&Arc) -> Vec<Point>) -> Vec<Point> {
         let mut points = Vec::with_capacity(self.items.len());
         for item in &self.items {
             match *item {
                 ChainItem::Point(point) => points.push(point),
                 ChainItem::Arc { start, mid, end } => match Arc::through(start, mid, end) {
-                    Some(arc) => points.extend(arc.flatten(tolerance)),
+                    Some(through) => points.extend(arc(&through)),
                     None => points.extend([start, mid, end]),
                 },
             }

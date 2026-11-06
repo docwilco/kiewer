@@ -135,9 +135,11 @@ impl Refiner {
     /// What to build now, when anything is due: the camera shows `view`
     /// (world millimetres) at `scale` at the time `now`.
     pub fn check(&mut self, view: Bounds, scale: f64, now: f64) -> Option<Plan> {
-        let wanted = step_of(scale).max(FLOOR_STEP);
+        // The hysteresis reads the raw step: a step clamped to the floor
+        // first would never fall two below a step 5 that holds.
+        let wanted = step_of(scale);
         let stepped = if wanted > self.step || wanted + 2 <= self.step {
-            self.step = wanted;
+            self.step = wanted.max(FLOOR_STEP);
             true
         } else {
             false
@@ -279,6 +281,25 @@ mod tests {
         assert_eq!(plan.region, None);
         assert_eq!(refiner.check(view(0.0, 0.0, 4.0), 150.0, 5.0), None);
         assert!(!refiner.refining());
+    }
+
+    #[test]
+    fn step_5_coarsens_to_the_floor_two_steps_below_it() {
+        let mut refiner = Refiner::default();
+        refiner
+            .check(view(0.0, 0.0, 2.0), 300.0, 0.0)
+            .expect("step 5");
+        // Step 4 is one below: step 5's tolerance stays.
+        assert_eq!(refiner.check(view(0.0, 0.0, 2.0), 200.0, 1.0), None);
+        // Step 3 (64 px/mm) is two below: the floor, once.
+        let plan = refiner
+            .check(view(0.0, 0.0, 8.0), 50.0, 2.0)
+            .expect("the floor");
+        assert_eq!(plan.region, None);
+        assert!(!refiner.refining());
+        // Panning builds nothing more.
+        refiner.input(3.0);
+        assert_eq!(refiner.check(view(5.0, 0.0, 8.0), 50.0, 4.0), None);
     }
 
     #[test]

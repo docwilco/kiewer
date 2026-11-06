@@ -289,3 +289,38 @@ fn a_fill_piece_holding_an_arc_is_made_again_where_a_plain_one_is_not() {
     let truth = 100.0 + std::f64::consts::PI * 25.0 / 2.0;
     assert!((piece.mesh.area() - truth).abs() < (zones[1].mesh.area() - truth).abs());
 }
+
+/// A footprint at (100, 100) with a custom pad whose one primitive is a
+/// filled polygon with an arc, written in the pad's own frame around its origin.
+fn arc_primitive_board() -> Board {
+    board(
+        r#"(footprint "X" (layer "F.Cu") (at 100 100)
+             (pad "1" smd custom (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "GND")
+               (options (clearance outline) (anchor circle))
+               (primitives (gr_poly (pts (xy 0 0) (arc (start 1 0) (mid 1.5 0.5) (end 1 1)) (xy 0 1)) (width 0) (fill yes)))))"#,
+    )
+}
+
+fn pad_vertices(region: Option<Bounds>) -> usize {
+    let board = arc_primitive_board();
+    let layer = board.layer_named("F.Cu").expect("F.Cu");
+    let tessellator = match region {
+        Some(region) => Tessellator::new(FLOOR).refined(0.5 / 1024.0, region),
+        None => Tessellator::new(FLOOR),
+    };
+    tessellator
+        .units(&board, Part::CopperRest(layer), None)
+        .into_iter()
+        .flatten()
+        .map(|unit| unit.mesh.positions.len())
+        .sum()
+}
+
+#[test]
+fn a_custom_pads_polygon_primitive_with_an_arc_is_refined_where_the_pad_sits_on_the_board() {
+    let floor = pad_vertices(None);
+    // The pad is at (100, 100) on the board: a region there reaches it.
+    assert!(pad_vertices(Some(around(100.0, 100.0, 5.0))) > floor);
+    // A region around the pad-local origin, (0, 0) on the board, does not.
+    assert_eq!(pad_vertices(Some(around(0.0, 0.0, 5.0))), floor);
+}

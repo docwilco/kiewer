@@ -161,6 +161,13 @@ struct Gpu {
     fallback: Vec<String>,
 }
 
+/// The milliseconds one `Scene::refine` of `scene` takes.
+fn timed_refine(scene: &mut Scene, board: &Board, fine: Option<(f64, Bounds)>) -> f64 {
+    let start = performance_now();
+    scene.refine(board, fine);
+    performance_now() - start
+}
+
 /// The backing size for a page asking for `width` by `height` device
 /// pixels on `device` ([`cap_canvas`] at the device's limit), and whether
 /// the cap held it below the ask.
@@ -813,7 +820,9 @@ impl Viewer {
     /// browser test and for a person with a release build: the
     /// milliseconds of one whole-board build at the floor, and of the
     /// slowest region rebuild over a grid of placements at four scales
-    /// up to the camera's ceiling, each from the board as built at load.
+    /// up to the camera's ceiling, each from the board as built at load:
+    /// the first refinement, the coarsening back from it, and a rebuild
+    /// with the held step one finer than the scale asks for.
     /// Empty before a board.
     #[must_use]
     pub fn refine_timing(&self) -> Vec<f64> {
@@ -848,9 +857,31 @@ impl Viewer {
                         continue;
                     };
                     let mut scene = base.clone();
-                    let start = performance_now();
-                    scene.refine(board, plan.fine());
-                    worst = worst.max(performance_now() - start);
+                    worst = worst.max(timed_refine(&mut scene, board, plan.fine()));
+                    // The coarsening back, from the refined state.
+                    worst = worst.max(timed_refine(&mut scene.clone(), board, None));
+                    // The worst placement: the step held is one finer than
+                    // the scale asks for (zoomed out a step), and the view
+                    // has left the region built for it.
+                    let mut refiner = Refiner::default();
+                    let finer = Bounds {
+                        min: Point {
+                            x: at.x - width / scale / 8.0,
+                            y: at.y - height / scale / 8.0,
+                        },
+                        max: Point {
+                            x: at.x + width / scale / 8.0,
+                            y: at.y + height / scale / 8.0,
+                        },
+                    };
+                    let Some(held) = refiner.check(finer, scale * 4.0, 0.0) else {
+                        continue;
+                    };
+                    let mut scene = base.clone();
+                    scene.refine(board, held.fine());
+                    if let Some(plan) = refiner.check(view, scale, 1e9) {
+                        worst = worst.max(timed_refine(&mut scene, board, plan.fine()));
+                    }
                 }
             }
         }
