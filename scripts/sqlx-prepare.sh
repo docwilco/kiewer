@@ -90,9 +90,13 @@ flock 9
 # every target's source file of every workspace member, so a new test file
 # is in the list without a change here; an empty list means jq failed
 # inside the substitution, where set -e cannot see it, so it is refused
-# rather than run with nothing saved. One empty file per source takes its
-# mtime with `touch -r` and gives it back the same way, at full precision
-# and with no date string parsed. The restore is an EXIT trap, so a failed
+# rather than run with nothing saved. A copy of each source keeps its
+# bytes and its mtime (cp -p), and the mtime goes back with `touch -r`, at
+# full precision and with no date string parsed, only to a source whose
+# bytes are still the copy's: one edited or checked out while this ran
+# keeps its new mtime, or cargo would call its stale unit fresh. The
+# sources are the targets' roots, a handful of files. The restore is an
+# EXIT trap, so a failed
 # --check (the hook's normal red), an error below or an interrupt restores
 # too, and the script's exit status stays the prepare's: set -e is off
 # inside the trap, since under it one failed touch would end the restore
@@ -115,13 +119,20 @@ trap 'rm -rf "$saved_mtimes"' EXIT
 restore_mtimes() {
   local i
   set +e
-  for i in "${!sources[@]}"; do touch -c -r "$saved_mtimes/$i" "${sources[$i]}"; done
+  for i in "${!sources[@]}"; do
+    cmp -s "$saved_mtimes/$i" "${sources[$i]}" &&
+      touch -c -r "$saved_mtimes/$i" "${sources[$i]}"
+  done
   rm -rf "$saved_mtimes"
 }
-for i in "${!sources[@]}"; do touch -r "${sources[$i]}" "$saved_mtimes/$i"; done
+for i in "${!sources[@]}"; do cp -p "${sources[$i]}" "$saved_mtimes/$i"; done
 trap restore_mtimes EXIT
 
-sqlx database reset -y --source migrations
+# 9>&- on every command that starts others: a daemon one of them starts
+# (sccache's server, started by the rustc wrapper when none runs) would
+# otherwise inherit the lock and hold it past this script's exit, until its
+# own idle timeout, and the next prepare on this database would wait for it.
+sqlx database reset -y --source migrations 9>&-
 # The arguments after `--` go to the `cargo check` sqlx-cli runs, with
 # SQLX_OFFLINE=false and DATABASE_URL set for it: --workspace reaches
 # every crate whatever the default members are, and --all-targets would
@@ -136,8 +147,11 @@ sqlx database reset -y --source migrations
 # the browser stage's) then compiled again, with everything that links it.
 # In a directory of its own the check reruns it there, and the shared
 # target, under the restored mtimes, stays fresh. The price is a second set
-# of check artifacts for the dependencies, compiled once per target
-# directory (from sccache where it has them). A flag and not
-# CARGO_TARGET_DIR, which sccache would put in every compile's cache key.
+# of check artifacts for the dependencies, from sccache where it has them,
+# and more than once: the pre-commit hook's sweep removes what a commit
+# did not use, so a commit that skips the sqlx stage leaves this directory
+# swept, and the next one that runs it checks the dependencies again. A
+# flag and not CARGO_TARGET_DIR, which sccache would put in every
+# compile's cache key.
 cargo sqlx prepare --workspace "$@" -- --workspace --all-targets \
-  --target-dir "$target_dir/sqlx/check"
+  --target-dir "$target_dir/sqlx/check" 9>&-
