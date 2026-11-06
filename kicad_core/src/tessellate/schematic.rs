@@ -14,9 +14,9 @@
 
 use std::collections::BTreeMap;
 
-use super::{Mesh, MeshBuilder, Tessellator, bezier, circle};
+use super::{Curves, Mesh, MeshBuilder, Tessellator, arc_points, bezier, circle};
 use crate::font::{self, Placement, block_size};
-use crate::geometry::{Arc, Bounds, Transform};
+use crate::geometry::{Bounds, Transform};
 use crate::model::{Font, Horizontal, Justify, Point, Size, Vertical};
 use crate::schematic::connect::{SheetItem, SheetNet};
 use crate::schematic::model::{
@@ -99,7 +99,7 @@ impl Tessellator {
     /// (the [`SchematicLayer`] order).
     #[must_use]
     pub fn sheet(&self, sheet: &Sheet) -> Vec<(SchematicLayer, Mesh)> {
-        let mut layers = Layers::new(self.tolerance);
+        let mut layers = Layers::new(self);
         for symbol in &sheet.symbols {
             if let Some(library) = sheet.library_symbol(symbol) {
                 layers.symbol(symbol, library);
@@ -129,7 +129,7 @@ impl Tessellator {
         }
         for junction in &sheet.junctions {
             let diameter = default(junction.diameter, DEFAULT_JUNCTION_DIAMETER);
-            let dot = circle(junction.at, diameter / 2.0, self.tolerance);
+            let dot = circle(junction.at, diameter / 2.0, &layers.curves);
             layers.on(SchematicLayer::Junction).fill(&[dot], &[]);
         }
         for &at in &sheet.no_connects {
@@ -205,23 +205,25 @@ impl From<Frame> for Carried {
 /// One mesh builder per layer, filled in any order and handed out in
 /// draw order.
 struct Layers {
-    tolerance: f64,
-    builders: BTreeMap<SchematicLayer, MeshBuilder>,
+    tessellator: Tessellator,
+    curves: Curves,
+    builders: BTreeMap<SchematicLayer, MeshBuilder<'static>>,
 }
 
 impl Layers {
-    fn new(tolerance: f64) -> Self {
+    fn new(tessellator: &Tessellator) -> Self {
         Self {
-            tolerance,
+            tessellator: *tessellator,
+            curves: Curves::of(tessellator),
             builders: BTreeMap::new(),
         }
     }
 
-    fn on(&mut self, layer: SchematicLayer) -> &mut MeshBuilder {
-        let tolerance = self.tolerance;
+    fn on(&mut self, layer: SchematicLayer) -> &mut MeshBuilder<'static> {
+        let tessellator = self.tessellator;
         self.builders
             .entry(layer)
-            .or_insert_with(|| MeshBuilder::new(tolerance))
+            .or_insert_with(|| MeshBuilder::new(&tessellator))
     }
 
     /// The meshes in draw order: the map iterates its keys in the
@@ -287,20 +289,16 @@ impl Layers {
                 true,
             ),
             SymbolShape::Circle { center, radius } => {
-                (circle(f(center), *radius, self.tolerance), true)
+                (circle(f(center), *radius, &self.curves), true)
             }
-            SymbolShape::Arc { start, mid, end } => (
-                match Arc::through(f(start), f(mid), f(end)) {
-                    Some(arc) => arc.flatten(self.tolerance),
-                    None => vec![f(start), f(end)],
-                },
-                false,
-            ),
+            SymbolShape::Arc { start, mid, end } => {
+                (arc_points(f(start), f(mid), f(end), &self.curves), false)
+            }
             SymbolShape::Bezier { points } => {
                 let control: Vec<Point> = points.iter().map(f).collect();
                 // A symbol's curve of any other count draws as its points.
                 let curve = match <[Point; 4]>::try_from(control) {
-                    Ok(four) => bezier(four),
+                    Ok(four) => bezier(four, &self.curves),
                     Err(other) => other,
                 };
                 (curve, false)
@@ -421,11 +419,11 @@ impl Layers {
         } else {
             outer
         };
-        let tolerance = self.tolerance;
+        let curves = self.curves.clone();
         let builder = self.on(SchematicLayer::Pin);
         match pin.shape {
             PinShape::Inverted | PinShape::InvertedClock => {
-                let bubble = circle(along(end, -outer), outer, tolerance);
+                let bubble = circle(along(end, -outer), outer, &curves);
                 builder.stroke(&bubble, DEFAULT_LINE_WIDTH, true);
                 builder.stroke(&[pos, along(end, -2.0 * outer)], DEFAULT_LINE_WIDTH, false);
             }
@@ -678,7 +676,7 @@ impl Tessellator {
     /// can lay them over the dimmed sheet in each layer's own colour.
     #[must_use]
     pub fn sheet_net(&self, sheet: &Sheet, net: &SheetNet) -> Vec<(SchematicLayer, Mesh)> {
-        let mut layers = Layers::new(self.tolerance);
+        let mut layers = Layers::new(self);
         for &item in &net.items {
             match item {
                 SheetItem::Wire(index) => {
@@ -692,7 +690,7 @@ impl Tessellator {
                 SheetItem::Junction(index) => {
                     if let Some(junction) = sheet.junctions.get(index) {
                         let diameter = default(junction.diameter, DEFAULT_JUNCTION_DIAMETER);
-                        let dot = circle(junction.at, diameter / 2.0, self.tolerance);
+                        let dot = circle(junction.at, diameter / 2.0, &layers.curves);
                         layers.on(SchematicLayer::Junction).fill(&[dot], &[]);
                     }
                 }

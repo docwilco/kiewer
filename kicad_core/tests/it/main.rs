@@ -14,6 +14,7 @@ mod board;
 mod connect;
 mod deadline;
 mod malformed;
+mod refine;
 mod schematic;
 mod schematic_tessellate;
 mod sheet_hit;
