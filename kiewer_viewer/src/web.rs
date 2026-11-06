@@ -38,6 +38,13 @@ use crate::schematic::{self, SheetScene};
 use crate::sheet_highlight::SheetHighlight;
 use crate::view::{Layer, Side, View, ViewState, label_key, palette, parse_label_key};
 
+#[wasm_bindgen]
+extern "C" {
+    /// The page's clock, in milliseconds.
+    #[wasm_bindgen(js_namespace = performance, js_name = now)]
+    fn performance_now() -> f64;
+}
+
 /// The viewer over one canvas.
 #[wasm_bindgen]
 pub struct Viewer {
@@ -800,6 +807,54 @@ impl Viewer {
         self.refiner
             .wait(&self.camera.world_bounds(), self.last_frame)
             .unwrap_or(0.0)
+    }
+
+    /// What a region rebuild of the board costs (ADR 0006, #51), for the
+    /// browser test and for a person with a release build: the
+    /// milliseconds of one whole-board build at the floor, and of the
+    /// slowest region rebuild over a grid of placements at four scales
+    /// up to the camera's ceiling, each from the board as built at load.
+    /// Empty before a board.
+    #[must_use]
+    pub fn refine_timing(&self) -> Vec<f64> {
+        let Some(board) = self.scene_board.as_ref().or(self.board.as_ref()) else {
+            return Vec::new();
+        };
+        let start = performance_now();
+        let Some(base) = Scene::build(board) else {
+            return Vec::new();
+        };
+        let whole = performance_now() - start;
+        let (width, height) = (f64::from(self.config.width), f64::from(self.config.height));
+        let mut worst = 0.0_f64;
+        for scale in [300.0, 3_000.0, 10_000.0, crate::camera::MAX_SCALE] {
+            for x in 0..5 {
+                for y in 0..3 {
+                    let at = Point {
+                        x: base.bounds.min.x + base.bounds.width() * (f64::from(x) + 0.5) / 5.0,
+                        y: base.bounds.min.y + base.bounds.height() * (f64::from(y) + 0.5) / 3.0,
+                    };
+                    let view = Bounds {
+                        min: Point {
+                            x: at.x - width / scale / 2.0,
+                            y: at.y - height / scale / 2.0,
+                        },
+                        max: Point {
+                            x: at.x + width / scale / 2.0,
+                            y: at.y + height / scale / 2.0,
+                        },
+                    };
+                    let Some(plan) = Refiner::default().check(view, scale, 0.0) else {
+                        continue;
+                    };
+                    let mut scene = base.clone();
+                    let start = performance_now();
+                    scene.refine(board, plan.fine());
+                    worst = worst.max(performance_now() - start);
+                }
+            }
+        }
+        vec![whole, worst]
     }
 
     /// Mirror the camera as the view in force asks.

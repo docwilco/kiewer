@@ -1297,6 +1297,103 @@ async fn the_zones_slider_and_the_fragment_carry_the_zone_opacity() {
     session.close().await;
 }
 
+/// Keeps the board page's viewer where a case can reach it, when the page
+/// announces its board.
+const KEEP_VIEWER: &str = r#"
+window.addEventListener("kiewer-board", function (e) { window.kiewerViewer = e.detail.viewer; });
+"#;
+
+// The curves refined in a region (#51, ADR 0006): a region rebuild of the
+// hand-off board, worst placement at any scale up to the camera's ceiling,
+// is at most this fraction of a whole-board build at the floor, timed by
+// the viewer in the same run. The 33 ms of the budget is a release build
+// in Chromium on the dev machine, measured by hand and reported on the
+// issue; the stage's debug build under SwiftShader has only the ratio.
+const REBUILD_BUDGET: f64 = 0.25;
+
+#[tokio::test]
+async fn a_region_rebuild_of_the_hand_off_board_costs_a_quarter_of_a_whole_build_at_most() {
+    let Some(executable) = executable() else {
+        return;
+    };
+    let session = Session::new(executable).await;
+    session
+        .page
+        .evaluate_on_new_document(KEEP_VIEWER)
+        .await
+        .expect("the viewer keeper");
+    session.goto_at(Viewed::Board, "").await;
+    let loaded = session
+        .held_within_deadline("window.kiewerViewer !== undefined")
+        .await;
+    let shown = session.shown().await;
+    assert!(
+        loaded,
+        "no board within {DEADLINE:?}; the page shows {shown:?}"
+    );
+    let timing: Vec<f64> = session
+        .read("Array.from(window.kiewerViewer.refine_timing())")
+        .await;
+    let [whole, rebuild] = timing[..] else {
+        panic!("the timing is a whole build and a rebuild: {timing:?}");
+    };
+    eprintln!("region rebuild {rebuild:.1} ms, whole board {whole:.1} ms");
+    assert!(
+        rebuild <= REBUILD_BUDGET * whole,
+        "a region rebuild took {rebuild:.1} ms against {whole:.1} ms for the whole board"
+    );
+    session.close().await;
+}
+
+#[tokio::test]
+async fn zooming_in_to_the_ceiling_refines_without_a_panic_and_stops_at_1e5() {
+    let Some(executable) = executable() else {
+        return;
+    };
+    let session = Session::new(executable).await;
+    session
+        .page
+        .evaluate_on_new_document(KEEP_VIEWER)
+        .await
+        .expect("the viewer keeper");
+    session.viewport(800, 600, 1).await;
+    session.goto_at(Viewed::Board, "").await;
+    let loaded = session
+        .held_within_deadline("window.kiewerViewer !== undefined")
+        .await;
+    let shown = session.shown().await;
+    assert!(
+        loaded,
+        "no board within {DEADLINE:?}; the page shows {shown:?}"
+    );
+    // A doubling per 300 pixels of wheel, at the middle of the board:
+    // far past the ceiling, through every step that refines.
+    let scale: f64 = session
+        .read(
+            r#"(async () => {
+                const canvas = document.getElementById("board");
+                const box = canvas.getBoundingClientRect();
+                for (let i = 0; i < 40; i++) {
+                    canvas.dispatchEvent(new WheelEvent("wheel", {
+                        deltaY: -300, clientX: box.left + box.width / 2,
+                        clientY: box.top + box.height / 2, bubbles: true, cancelable: true,
+                    }));
+                    await new Promise((done) => requestAnimationFrame(done));
+                }
+                await new Promise((done) => setTimeout(done, 500));
+                return window.kiewerViewer.scale();
+            })()"#,
+        )
+        .await;
+    assert!(
+        (scale - 1e5).abs() < 1e-3,
+        "the camera stops at 1e5: {scale}"
+    );
+    let panic: String = session.read("window.kiewerPanic").await;
+    assert_eq!(panic, "", "no panic on the way in");
+    session.close().await;
+}
+
 // The upload page's zips (#83, ADR 0005): the page reads a zip's central
 // directory, checks it against the caps and the skip list, inflates only
 // the entries it keeps and sends them as files with their paths in the
