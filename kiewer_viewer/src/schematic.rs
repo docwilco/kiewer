@@ -9,11 +9,11 @@
 use kicad_core::geometry::Bounds;
 use kicad_core::model::Point;
 use kicad_core::schematic::model::Sheet;
-use kicad_core::tessellate::Tessellator;
-use kicad_core::tessellate::schematic::{SchematicLayer, SheetUnits};
+use kicad_core::tessellate::Fine;
+use kicad_core::tessellate::schematic::{SchematicLayer, SheetMeshes};
 
 use crate::render::{Draw, Rgb, Vertex};
-use crate::scene::TOLERANCE;
+use crate::scene::{append_relative, tessellator};
 
 /// KiCad's default schematic colour theme, the one the hand-off's PNG was
 /// plotted in.
@@ -74,27 +74,21 @@ pub struct SheetScene {
     /// Every item's mesh, kept beside the stitched buffers: a refined
     /// region ([`SheetScene::refine`]) builds again only the curved ones
     /// it reaches, and the highlight takes a net's meshes from here.
-    pub(crate) units: SheetUnits,
+    pub(crate) meshes: SheetMeshes,
     format: wgpu::TextureFormat,
 }
 
 impl SheetScene {
-    /// Lay every layer's units end to end in the one vertex buffer and
+    /// Lay every layer's item meshes end to end in the one vertex buffer and
     /// the one index buffer, a draw for each layer that has something on
     /// it.
     fn stitch(&mut self) {
         self.vertices.clear();
         self.indices.clear();
         self.draws.clear();
-        for (group, (layer, mesh)) in (0..).zip(self.units.layers()) {
-            let base = u32::try_from(self.vertices.len()).unwrap_or(u32::MAX);
+        for (group, (layer, mesh)) in (0..).zip(self.meshes.layers()) {
             let start = u32::try_from(self.indices.len()).unwrap_or(u32::MAX);
-            self.vertices
-                .extend(mesh.positions.iter().map(|position| Vertex {
-                    position: relative(*position, self.origin),
-                }));
-            self.indices
-                .extend(mesh.indices.iter().map(|index| index + base));
+            append_relative(&mut self.vertices, &mut self.indices, &mesh, self.origin);
             let end = u32::try_from(self.indices.len()).unwrap_or(u32::MAX);
             self.draws.push(Draw {
                 range: start..end,
@@ -108,13 +102,8 @@ impl SheetScene {
     /// tolerance and the region (millimetres) the curves inside it are
     /// flattened to, or `None` for the floor everywhere. True when the
     /// buffers changed.
-    pub fn refine(&mut self, sheet: &Sheet, fine: Option<(f64, Bounds)>) -> bool {
-        let base = Tessellator::new(TOLERANCE);
-        let tessellator = match fine {
-            Some((tolerance, region)) => base.refined(tolerance, region),
-            None => base,
-        };
-        let changed = tessellator.refine_sheet(sheet, &mut self.units);
+    pub fn refine(&mut self, sheet: &Sheet, fine: Option<Fine>) -> bool {
+        let changed = tessellator(fine).refine_sheet(sheet, &mut self.meshes);
         if changed {
             self.stitch();
         }
@@ -126,8 +115,8 @@ impl SheetScene {
 /// a sheet with nothing drawn on it.
 #[must_use]
 pub fn build(sheet: &Sheet, format: wgpu::TextureFormat) -> Option<SheetScene> {
-    let units = Tessellator::new(TOLERANCE).sheet_units(sheet);
-    let drawn = units
+    let meshes = tessellator(None).sheet_units(sheet);
+    let drawn = meshes
         .layers()
         .iter()
         .filter_map(|(_, mesh)| mesh.bounds())
@@ -146,24 +135,11 @@ pub fn build(sheet: &Sheet, format: wgpu::TextureFormat) -> Option<SheetScene> {
         vertices: Vec::new(),
         indices: Vec::new(),
         draws: Vec::new(),
-        units,
+        meshes,
         format,
     };
     out.stitch();
     Some(out)
-}
-
-/// `position` (millimetres, f32) relative to `origin`, the difference
-/// taken in f64; the highlight appends its geometry the same way.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "relative to the sheet's centre a position is under a metre, which f32 holds to a tenth of a micrometre"
-)]
-pub(crate) fn relative(position: [f32; 2], origin: Point) -> [f32; 2] {
-    [
-        (f64::from(position[0]) - origin.x) as f32,
-        (f64::from(position[1]) - origin.y) as f32,
-    ]
 }
 
 #[cfg(test)]
@@ -264,7 +240,13 @@ mod tests {
         let floor = build(source, format).expect("a sheet with content");
         let mut sheet = floor.clone();
         assert!(!sheet.refine(source, None), "no region, nothing to do");
-        assert!(sheet.refine(source, Some((0.5 / 1024.0, region))));
+        assert!(sheet.refine(
+            source,
+            Some(Fine {
+                tolerance: 0.5 / 1024.0,
+                region
+            })
+        ));
         assert!(sheet.vertices.len() > floor.vertices.len());
         // The draws still tile the index buffer, a draw per layer as before.
         assert_eq!(sheet.draws.len(), floor.draws.len());

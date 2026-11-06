@@ -15,7 +15,7 @@
 use super::connect::{Connectivity, SheetItem, SheetNetId};
 use super::model::{Sheet, Symbol, SymbolShape};
 use crate::geometry::Bounds;
-use crate::hit::{Shape, finite, grow, overlaps};
+use crate::hit::{Shape, finite, grow};
 use crate::model::Point;
 use crate::tessellate::schematic::{
     DEFAULT_JUNCTION_DIAMETER, DEFAULT_LINE_WIDTH, DEFAULT_WIRE_WIDTH, default, label_outline,
@@ -153,7 +153,7 @@ impl SheetIndex {
         let reach = grow(Bounds::of(point), tolerance);
         let mut best: Option<(SheetKind, SheetHit)> = None;
         for entry in &self.entries {
-            if !overlaps(entry.bounds, reach) {
+            if !entry.bounds.overlaps(&reach) {
                 continue;
             }
             let kind = entry.item.kind();
@@ -180,7 +180,7 @@ impl SheetIndex {
     pub fn sheet_symbol_at(&self, point: Point) -> Option<usize> {
         self.sheets
             .iter()
-            .position(|bounds| overlaps(*bounds, Bounds::of(point)))
+            .position(|bounds| bounds.overlaps(&Bounds::of(point)))
     }
 }
 

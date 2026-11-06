@@ -419,7 +419,7 @@ impl Index {
             let Some(entry) = self.entries.get(index) else {
                 continue;
             };
-            if !overlaps(entry.bounds, reach) {
+            if !entry.bounds.overlaps(&reach) {
                 continue;
             }
             let Some((depth, layer)) = layers
@@ -490,11 +490,6 @@ pub(crate) fn finite(bounds: Bounds) -> bool {
     [bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y]
         .iter()
         .all(|side| side.is_finite())
-}
-
-/// Whether two boxes share any point.
-pub(crate) fn overlaps(a: Bounds, b: Bounds) -> bool {
-    a.min.x <= b.max.x && b.min.x <= a.max.x && a.min.y <= b.max.y && b.min.y <= a.max.y
 }
 
 /// The polygons `pad` covers on the board, in its footprint's `frame`:

@@ -14,9 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{
-    Curves, Mesh, MeshBuilder, Tessellator, Unit as MeshUnit, arc_points, bezier, circle, touches,
-};
+use super::{Curves, ItemMesh, Mesh, MeshBuilder, Tessellator, arc_points, bezier, circle};
 use crate::font::{self, Placement, block_size};
 use crate::geometry::{Bounds, Transform};
 use crate::model::{Font, Horizontal, Justify, Point, Size, Vertical};
@@ -99,24 +97,24 @@ pub enum SchematicLayer {
 /// The mesh of one item of a sheet on one layer, kept so that a region of
 /// finer tessellation builds again only the curved items it reaches (#51).
 #[derive(Debug, Clone, PartialEq)]
-pub struct SheetUnit {
+pub struct SheetMesh {
     /// The item's place in the order the sheet draws them in.
     pub item: usize,
     /// The net item it is, for the highlight; `None` for one that is on
     /// no net, or drawn with others (a symbol's body, a pin's texts).
-    pub key: Option<SheetItem>,
+    pub net_item: Option<SheetItem>,
     /// The triangles.
-    pub unit: MeshUnit,
+    pub item_mesh: ItemMesh,
 }
 
-/// Every [`SheetUnit`] of a sheet, by layer in draw order and by item
+/// Every [`SheetMesh`] of a sheet, by layer in draw order and by item
 /// within a layer.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct SheetUnits {
-    layers: BTreeMap<SchematicLayer, Vec<SheetUnit>>,
+pub struct SheetMeshes {
+    layers: BTreeMap<SchematicLayer, Vec<SheetMesh>>,
 }
 
-impl SheetUnits {
+impl SheetMeshes {
     /// Every layer that has something on it as one mesh, in draw order.
     #[must_use]
     pub fn layers(&self) -> Vec<(SchematicLayer, Mesh)> {
@@ -125,7 +123,7 @@ impl SheetUnits {
             .map(|(layer, units)| {
                 let mut mesh = Mesh::default();
                 for unit in units {
-                    mesh.append(&unit.unit.mesh);
+                    mesh.append(&unit.item_mesh.mesh);
                 }
                 (*layer, mesh)
             })
@@ -137,10 +135,10 @@ impl SheetUnits {
     /// in the order the net lists the items.
     #[must_use]
     pub fn net(&self, net: &SheetNet) -> Vec<(SchematicLayer, Mesh)> {
-        let mut by_item: BTreeMap<SheetItem, Vec<(SchematicLayer, &SheetUnit)>> = BTreeMap::new();
+        let mut by_item: BTreeMap<SheetItem, Vec<(SchematicLayer, &SheetMesh)>> = BTreeMap::new();
         for (layer, units) in &self.layers {
             for unit in units {
-                if let Some(key) = unit.key {
+                if let Some(key) = unit.net_item {
                     by_item.entry(key).or_default().push((*layer, unit));
                 }
             }
@@ -148,7 +146,7 @@ impl SheetUnits {
         let mut out: BTreeMap<SchematicLayer, Mesh> = BTreeMap::new();
         for item in &net.items {
             for (layer, unit) in by_item.get(item).into_iter().flatten() {
-                out.entry(*layer).or_default().append(&unit.unit.mesh);
+                out.entry(*layer).or_default().append(&unit.item_mesh.mesh);
             }
         }
         out.into_iter()
@@ -167,7 +165,7 @@ impl Tessellator {
 
     /// Every item of `sheet` as the units it is drawn from.
     #[must_use]
-    pub fn sheet_units(&self, sheet: &Sheet) -> SheetUnits {
+    pub fn sheet_units(&self, sheet: &Sheet) -> SheetMeshes {
         let mut layers = Layers::new(self);
         layers.sheet(sheet);
         layers.into_units()
@@ -176,21 +174,15 @@ impl Tessellator {
     /// Build again, in `units`, every curved item this tessellator's
     /// region reaches and every item built fine before: the rest keep
     /// their meshes. True when anything changed.
-    pub fn refine_sheet(&self, sheet: &Sheet, units: &mut SheetUnits) -> bool {
-        let region = self.fine.map(|fine| fine.region);
+    pub fn refine_sheet(&self, sheet: &Sheet, units: &mut SheetMeshes) -> bool {
+        let curves = Curves::of(self);
         // The items to build, with the tolerance a stroke's caps take.
         let mut only: BTreeMap<usize, f64> = BTreeMap::new();
         for unit in units.layers.values().flatten() {
-            if !unit.unit.wants(region.as_ref()) {
+            if !unit.item_mesh.wants(self.fine) {
                 continue;
             }
-            let reached = region
-                .zip(unit.unit.bounds)
-                .is_some_and(|(region, bounds)| touches(&region, &bounds));
-            let round = match self.fine {
-                Some(fine) if reached => fine.tolerance,
-                _ => self.tolerance,
-            };
+            let round = curves.round_for(unit.item_mesh.bounds.as_ref());
             let entry = only.entry(unit.item).or_insert(round);
             *entry = entry.min(round);
         }
@@ -281,7 +273,7 @@ struct Layers {
     /// When building again: the items to build, by ordinal, with the
     /// tolerance for their caps. The others are not drawn at all.
     only: Option<BTreeMap<usize, f64>>,
-    units: Vec<(SchematicLayer, SheetUnit)>,
+    units: Vec<(SchematicLayer, SheetMesh)>,
 }
 
 impl Layers {
@@ -325,22 +317,22 @@ impl Layers {
         draw(self);
         let curved = self.curves.take_touched();
         for (layer, builder) in &mut self.builders {
-            let unit = builder.close_unit(None, curved);
+            let unit = builder.close_item(None, curved);
             if !unit.mesh.positions.is_empty() {
                 self.units.push((
                     *layer,
-                    SheetUnit {
+                    SheetMesh {
                         item: ordinal,
-                        key,
-                        unit,
+                        net_item: key,
+                        item_mesh: unit,
                     },
                 ));
             }
         }
     }
 
-    fn into_units(self) -> SheetUnits {
-        let mut units = SheetUnits::default();
+    fn into_units(self) -> SheetMeshes {
+        let mut units = SheetMeshes::default();
         for (layer, unit) in self.units {
             units.layers.entry(layer).or_default().push(unit);
         }
@@ -892,18 +884,6 @@ impl Layers {
         let outline = sheet_pin_flag(pin);
         self.on(SchematicLayer::SheetLabel)
             .stroke(&outline, pen, true);
-    }
-}
-
-impl Tessellator {
-    /// The geometry of one net of `sheet` (docs/v1-scope.md, Net
-    /// interaction), by layer in draw order: its wires, junction dots,
-    /// labels with their flags, pin lines and sheet pin flags, as
-    /// [`Tessellator::sheet`] draws them and nothing else, so a highlight
-    /// can lay them over the dimmed sheet in each layer's own colour.
-    #[must_use]
-    pub fn sheet_net(&self, sheet: &Sheet, net: &SheetNet) -> Vec<(SchematicLayer, Mesh)> {
-        self.sheet_units(sheet).net(net)
     }
 }
 

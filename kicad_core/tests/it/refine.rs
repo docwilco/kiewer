@@ -5,7 +5,7 @@
 use kicad_core::geometry::Bounds;
 use kicad_core::model::{Board, Point};
 use kicad_core::parse_board;
-use kicad_core::tessellate::{Mesh, Part, Tessellator, Unit};
+use kicad_core::tessellate::{ItemMesh, ItemSet, Mesh, Tessellator};
 use test_case::test_case;
 
 /// One micrometre, the floor.
@@ -41,7 +41,7 @@ fn around(x: f64, y: f64, half: f64) -> Bounds {
 
 fn drill_mesh(board: &Board, tessellator: &Tessellator) -> Mesh {
     let layer = board.layer_named("F.Cu").expect("F.Cu");
-    tessellator.holes(board, layer)
+    tessellator.mesh(board, ItemSet::Holes(layer))
 }
 
 // The drill is a disc of radius 0.2: a filled disc has one vertex per
@@ -135,7 +135,7 @@ fn curve_chords(fine: Option<f64>) -> usize {
         None => Tessellator::new(FLOOR),
     };
     // A stroke's vertices are its two sides' per chord and the caps.
-    tessellator.outline(&board).positions.len()
+    tessellator.mesh(&board, ItemSet::Outline).positions.len()
 }
 
 #[test]
@@ -166,13 +166,13 @@ fn a_rebuild_makes_again_only_the_curved_units_the_region_reaches() {
     let board = units_board();
     let layer = board.layer_named("F.Cu").expect("F.Cu");
     let floor = Tessellator::new(FLOOR);
-    let copper = floor.units(&board, Part::CopperRest(layer), None);
-    let copper: Vec<Unit> = copper.into_iter().map(|u| u.expect("built")).collect();
+    let copper = floor.item_meshes(&board, ItemSet::CopperRest(layer), None);
+    let copper: Vec<ItemMesh> = copper.into_iter().map(|u| u.expect("built")).collect();
     // Two vias and a track, all with a round part.
     assert_eq!(copper.len(), 3);
     assert!(copper.iter().all(|unit| unit.curved && !unit.fine));
     let refined = floor.refined(0.5 / 1024.0, around(10.0, 10.0, 10.0));
-    let again = refined.units(&board, Part::CopperRest(layer), Some(&copper));
+    let again = refined.item_meshes(&board, ItemSet::CopperRest(layer), Some(&copper));
     // The order is the board's: segments, then vias.
     assert!(again[0].is_some(), "the track in the region");
     assert!(again[1].is_some(), "the via in the region");
@@ -181,13 +181,13 @@ fn a_rebuild_makes_again_only_the_curved_units_the_region_reaches() {
     assert!(via.fine && via.curved);
     assert!(via.mesh.positions.len() > copper[1].mesh.positions.len());
     // The region leaves: the unit built fine is built again, at the floor.
-    let kept: Vec<Unit> = copper
+    let kept: Vec<ItemMesh> = copper
         .iter()
         .zip(&again)
         .map(|(old, new)| new.clone().unwrap_or_else(|| old.clone()))
         .collect();
     let away = floor.refined(0.5 / 1024.0, around(100.0, 100.0, 10.0));
-    let back = away.units(&board, Part::CopperRest(layer), Some(&kept));
+    let back = away.item_meshes(&board, ItemSet::CopperRest(layer), Some(&kept));
     assert_eq!(
         back[1].as_ref().map(|u| (u.fine, u.mesh.clone())),
         Some((false, copper[1].mesh.clone()))
@@ -200,8 +200,8 @@ fn a_zone_fill_of_plain_points_is_never_made_again() {
     let board = units_board();
     let layer = board.layer_named("F.Cu").expect("F.Cu");
     let floor = Tessellator::new(FLOOR);
-    let zones: Vec<Unit> = floor
-        .units(&board, Part::Zones(layer), None)
+    let zones: Vec<ItemMesh> = floor
+        .item_meshes(&board, ItemSet::Zones(layer), None)
         .into_iter()
         .map(|u| u.expect("built"))
         .collect();
@@ -210,7 +210,7 @@ fn a_zone_fill_of_plain_points_is_never_made_again() {
     let refined = floor.refined(0.5 / 1024.0, around(10.0, 10.0, 10.0));
     assert!(
         refined
-            .units(&board, Part::Zones(layer), Some(&zones))
+            .item_meshes(&board, ItemSet::Zones(layer), Some(&zones))
             .iter()
             .all(Option::is_none)
     );
@@ -220,7 +220,7 @@ fn a_zone_fill_of_plain_points_is_never_made_again() {
 fn a_unit_is_tagged_with_its_net() {
     let board = units_board();
     let layer = board.layer_named("F.Cu").expect("F.Cu");
-    let copper = Tessellator::new(FLOOR).units(&board, Part::CopperRest(layer), None);
+    let copper = Tessellator::new(FLOOR).item_meshes(&board, ItemSet::CopperRest(layer), None);
     assert!(copper.iter().flatten().all(|unit| unit.net.is_some()));
 }
 
@@ -270,8 +270,8 @@ fn a_fill_piece_holding_an_arc_is_made_again_where_a_plain_one_is_not() {
     let board = fills_board();
     let layer = board.layer_named("F.Cu").expect("F.Cu");
     let floor = Tessellator::new(FLOOR);
-    let zones: Vec<Unit> = floor
-        .units(&board, Part::Zones(layer), None)
+    let zones: Vec<ItemMesh> = floor
+        .item_meshes(&board, ItemSet::Zones(layer), None)
         .into_iter()
         .map(|unit| unit.expect("built"))
         .collect();
@@ -280,7 +280,7 @@ fn a_fill_piece_holding_an_arc_is_made_again_where_a_plain_one_is_not() {
     assert!(zones[1].curved, "a piece holding an arc");
     // A region over both.
     let refined = floor.refined(0.5 / 1024.0, around(20.0, 5.0, 30.0));
-    let again = refined.units(&board, Part::Zones(layer), Some(&zones));
+    let again = refined.item_meshes(&board, ItemSet::Zones(layer), Some(&zones));
     assert!(again[0].is_none());
     let piece = again[1].as_ref().expect("the arc's piece");
     assert!(piece.mesh.positions.len() > zones[1].mesh.positions.len());
@@ -309,7 +309,7 @@ fn pad_vertices(region: Option<Bounds>) -> usize {
         None => Tessellator::new(FLOOR),
     };
     tessellator
-        .units(&board, Part::CopperRest(layer), None)
+        .item_meshes(&board, ItemSet::CopperRest(layer), None)
         .into_iter()
         .flatten()
         .map(|unit| unit.mesh.positions.len())

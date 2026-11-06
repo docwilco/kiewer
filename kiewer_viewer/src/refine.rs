@@ -13,7 +13,7 @@
 //! the view's centre off the region's.
 
 use kicad_core::geometry::Bounds;
-use kicad_core::model::Point;
+use kicad_core::tessellate::Fine;
 
 use crate::scene::TOLERANCE;
 
@@ -52,22 +52,13 @@ pub fn tolerance_of(step: i32) -> f64 {
     (0.5 / 4.0_f64.powi(step)).min(TOLERANCE)
 }
 
-/// What to build: the tolerance inside `region`, or the floor everywhere
-/// when there is no region.
+/// What to build: the tolerance inside a region, or the floor everywhere
+/// when there is none.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Plan {
-    /// The tolerance inside the region, in millimetres.
-    pub tolerance: f64,
-    /// The region, or `None` for no refinement.
-    pub region: Option<Bounds>,
-}
-
-impl Plan {
-    /// What `Scene::refine` takes.
-    #[must_use]
-    pub fn fine(&self) -> Option<(f64, Bounds)> {
-        self.region.map(|region| (self.tolerance, region))
-    }
+    /// The finer tolerance and its region, or `None` for no refinement:
+    /// what `Scene::refine` takes.
+    pub fine: Option<Fine>,
 }
 
 /// The decision, kept between frames.
@@ -89,29 +80,6 @@ impl Default for Refiner {
             last_input: None,
         }
     }
-}
-
-/// `view` grown by its own size on every side.
-fn region_of(view: Bounds) -> Bounds {
-    let (width, height) = (view.width(), view.height());
-    Bounds {
-        min: Point {
-            x: view.min.x - width,
-            y: view.min.y - height,
-        },
-        max: Point {
-            x: view.max.x + width,
-            y: view.max.y + height,
-        },
-    }
-}
-
-/// Whether `inner` lies inside `outer`.
-fn within(inner: &Bounds, outer: &Bounds) -> bool {
-    inner.min.x >= outer.min.x
-        && inner.min.y >= outer.min.y
-        && inner.max.x <= outer.max.x
-        && inner.max.y <= outer.max.y
 }
 
 impl Refiner {
@@ -147,10 +115,7 @@ impl Refiner {
         if self.step == FLOOR_STEP {
             // The floor needs no region. Leaving a region for it is a
             // rebuild, once.
-            return (stepped && self.region.take().is_some()).then_some(Plan {
-                tolerance: TOLERANCE,
-                region: None,
-            });
+            return (stepped && self.region.take().is_some()).then_some(Plan { fine: None });
         }
         // A view that left the region is only worth a rebuild where the
         // floor would show: past 500 px/mm, where half a pixel is finer
@@ -160,14 +125,17 @@ impl Refiner {
         let shows = 0.5 / scale < TOLERANCE;
         let due = stepped
             || self.region.is_none_or(|region| {
-                (shows && !within(&view, &region)) || self.pan_stopped(&view, &region, now)
+                (shows && !region.contains_bounds(&view)) || self.pan_stopped(&view, &region, now)
             });
         due.then(|| {
-            let region = region_of(view);
+            // The view plus one view on every side.
+            let region = view.grown(view.width(), view.height());
             self.region = Some(region);
             Plan {
-                tolerance: tolerance_of(self.step),
-                region: Some(region),
+                fine: Some(Fine {
+                    tolerance: tolerance_of(self.step),
+                    region,
+                }),
             }
         })
     }
@@ -194,6 +162,7 @@ impl Refiner {
 
 #[cfg(test)]
 mod tests {
+    use kicad_core::model::Point;
     use test_case::test_case;
 
     use super::*;
@@ -248,10 +217,10 @@ mod tests {
         let plan = refiner
             .check(here, 300.0, 0.0)
             .expect("the first refinement");
-        assert!((plan.tolerance - 0.5 / 1024.0).abs() < 1e-15);
+        let fine = plan.fine.expect("a region");
+        assert!((fine.tolerance - 0.5 / 1024.0).abs() < 1e-15);
         // One view on every side: three views wide, centred on the view.
-        let region = plan.region.expect("a region");
-        assert_eq!(region, view(98.0, 98.0, 6.0));
+        assert_eq!(fine.region, view(98.0, 98.0, 6.0));
         // Zooming within the step builds nothing, in or out of the view.
         refiner.input(1.0);
         assert_eq!(refiner.check(view(100.5, 100.5, 1.0), 600.0, 1.0), None);
@@ -268,7 +237,8 @@ mod tests {
         let plan = refiner
             .check(view(0.0, 0.0, 0.5), 1500.0, 1.0)
             .expect("step 6");
-        assert!((plan.tolerance - 0.5 / 4096.0).abs() < 1e-15);
+        let fine = plan.fine.expect("step 6's region");
+        assert!((fine.tolerance - 0.5 / 4096.0).abs() < 1e-15);
         refiner.input(2.0);
         assert_eq!(refiner.check(view(0.0, 0.0, 0.5), 1500.0, 2.0), None);
         // One step out (step 5) keeps step 6's tolerance.
@@ -278,7 +248,7 @@ mod tests {
         let plan = refiner
             .check(view(0.0, 0.0, 4.0), 200.0, 4.0)
             .expect("the floor");
-        assert_eq!(plan.region, None);
+        assert_eq!(plan.fine, None);
         assert_eq!(refiner.check(view(0.0, 0.0, 4.0), 150.0, 5.0), None);
         assert!(!refiner.refining());
     }
@@ -295,7 +265,7 @@ mod tests {
         let plan = refiner
             .check(view(0.0, 0.0, 8.0), 50.0, 2.0)
             .expect("the floor");
-        assert_eq!(plan.region, None);
+        assert_eq!(plan.fine, None);
         assert!(!refiner.refining());
         // Panning builds nothing more.
         refiner.input(3.0);
@@ -329,7 +299,10 @@ mod tests {
         let plan = refiner
             .check(view(2.5, 0.0, 2.0), 1000.0, 2.0)
             .expect("left");
-        assert_eq!(plan.region, Some(view(0.5, -2.0, 6.0)));
+        assert_eq!(
+            plan.fine.map(|fine| fine.region),
+            Some(view(0.5, -2.0, 6.0))
+        );
     }
 
     #[test]
@@ -353,7 +326,10 @@ mod tests {
         let plan = refiner
             .check(view(1.0, 0.0, 2.0), 300.0, 160.0 + 250.0)
             .expect("the pan stopped");
-        assert_eq!(plan.region, Some(view(-1.0, -2.0, 6.0)));
+        assert_eq!(
+            plan.fine.map(|fine| fine.region),
+            Some(view(-1.0, -2.0, 6.0))
+        );
         // Centred now: nothing more.
         assert_eq!(refiner.check(view(1.0, 0.0, 2.0), 300.0, 1000.0), None);
     }

@@ -278,7 +278,7 @@ mod tests {
             stack,
             unfilled_zones: 0,
             labels: LabelBatch::default(),
-            parts: Vec::new(),
+            sets: Vec::new(),
         }
     }
 

@@ -138,6 +138,17 @@ _Avoid_: preset, layer set
 **Run**:
 A chain of connected, near-collinear track segments of one net on one layer. The unit a net label is placed on.
 
+**Item mesh**:
+The triangles of one board item (a track, a via, a pad, a graphic, a text, one zone fill piece), kept beside the scene's buffers with the box around them, whether the item holds a curve and whether it was built inside the refined region. A rebuild of the refined region builds again only the curved item meshes it reaches.
+_Avoid_: unit (a symbol's unit), part
+
+**Item set**:
+The item meshes one slice of a scene is built from, in a fixed order: the board fill, the outline, a layer's holes, its copper other than zones, its zones, its mask, its paste, its graphics or its text.
+_Avoid_: part, run (a chain of track segments)
+
+**Refined region**:
+The view plus one view on every side, inside which the viewer flattens curves finer than the floor tolerance of one micrometre. See ADR 0006.
+
 **Net label**:
 Text the viewer writes on a board item as it zooms in: a pad's number, or the net of a pad, a via, a run or a zone. Placed once when the board loads; the label gate decides when each shows.
 _Avoid_: label (a schematic's net name on a wire), annotation, overlay

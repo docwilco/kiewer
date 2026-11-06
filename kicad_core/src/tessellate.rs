@@ -170,9 +170,19 @@ pub struct Tessellator {
 
 /// A finer tolerance over a region of the board, in millimetres.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Fine {
-    tolerance: f64,
-    region: Bounds,
+pub struct Fine {
+    /// The tolerance inside the region.
+    pub tolerance: f64,
+    /// The region, in the file's frame.
+    pub region: Bounds,
+}
+
+impl Fine {
+    /// Whether the region reaches `bounds`.
+    #[must_use]
+    pub fn reaches(&self, bounds: &Bounds) -> bool {
+        self.region.overlaps(bounds)
+    }
 }
 
 /// How curves are flattened: to `tolerance`, and to the finer tolerance
@@ -180,7 +190,7 @@ pub(crate) struct Fine {
 /// the region's edge is one outline, fine on the inside and coarse on the
 /// outside, the points of both on the curve itself. `touched` notes that
 /// a curve was flattened, which is what marks an item curved
-/// ([`Unit::curved`]).
+/// ([`ItemMesh::curved`]).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Curves {
     pub(crate) tolerance: f64,
@@ -209,13 +219,28 @@ impl Curves {
     /// The fine setting when the region reaches `bounds`, and a note that
     /// a curve was flattened.
     fn refine(&self, bounds: &Bounds) -> Option<Fine> {
+        self.touch();
+        self.fine.filter(|fine| fine.reaches(bounds))
+    }
+
+    /// Note that a curve was flattened.
+    pub(crate) fn touch(&self) {
         self.touched.set(true);
-        self.fine.filter(|fine| touches(&fine.region, bounds))
     }
 
     /// Whether a curve was flattened since the last call.
-    fn take_touched(&self) -> bool {
+    pub(crate) fn take_touched(&self) -> bool {
         self.touched.replace(false)
+    }
+
+    /// The tolerance for an item whose mesh lies in `bounds`: the fine one
+    /// when the region reaches it, else the floor. It is what lyon rounds
+    /// the item's stroke caps and joins to.
+    pub(crate) fn round_for(&self, bounds: Option<&Bounds>) -> f64 {
+        match (self.fine, bounds) {
+            (Some(fine), Some(bounds)) if fine.reaches(bounds) => fine.tolerance,
+            _ => self.tolerance,
+        }
     }
 
     /// The parameters in 0 to 1 at which a curve is sampled: the ends of
@@ -235,76 +260,93 @@ impl Curves {
         loop {
             let from_coarse = (next_coarse <= last(coarse)).then(|| at(next_coarse, coarse));
             let from_fine = (next_fine <= last(fine)).then(|| at(next_fine, fine));
-            match (from_coarse, from_fine) {
-                (None, None) => break,
-                (Some(param), Some(other)) if param <= other => {
-                    if !inside(param) {
-                        out.push(param);
-                    }
-                    next_coarse += 1;
+            if let Some(param) = from_coarse
+                && from_fine.is_none_or(|other| param <= other)
+            {
+                if !inside(param) {
+                    out.push(param);
                 }
-                (Some(param), None) => {
-                    if !inside(param) {
-                        out.push(param);
-                    }
-                    next_coarse += 1;
+                next_coarse += 1;
+            } else if let Some(param) = from_fine {
+                if inside(param) {
+                    out.push(param);
                 }
-                (_, Some(param)) => {
-                    if inside(param) {
-                        out.push(param);
-                    }
-                    next_fine += 1;
-                }
+                next_fine += 1;
+            } else {
+                break;
             }
         }
         out
     }
 }
 
-/// Whether two boxes share a point.
-pub(crate) fn touches(a: &Bounds, b: &Bounds) -> bool {
-    a.min.x <= b.max.x && a.max.x >= b.min.x && a.min.y <= b.max.y && a.max.y >= b.min.y
-}
-
-/// Whether `bounds` holds `point`.
-fn holds(bounds: &Bounds, point: Point) -> bool {
-    (bounds.min.x..=bounds.max.x).contains(&point.x)
-        && (bounds.min.y..=bounds.max.y).contains(&point.y)
-}
-
-/// The part of a board that one run of the scene is built from: what a
-/// layer's slice of triangles holds. A part is a list of [`Unit`]s, one
-/// per item (or per zone fill piece), in a fixed order.
+/// A set of the board's items: what one slice of a scene is built from,
+/// a list of [`ItemMesh`]es, one per item (or per zone fill piece),
+/// in a fixed order. [`Tessellator::mesh`] joins a set into one mesh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Part {
-    /// The board itself, the fill of the outline's loops.
+pub enum ItemSet {
+    /// The board itself: the `Edge.Cuts` strokes chained into loops
+    /// ([`JOIN_TOLERANCE`]), the largest filled and the others cut out of
+    /// it. Empty for a board whose outline does not close.
     BoardFill,
-    /// The strokes of `Edge.Cuts`.
+    /// The board outline: every `Edge.Cuts` graphic, the board's and the
+    /// footprints' (a connector's slot, in the footprint's frame), stroked
+    /// at its width (at least 0.05 mm, KiCad's default edge width) with
+    /// round ends.
     Outline,
-    /// The copper rim of every plated hole.
+    /// The copper rim of every plated hole: a band [`HOLE_RIM`] wide
+    /// around the drill of every via and every through-hole pad. An
+    /// unplated hole has none.
     Rims,
-    /// Every hole drilled through the board.
+    /// Every hole drilled through the board, whatever layers it reaches:
+    /// vias of every kind and every drilled pad, plated or not, as filled
+    /// discs and slots. Drawn in the page colour over the whole stack,
+    /// under the rims.
     AllHoles,
-    /// The holes drilled through a layer.
+    /// The holes drilled through a layer: every via that reaches it and
+    /// every drilled pad on it, plated or not, as filled discs and slots.
+    /// Drawn after the copper in the page colour: a track or a zone that
+    /// runs into a hole is copper right up to the drill, and the drill is
+    /// still open.
     Holes(LayerId),
-    /// The copper of a layer other than its zones.
+    /// The copper of a layer other than its zones: tracks and track arcs
+    /// with round ends, vias and pads that reach the layer as rings around
+    /// their holes. An unplated hole whose pad is no bigger than the hole
+    /// is no copper.
     CopperRest(LayerId),
-    /// The zones of a layer, a unit per fill piece.
+    /// The zones of a layer, an item per fill piece: the fills KiCad
+    /// stored, and the outline of a zone without a stored fill on the
+    /// layer, hatched ([`HATCH_PITCH`]).
     Zones(LayerId),
-    /// The solder mask overlay of a mask layer.
+    /// The solder mask overlay of a mask layer: the board less every
+    /// opening on the layer, as one polygon difference. An opening is a
+    /// pad that reaches the layer, grown by its mask clearance
+    /// ([`Board::pad_clearances`]; its hole grown the same, so an unplated
+    /// hole opens the mask), a via that is not tented on the layer's side,
+    /// grown by its mask clearance ([`Board::via_mask_expansion`]), and any
+    /// graphic drawn on the layer. Empty for a board without a closed
+    /// outline.
     Mask(LayerId),
-    /// The solder paste of a paste layer.
+    /// The solder paste of a paste layer: every pad that reaches it, grown
+    /// (shrunk, as the clearance is normally negative) by its paste
+    /// clearance, the hole of a through-hole pad left open.
     Paste(LayerId),
-    /// The graphics of a layer.
+    /// The graphics on a layer, the board's and the footprints' (in their
+    /// frames): a filled closed shape as its fill, everything else as a
+    /// stroke of its width (at least 0.05 mm) with round ends.
     Graphics(LayerId),
-    /// The text of a layer.
+    /// The text on a layer in Newstroke: every visible board text and
+    /// footprint text (its variables resolved, placed in the footprint's
+    /// frame, kept upright when the footprint asks), stroked at its pen
+    /// width with round ends. A knockout text is its box with the glyphs
+    /// cut out.
     Text(LayerId),
 }
 
 /// The mesh of one item, kept so that a region of finer tessellation
 /// re-tessellates only the items that need it (#51, ADR 0006).
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Unit {
+pub struct ItemMesh {
     /// The triangles, at the floor tolerance or, inside a refined region,
     /// finer.
     pub mesh: Mesh,
@@ -322,35 +364,35 @@ pub struct Unit {
     pub net: Option<NetId>,
 }
 
-impl Unit {
-    /// Whether a rebuild with `region` changes this unit's mesh: it is
+impl ItemMesh {
+    /// Whether a rebuild with `fine` changes this item's mesh: it is
     /// curved and either reaches the region or was built fine.
     #[must_use]
-    pub fn wants(&self, region: Option<&Bounds>) -> bool {
+    pub fn wants(&self, fine: Option<Fine>) -> bool {
         self.curved
             && (self.fine
-                || region
+                || fine
                     .zip(self.bounds.as_ref())
-                    .is_some_and(|(region, bounds)| touches(region, bounds)))
+                    .is_some_and(|(fine, bounds)| fine.reaches(bounds)))
     }
 }
 
-/// What [`Part::CopperRest`] draws, into `builder`.
-fn add_copper_without_zones(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
+/// What [`ItemSet::CopperRest`] draws, into `builder`.
+fn add_copper_rest(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
     for segment in board.segments.iter().filter(|s| s.layer == layer) {
-        builder.unit(segment.net, |builder| {
+        builder.item(segment.net, |builder| {
             builder.stroke(&[segment.start, segment.end], segment.width, false);
         });
     }
     for arc in board.arcs.iter().filter(|a| a.layer == layer) {
-        builder.unit(arc.net, |builder| {
+        builder.item(arc.net, |builder| {
             let points = arc_points(arc.start, arc.mid, arc.end, &builder.curves);
             builder.stroke(&points, arc.width, false);
         });
     }
     let copper: Vec<LayerId> = board.copper_layers().map(|(id, _)| id).collect();
     for via in board.vias.iter().filter(|via| spans(via, &copper, layer)) {
-        builder.unit(via.net, |builder| builder.via(via));
+        builder.item(via.net, |builder| builder.via(via));
     }
     for footprint in &board.footprints {
         let frame = Transform::new(footprint.at, footprint.rotation);
@@ -359,12 +401,12 @@ fn add_copper_without_zones(builder: &mut MeshBuilder, board: &Board, layer: Lay
             .iter()
             .filter(|pad| pad.layers.contains(&layer))
         {
-            builder.unit(pad.net, |builder| builder.pad(pad, &frame));
+            builder.item(pad.net, |builder| builder.pad(pad, &frame));
         }
     }
 }
 
-/// What [`Part::Zones`] draws, into `builder`.
+/// What [`ItemSet::Zones`] draws, into `builder`.
 fn add_zones(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
     for footprint in &board.footprints {
         let frame = Transform::new(footprint.at, footprint.rotation);
@@ -392,137 +434,66 @@ impl Tessellator {
     /// rest to its own. A curve across the region's edge is one outline.
     #[must_use]
     pub fn refined(self, tolerance: f64, region: Bounds) -> Self {
-        Self {
-            fine: Some(Fine { tolerance, region }),
-            ..self
-        }
+        self.with_fine(Some(Fine { tolerance, region }))
     }
 
-    /// The units of `part` of `board`, in order. Without `prior`, every
-    /// unit is built. With the units a previous call built, only those
-    /// that [`Unit::wants`] this tessellator's region are built again and
+    /// This tessellator with `fine` as its finer setting, or none.
+    #[must_use]
+    pub fn with_fine(self, fine: Option<Fine>) -> Self {
+        Self { fine, ..self }
+    }
+
+    /// The meshes of the items of `set` of `board`, in order. Without
+    /// `prior`, every item is built. With the meshes a previous call built,
+    /// only those that [`ItemMesh::wants`] this tessellator's region are built again and
     /// the rest come back `None`: the caller keeps its own.
     #[must_use]
-    pub fn units(&self, board: &Board, part: Part, prior: Option<&[Unit]>) -> Vec<Option<Unit>> {
+    pub fn item_meshes(
+        &self,
+        board: &Board,
+        set: ItemSet,
+        prior: Option<&[ItemMesh]>,
+    ) -> Vec<Option<ItemMesh>> {
         let mut builder = MeshBuilder::new(self).with_prior(prior);
-        match part {
-            Part::BoardFill => builder.unit(None, |builder| {
+        match set {
+            ItemSet::BoardFill => builder.item(None, |builder| {
                 if let Some((outer, cutouts)) = outline_loops(board, &builder.curves) {
                     builder.fill(&[outer], &cutouts);
                 }
             }),
-            Part::Outline => add_outline(&mut builder, board),
-            Part::Rims => add_rims(&mut builder, board),
-            Part::AllHoles => add_all_holes(&mut builder, board),
-            Part::Holes(layer) => add_holes(&mut builder, board, layer),
-            Part::CopperRest(layer) => add_copper_without_zones(&mut builder, board, layer),
-            Part::Zones(layer) => add_zones(&mut builder, board, layer),
-            Part::Mask(layer) => builder.unit(None, |builder| add_mask(builder, board, layer)),
-            Part::Paste(layer) => add_paste(&mut builder, board, layer),
-            Part::Graphics(layer) => add_graphics(&mut builder, board, layer),
-            Part::Text(layer) => add_text(&mut builder, board, layer),
+            ItemSet::Outline => add_outline(&mut builder, board),
+            ItemSet::Rims => add_rims(&mut builder, board),
+            ItemSet::AllHoles => add_all_holes(&mut builder, board),
+            ItemSet::Holes(layer) => add_holes(&mut builder, board, layer),
+            ItemSet::CopperRest(layer) => add_copper_rest(&mut builder, board, layer),
+            ItemSet::Zones(layer) => add_zones(&mut builder, board, layer),
+            ItemSet::Mask(layer) => builder.item(None, |builder| add_mask(builder, board, layer)),
+            ItemSet::Paste(layer) => add_paste(&mut builder, board, layer),
+            ItemSet::Graphics(layer) => add_graphics(&mut builder, board, layer),
+            ItemSet::Text(layer) => add_text(&mut builder, board, layer),
         }
-        builder.finish_units()
+        builder.finish_items()
     }
 
-    /// The mesh of `part`, every unit at this tessellator's tolerances.
-    fn mesh(&self, board: &Board, part: Part) -> Mesh {
+    /// The mesh of `set`, every item at this tessellator's tolerances.
+    #[must_use]
+    pub fn mesh(&self, board: &Board, set: ItemSet) -> Mesh {
         let mut mesh = Mesh::default();
-        for unit in self.units(board, part, None).into_iter().flatten() {
-            mesh.append(&unit.mesh);
+        for item in self.item_meshes(board, set, None).into_iter().flatten() {
+            mesh.append(&item.mesh);
         }
         mesh
     }
 
-    /// The copper on `layer`: [`Tessellator::copper_without_zones`] and
-    /// [`Tessellator::zones`] as one mesh.
+    /// The copper on `layer`: tracks and track arcs with round ends, vias
+    /// and pads that reach the layer as rings around their holes, and the
+    /// zones, as one mesh. An unplated hole whose pad is no bigger than
+    /// the hole is no copper.
     #[must_use]
     pub fn copper(&self, board: &Board, layer: LayerId) -> Mesh {
-        let mut mesh = self.mesh(board, Part::CopperRest(layer));
-        mesh.append(&self.mesh(board, Part::Zones(layer)));
+        let mut mesh = self.mesh(board, ItemSet::CopperRest(layer));
+        mesh.append(&self.mesh(board, ItemSet::Zones(layer)));
         mesh
-    }
-
-    /// The copper on `layer` other than zones: tracks and track arcs with
-    /// round ends, vias and pads that reach the layer as rings around
-    /// their holes. An unplated hole whose pad is no bigger than the hole
-    /// is no copper. A net highlight draws this and a net's zones at
-    /// different strengths.
-    #[must_use]
-    pub fn copper_without_zones(&self, board: &Board, layer: LayerId) -> Mesh {
-        self.mesh(board, Part::CopperRest(layer))
-    }
-
-    /// The zones on `layer`: the fills KiCad stored, and the outline of a
-    /// zone without a stored fill on the layer, hatched ([`HATCH_PITCH`]).
-    #[must_use]
-    pub fn zones(&self, board: &Board, layer: LayerId) -> Mesh {
-        self.mesh(board, Part::Zones(layer))
-    }
-
-    /// The board itself: the `Edge.Cuts` strokes chained into loops
-    /// ([`JOIN_TOLERANCE`]), the largest filled and the others cut out of
-    /// it. Empty for a board whose outline does not close.
-    #[must_use]
-    pub fn board_fill(&self, board: &Board) -> Mesh {
-        self.mesh(board, Part::BoardFill)
-    }
-
-    /// The solder mask overlay of a mask `layer`: the board
-    /// ([`Tessellator::board_fill`]) less every opening on the layer, as
-    /// one polygon difference. An opening is a pad that reaches the layer,
-    /// grown by its mask clearance ([`Board::pad_clearances`]; its hole
-    /// grown the same, so an unplated hole opens the mask), a via that
-    /// is not tented on the layer's side, grown by its mask clearance
-    /// ([`Board::via_mask_expansion`]), and any graphic drawn on the
-    /// layer. Empty for a board without a closed outline.
-    #[must_use]
-    pub fn mask(&self, board: &Board, layer: LayerId) -> Mesh {
-        self.mesh(board, Part::Mask(layer))
-    }
-
-    /// The solder paste on a paste `layer`: every pad that reaches it,
-    /// grown (shrunk, as the clearance is normally negative) by its paste
-    /// clearance, the hole of a through-hole pad left open.
-    #[must_use]
-    pub fn paste(&self, board: &Board, layer: LayerId) -> Mesh {
-        self.mesh(board, Part::Paste(layer))
-    }
-
-    /// Every hole drilled through the board, whatever layers it reaches:
-    /// vias of every kind and every drilled pad, plated or not, as filled
-    /// discs and slots. Drawn in the page colour over the whole stack,
-    /// under the rims.
-    #[must_use]
-    pub fn all_holes(&self, board: &Board) -> Mesh {
-        self.mesh(board, Part::AllHoles)
-    }
-
-    /// The copper rim of every plated hole: a band [`HOLE_RIM`] wide
-    /// around the drill of every via and every through-hole pad. An
-    /// unplated hole has none.
-    #[must_use]
-    pub fn rims(&self, board: &Board) -> Mesh {
-        self.mesh(board, Part::Rims)
-    }
-
-    /// The holes drilled through `layer`: every via that reaches it and
-    /// every drilled pad on it, plated or not, as filled discs and slots.
-    /// Drawn after the copper in the page colour: a track or a zone that
-    /// runs into a hole is copper right up to the drill, and the drill is
-    /// still open.
-    #[must_use]
-    pub fn holes(&self, board: &Board, layer: LayerId) -> Mesh {
-        self.mesh(board, Part::Holes(layer))
-    }
-
-    /// The board outline: every `Edge.Cuts` graphic, the board's and the
-    /// footprints' (a connector's slot, in the footprint's frame), stroked
-    /// at its width (at least 0.05 mm, KiCad's default edge width) with
-    /// round ends.
-    #[must_use]
-    pub fn outline(&self, board: &Board) -> Mesh {
-        self.mesh(board, Part::Outline)
     }
 
     /// The box around the outline's geometry (the centre lines, not their
@@ -533,14 +504,6 @@ impl Tessellator {
         layer_drawings(board, edge)
             .filter_map(|drawing| graphic_bounds(&drawing, self.tolerance))
             .reduce(Bounds::union)
-    }
-
-    /// The graphics on `layer`, the board's and the footprints' (in their
-    /// frames): a filled closed shape as its fill, everything else as a
-    /// stroke of its width (at least 0.05 mm) with round ends.
-    #[must_use]
-    pub fn graphics(&self, board: &Board, layer: LayerId) -> Mesh {
-        self.mesh(board, Part::Graphics(layer))
     }
 
     /// `polylines` stroked at `width` with round ends and joins, in
@@ -554,19 +517,9 @@ impl Tessellator {
         }
         builder.finish()
     }
-
-    /// The text on `layer` in Newstroke: every visible board text and
-    /// footprint text (its variables resolved, placed in the footprint's
-    /// frame, kept upright when the footprint asks), stroked at its pen
-    /// width with round ends. A knockout text is its box with the glyphs
-    /// cut out.
-    #[must_use]
-    pub fn text(&self, board: &Board, layer: LayerId) -> Mesh {
-        self.mesh(board, Part::Text(layer))
-    }
 }
 
-/// What [`Part::Mask`] draws, into `builder`.
+/// What [`ItemSet::Mask`] draws, into `builder`.
 fn add_mask(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
     let Some((outer, cutouts)) = outline_loops(board, &builder.curves) else {
         return;
@@ -599,10 +552,10 @@ fn add_mask(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
     builder.fill_shapes(shapes);
 }
 
-/// What [`Part::Paste`] draws, into `builder`.
+/// What [`ItemSet::Paste`] draws, into `builder`.
 fn add_paste(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
     for (footprint, pad) in pads_on(board, layer) {
-        builder.unit(pad.net, |builder| {
+        builder.item(pad.net, |builder| {
             let shape = pad_frame(pad, &Transform::new(footprint.at, footprint.rotation));
             let grow = board
                 .pad_clearances(footprint, pad)
@@ -618,10 +571,10 @@ fn add_paste(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
     }
 }
 
-/// What [`Part::AllHoles`] draws, into `builder`.
+/// What [`ItemSet::AllHoles`] draws, into `builder`.
 fn add_all_holes(builder: &mut MeshBuilder, board: &Board) {
     for via in &board.vias {
-        builder.unit(None, |builder| {
+        builder.item(None, |builder| {
             let hole = circle(via.at, via.drill / 2.0, &builder.curves);
             builder.fill(&[hole], &[]);
         });
@@ -630,7 +583,7 @@ fn add_all_holes(builder: &mut MeshBuilder, board: &Board) {
         let frame = Transform::new(footprint.at, footprint.rotation);
         for pad in &footprint.pads {
             if let Some(drill) = pad.drill {
-                builder.unit(None, |builder| {
+                builder.item(None, |builder| {
                     let hole = builder.hole(drill, &pad_frame(pad, &frame), 0.0);
                     builder.fill(&[hole], &[]);
                 });
@@ -639,10 +592,10 @@ fn add_all_holes(builder: &mut MeshBuilder, board: &Board) {
     }
 }
 
-/// What [`Part::Rims`] draws, into `builder`.
+/// What [`ItemSet::Rims`] draws, into `builder`.
 fn add_rims(builder: &mut MeshBuilder, board: &Board) {
     for via in &board.vias {
-        builder.unit(None, |builder| {
+        builder.item(None, |builder| {
             let ring = circle(via.at, via.drill / 2.0 + HOLE_RIM, &builder.curves);
             let hole = circle(via.at, via.drill / 2.0, &builder.curves);
             builder.fill(&[ring], &[hole]);
@@ -656,7 +609,7 @@ fn add_rims(builder: &mut MeshBuilder, board: &Board) {
             .filter(|pad| pad.kind == PadKind::ThroughHole)
         {
             if let Some(drill) = pad.drill {
-                builder.unit(None, |builder| {
+                builder.item(None, |builder| {
                     let shape = pad_frame(pad, &frame);
                     let ring = builder.hole(drill, &shape, HOLE_RIM);
                     let hole = builder.hole(drill, &shape, 0.0);
@@ -667,11 +620,11 @@ fn add_rims(builder: &mut MeshBuilder, board: &Board) {
     }
 }
 
-/// What [`Part::Holes`] draws, into `builder`.
+/// What [`ItemSet::Holes`] draws, into `builder`.
 fn add_holes(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
     let copper: Vec<LayerId> = board.copper_layers().map(|(id, _)| id).collect();
     for via in board.vias.iter().filter(|via| spans(via, &copper, layer)) {
-        builder.unit(via.net, |builder| {
+        builder.item(via.net, |builder| {
             let hole = circle(via.at, via.drill / 2.0, &builder.curves);
             builder.fill(&[hole], &[]);
         });
@@ -684,7 +637,7 @@ fn add_holes(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
             .filter(|pad| pad.layers.contains(&layer))
         {
             if let Some(drill) = pad.drill {
-                builder.unit(pad.net, |builder| {
+                builder.item(pad.net, |builder| {
                     let hole = builder.hole(drill, &pad_frame(pad, &frame), 0.0);
                     builder.fill(&[hole], &[]);
                 });
@@ -693,13 +646,13 @@ fn add_holes(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
     }
 }
 
-/// What [`Part::Outline`] draws, into `builder`.
+/// What [`ItemSet::Outline`] draws, into `builder`.
 fn add_outline(builder: &mut MeshBuilder, board: &Board) {
     let Some(edge) = board.layer_named(EDGE_CUTS) else {
         return;
     };
     for drawing in layer_drawings(board, edge) {
-        builder.unit(None, |builder| {
+        builder.item(None, |builder| {
             let width = drawing.width.max(MIN_OUTLINE_WIDTH);
             let (points, closed) = outline_points(&drawing, &builder.curves);
             builder.stroke(&points, width, closed);
@@ -707,10 +660,10 @@ fn add_outline(builder: &mut MeshBuilder, board: &Board) {
     }
 }
 
-/// What [`Part::Graphics`] draws, into `builder`.
+/// What [`ItemSet::Graphics`] draws, into `builder`.
 fn add_graphics(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
     for drawing in layer_drawings(board, layer) {
-        builder.unit(None, |builder| {
+        builder.item(None, |builder| {
             let (points, closed) = outline_points(&drawing, &builder.curves);
             if drawing.filled && closed {
                 builder.fill(&[points], &[]);
@@ -722,17 +675,17 @@ fn add_graphics(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
     }
 }
 
-/// What [`Part::Text`] draws, into `builder`.
+/// What [`ItemSet::Text`] draws, into `builder`.
 fn add_text(builder: &mut MeshBuilder, board: &Board, layer: LayerId) {
     for text in board.texts.iter().filter(|t| t.layer == layer) {
-        builder.unit(None, |builder| {
+        builder.item(None, |builder| {
             builder.text(&text.text, text, &Transform::identity(), false);
         });
     }
     for footprint in &board.footprints {
         let frame = Transform::new(footprint.at, footprint.rotation);
         for text in footprint.texts.iter().filter(|t| t.layer == layer) {
-            builder.unit(None, |builder| {
+            builder.item(None, |builder| {
                 builder.text(&footprint.resolve_text(text), text, &frame, true);
             });
         }
@@ -1076,7 +1029,7 @@ pub(crate) fn bezier([p0, p1, p2, p3]: [Point; 4], curves: &Curves) -> Vec<Point
         Some(fine) => {
             let segments = bezier_segments([p0, p1, p2, p3], fine.tolerance).max(BEZIER_SEGMENTS);
             Curves::sampled(BEZIER_SEGMENTS, segments, false, |t| {
-                holds(&fine.region, at(t))
+                fine.region.contains(at(t))
             })
         }
     };
@@ -1129,7 +1082,7 @@ fn arc_flattened(arc: &Arc, curves: &Curves) -> Vec<Point> {
     let coarse = segments_for(arc.radius, sweep, curves.tolerance);
     let finer = segments_for(arc.radius, sweep, fine.tolerance);
     let at = |t: f64| arc.point_at(arc.start_angle + arc.sweep * t);
-    Curves::sampled(coarse, finer, false, |t| holds(&fine.region, at(t)))
+    Curves::sampled(coarse, finer, false, |t| fine.region.contains(at(t)))
         .into_iter()
         .map(at)
         .collect()
@@ -1240,7 +1193,7 @@ fn refined_rounded_rect(
     fine: &Fine,
 ) -> Vec<Point> {
     use std::f64::consts::{FRAC_PI_2, TAU};
-    let inside = |p: Point| holds(&fine.region, frame.apply(p));
+    let inside = |p: Point| fine.region.contains(frame.apply(p));
     let quarter = segments_for(radius, FRAC_PI_2, curves.tolerance);
     if corners.iter().all(|&(x, y)| x == 0.0 && y == 0.0) {
         let at = |t: f64| Point {
@@ -1377,20 +1330,20 @@ impl<Ctor: StrokeVertexConstructor<[f32; 2]>> StrokeGeometryBuilder for ZeroArea
     }
 }
 
-/// Accumulates fills and strokes into meshes, one per [`Unit`]: what is
-/// drawn between the start and the end of [`MeshBuilder::unit`] is one.
+/// Accumulates fills and strokes into meshes, one per [`ItemMesh`]: what is
+/// drawn between the start and the end of [`MeshBuilder::item`] is one.
 struct MeshBuilder<'p> {
     curves: Curves,
     /// The tolerance lyon rounds a stroke's caps and joins to: the fine
-    /// one for a unit the region reaches.
+    /// one for an item the region reaches.
     round: f64,
     fill: FillTessellator,
     stroke: StrokeTessellator,
     buffers: VertexBuffers<[f32; 2], u32>,
-    units: Vec<Option<Unit>>,
-    /// The units a previous build made: only those they ask for are
+    items: Vec<Option<ItemMesh>>,
+    /// The meshes a previous build made: only those they ask for are
     /// built again.
-    prior: Option<&'p [Unit]>,
+    prior: Option<&'p [ItemMesh]>,
 }
 
 #[expect(
@@ -1411,7 +1364,7 @@ impl<'p> MeshBuilder<'p> {
             fill: FillTessellator::new(),
             stroke: StrokeTessellator::new(),
             buffers: VertexBuffers::new(),
-            units: Vec::new(),
+            items: Vec::new(),
             prior: None,
         }
     }
@@ -1421,65 +1374,47 @@ impl<'p> MeshBuilder<'p> {
         self.round = round;
     }
 
-    fn with_prior(mut self, prior: Option<&'p [Unit]>) -> Self {
+    fn with_prior(mut self, prior: Option<&'p [ItemMesh]>) -> Self {
         self.prior = prior;
         self
     }
 
-    /// One unit: what `draw` adds is its mesh. With a prior, a unit the
+    /// One item: what `draw` adds is its mesh. With a prior, an item the
     /// region does not change is not drawn at all.
-    fn unit(&mut self, net: Option<NetId>, draw: impl FnOnce(&mut Self)) {
-        let region = self.curves.fine.map(|fine| fine.region);
+    fn item(&mut self, net: Option<NetId>, draw: impl FnOnce(&mut Self)) {
         if let Some(prior) = self.prior {
             let wanted = prior
-                .get(self.units.len())
-                .filter(|unit| unit.wants(region.as_ref()));
+                .get(self.items.len())
+                .filter(|unit| unit.wants(self.curves.fine));
             let Some(unit) = wanted else {
-                self.units.push(None);
+                self.items.push(None);
                 return;
             };
-            let reached = region
-                .zip(unit.bounds)
-                .is_some_and(|(region, bounds)| touches(&region, &bounds));
-            self.round = match self.curves.fine {
-                Some(fine) if reached => fine.tolerance,
-                _ => self.curves.tolerance,
-            };
+            self.round = self.curves.round_for(unit.bounds.as_ref());
         }
-        self.curves.take_touched();
         draw(self);
-        let curved = self.curves.take_touched();
-        let unit = self.close_unit(net, curved);
-        self.units.push(Some(unit));
+        let unit = self.close_item(net, false);
+        self.items.push(Some(unit));
     }
 
-    /// Take what has been drawn since the last unit as one: `curved`
+    /// Take what has been drawn since the last item as one: `curved`
     /// says whether the item holds a curve besides what this builder
     /// flattened itself.
-    pub(crate) fn close_unit(&mut self, net: Option<NetId>, curved: bool) -> Unit {
+    pub(crate) fn close_item(&mut self, net: Option<NetId>, curved: bool) -> ItemMesh {
         let curved = self.curves.take_touched() || curved;
         let mesh = Mesh {
             positions: std::mem::take(&mut self.buffers.vertices),
             indices: std::mem::take(&mut self.buffers.indices),
         };
         let floor = self.curves.tolerance;
-        let bounds = mesh.bounds().map(|bounds| Bounds {
-            min: Point {
-                x: bounds.min.x - floor,
-                y: bounds.min.y - floor,
-            },
-            max: Point {
-                x: bounds.max.x + floor,
-                y: bounds.max.y + floor,
-            },
-        });
+        let bounds = mesh.bounds().map(|bounds| bounds.grown(floor, floor));
         let fine = curved
             && self
                 .curves
                 .fine
                 .zip(bounds)
-                .is_some_and(|(fine, bounds)| touches(&fine.region, &bounds));
-        Unit {
+                .is_some_and(|(fine, bounds)| fine.reaches(&bounds));
+        ItemMesh {
             mesh,
             bounds,
             curved,
@@ -1488,10 +1423,10 @@ impl<'p> MeshBuilder<'p> {
         }
     }
 
-    /// The units built, in order.
-    fn finish_units(self) -> Vec<Option<Unit>> {
-        debug_assert!(self.buffers.indices.is_empty(), "a mesh outside a unit");
-        self.units
+    /// The item meshes built, in order.
+    fn finish_items(self) -> Vec<Option<ItemMesh>> {
+        debug_assert!(self.buffers.indices.is_empty(), "a mesh outside an item");
+        self.items
     }
 
     #[expect(
@@ -1535,7 +1470,7 @@ impl<'p> MeshBuilder<'p> {
             return;
         };
         // A stroke's caps and joins are round: a curve.
-        self.curves.touched.set(true);
+        self.curves.touch();
         let mut path = Path::builder();
         path.begin(to_lyon(*first));
         for p in rest {
@@ -1657,11 +1592,11 @@ impl<'p> MeshBuilder<'p> {
     /// hatched when it has none there.
     fn zone(&mut self, zone: &Zone, frame: &Transform, layer: LayerId) {
         if zone.is_unfilled_on(layer) {
-            self.unit(zone.net, |builder| builder.zone_hatch(zone, frame));
+            self.item(zone.net, |builder| builder.zone_hatch(zone, frame));
             return;
         }
         for fill in zone.fills.iter().filter(|fill| fill.layer == layer) {
-            self.unit(zone.net, |builder| {
+            self.item(zone.net, |builder| {
                 let carried = fill.points.map(|p| frame.apply(p));
                 let polygon = chain_points(&carried, &builder.curves);
                 builder.fill(&[polygon], &[]);
@@ -1810,17 +1745,12 @@ impl<'p> MeshBuilder<'p> {
         self.fill_shapes(shapes);
     }
 
-    /// Everything drawn, units and the rest, as one mesh.
+    /// Everything drawn as one mesh.
     fn finish(self) -> Mesh {
-        let mut mesh = Mesh::default();
-        for unit in self.units.iter().flatten() {
-            mesh.append(&unit.mesh);
-        }
-        mesh.append(&Mesh {
+        Mesh {
             positions: self.buffers.vertices,
             indices: self.buffers.indices,
-        });
-        mesh
+        }
     }
 }
 

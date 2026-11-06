@@ -254,6 +254,43 @@ impl Bounds {
         self.including(other.min).including(other.max)
     }
 
+    /// Whether the two boxes share any point, their edges included.
+    #[must_use]
+    pub fn overlaps(&self, other: &Self) -> bool {
+        self.min.x <= other.max.x
+            && other.min.x <= self.max.x
+            && self.min.y <= other.max.y
+            && other.min.y <= self.max.y
+    }
+
+    /// Whether `point` is in the box, its edges included.
+    #[must_use]
+    pub fn contains(&self, point: Point) -> bool {
+        (self.min.x..=self.max.x).contains(&point.x) && (self.min.y..=self.max.y).contains(&point.y)
+    }
+
+    /// Whether the whole of `other` is in the box.
+    #[must_use]
+    pub fn contains_bounds(&self, other: &Self) -> bool {
+        self.contains(other.min) && self.contains(other.max)
+    }
+
+    /// The box grown by `x` on its left and right and `y` on its top and
+    /// bottom.
+    #[must_use]
+    pub fn grown(&self, x: f64, y: f64) -> Self {
+        Self {
+            min: Point {
+                x: self.min.x - x,
+                y: self.min.y - y,
+            },
+            max: Point {
+                x: self.max.x + x,
+                y: self.max.y + y,
+            },
+        }
+    }
+
     /// Horizontal extent.
     #[must_use]
     pub fn width(&self) -> f64 {

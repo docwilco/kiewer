@@ -21,7 +21,7 @@ use std::ops::Range;
 
 use kicad_core::geometry::Bounds;
 use kicad_core::model::{Board, NetId, Point};
-use kicad_core::tessellate::{Mesh, Part as Piece, Tessellator, Unit};
+use kicad_core::tessellate::{Fine, ItemMesh, ItemSet, Mesh, Tessellator};
 
 use crate::labels::LabelBatch;
 use crate::render::{Draw, Rgb, Vertex};
@@ -85,16 +85,17 @@ pub struct Scene {
     /// Every item's mesh, kept beside the stitched buffers: a refined
     /// region (`Scene::refine`) builds again only the curved ones it
     /// reaches, and the highlight takes a net's meshes from here.
-    pub(crate) parts: Vec<ScenePart>,
+    pub(crate) sets: Vec<SceneSet>,
 }
 
-/// The units of one part of the board, and the slice they make.
+/// The item meshes of one set of items of the board, and the slice they
+/// make.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ScenePart {
+pub(crate) struct SceneSet {
     layer: Layer,
     paint: Paint,
-    piece: Piece,
-    units: Vec<Unit>,
+    set: ItemSet,
+    meshes: Vec<ItemMesh>,
 }
 
 impl Scene {
@@ -102,11 +103,11 @@ impl Scene {
     /// with neither outline nor copper.
     #[must_use]
     pub fn build(board: &Board) -> Option<Self> {
-        let tessellator = Tessellator::new(TOLERANCE);
+        let tessellator = tessellator(None);
         let stack = Stack::of(board);
         let bounds = tessellator
             .outline_bounds(board)
-            .or_else(|| tessellator.outline(board).bounds())
+            .or_else(|| tessellator.mesh(board, ItemSet::Outline).bounds())
             .or_else(|| {
                 stack
                     .copper
@@ -124,35 +125,38 @@ impl Scene {
             stack: stack.clone(),
             unfilled_zones: board.unfilled_zones(),
             labels: LabelBatch::build(board, bounds.center()),
-            parts: Vec::new(),
+            sets: Vec::new(),
         };
         for layer in stack.order(Side::Front) {
             // A KiCad layer's key is its canonical name in the board's
             // table; a board without the layer gets no slice for it.
             let id = board.layer_named(&layer.to_string());
-            let pieces: Vec<(Paint, Piece)> = match (&layer, id) {
-                (Layer::Board, _) => vec![(Paint::Layer, Piece::BoardFill)],
-                (Layer::Outline, _) => vec![(Paint::Layer, Piece::Outline)],
+            let sets: Vec<(Paint, ItemSet)> = match (&layer, id) {
+                (Layer::Board, _) => vec![(Paint::Layer, ItemSet::BoardFill)],
+                (Layer::Outline, _) => vec![(Paint::Layer, ItemSet::Outline)],
                 // Each layer's slices top-most first: the first to cover
                 // a sample owns it (the module doc).
                 (Layer::Holes, _) => {
-                    vec![(Paint::Layer, Piece::Rims), (Paint::Page, Piece::AllHoles)]
+                    vec![
+                        (Paint::Layer, ItemSet::Rims),
+                        (Paint::Page, ItemSet::AllHoles),
+                    ]
                 }
                 (Layer::Copper(_), Some(id)) => vec![
                     // The holes first, in the page colour: a track
                     // ending in a via covers the hole the via's ring
                     // left open, and the hole must win.
-                    (Paint::Page, Piece::Holes(id)),
-                    (Paint::Layer, Piece::CopperRest(id)),
-                    (Paint::Zone, Piece::Zones(id)),
+                    (Paint::Page, ItemSet::Holes(id)),
+                    (Paint::Layer, ItemSet::CopperRest(id)),
+                    (Paint::Zone, ItemSet::Zones(id)),
                 ],
-                (Layer::Mask(_), Some(id)) => vec![(Paint::Layer, Piece::Mask(id))],
-                (Layer::Paste(_), Some(id)) => vec![(Paint::Layer, Piece::Paste(id))],
+                (Layer::Mask(_), Some(id)) => vec![(Paint::Layer, ItemSet::Mask(id))],
+                (Layer::Paste(_), Some(id)) => vec![(Paint::Layer, ItemSet::Paste(id))],
                 (Layer::Silk(_), Some(id)) => vec![
-                    (Paint::Layer, Piece::Graphics(id)),
-                    (Paint::Layer, Piece::Text(id)),
+                    (Paint::Layer, ItemSet::Graphics(id)),
+                    (Paint::Layer, ItemSet::Text(id)),
                 ],
-                (Layer::Courtyard(_), Some(id)) => vec![(Paint::Layer, Piece::Graphics(id))],
+                (Layer::Courtyard(_), Some(id)) => vec![(Paint::Layer, ItemSet::Graphics(id))],
                 (
                     Layer::Copper(_)
                     | Layer::Mask(_)
@@ -162,17 +166,17 @@ impl Scene {
                     None,
                 ) => Vec::new(),
             };
-            for (paint, piece) in pieces {
-                let units = tessellator
-                    .units(board, piece, None)
+            for (paint, set) in sets {
+                let meshes = tessellator
+                    .item_meshes(board, set, None)
                     .into_iter()
                     .flatten()
                     .collect();
-                scene.parts.push(ScenePart {
+                scene.sets.push(SceneSet {
                     layer: layer.clone(),
                     paint,
-                    piece,
-                    units,
+                    set,
+                    meshes,
                 });
             }
         }
@@ -186,17 +190,17 @@ impl Scene {
         self.views.get(state.view.checked_sub(1)?)
     }
 
-    /// Lay every part's units end to end in the one vertex buffer and the
-    /// one index buffer, positions made relative to the origin. A part
-    /// makes the slice of its layer and paint; the parts that follow
+    /// Lay every set's item meshes end to end in the one vertex buffer and
+    /// the one index buffer, positions made relative to the origin. A set
+    /// makes the slice of its layer and paint; the sets that follow
     /// each other in the same slice (a silkscreen's graphics and text)
     /// share it, and a slice with nothing in it is not made.
     fn stitch(&mut self) {
-        let units = self.parts.iter().flat_map(|part| &part.units);
-        let (vertices, indices) = units.fold((0, 0), |(vertices, indices), unit| {
+        let meshes = self.sets.iter().flat_map(|set| &set.meshes);
+        let (vertices, indices) = meshes.fold((0, 0), |(vertices, indices), item| {
             (
-                vertices + unit.mesh.positions.len(),
-                indices + unit.mesh.indices.len(),
+                vertices + item.mesh.positions.len(),
+                indices + item.mesh.indices.len(),
             )
         });
         self.vertices.clear();
@@ -204,16 +208,15 @@ impl Scene {
         self.slices.clear();
         self.vertices.reserve(vertices);
         self.indices.reserve(indices);
-        for part in &self.parts {
+        for set in &self.sets {
             let start = u32::try_from(self.indices.len()).unwrap_or(u32::MAX);
-            for unit in &part.units {
-                let base = u32::try_from(self.vertices.len()).unwrap_or(u32::MAX);
-                self.vertices
-                    .extend(unit.mesh.positions.iter().map(|position| Vertex {
-                        position: relative(*position, self.origin),
-                    }));
-                self.indices
-                    .extend(unit.mesh.indices.iter().map(|index| index + base));
+            for item in &set.meshes {
+                append_relative(
+                    &mut self.vertices,
+                    &mut self.indices,
+                    &item.mesh,
+                    self.origin,
+                );
             }
             let end = u32::try_from(self.indices.len()).unwrap_or(u32::MAX);
             if end == start {
@@ -221,15 +224,15 @@ impl Scene {
             }
             match self.slices.last_mut() {
                 Some(last)
-                    if last.layer == part.layer
-                        && last.paint == part.paint
+                    if last.layer == set.layer
+                        && last.paint == set.paint
                         && last.range.end == start =>
                 {
                     last.range.end = end;
                 }
                 _ => self.slices.push(Slice {
-                    layer: part.layer.clone(),
-                    paint: part.paint,
+                    layer: set.layer.clone(),
+                    paint: set.paint,
                     range: start..end,
                 }),
             }
@@ -242,18 +245,14 @@ impl Scene {
     /// Items the region does not reach keep their meshes; so does a fill
     /// of plain points. The buffers are laid out afresh, and `true` says
     /// they changed.
-    pub fn refine(&mut self, board: &Board, fine: Option<(f64, Bounds)>) -> bool {
-        let base = Tessellator::new(TOLERANCE);
-        let tessellator = match fine {
-            Some((tolerance, region)) => base.refined(tolerance, region),
-            None => base,
-        };
+    pub fn refine(&mut self, board: &Board, fine: Option<Fine>) -> bool {
+        let tessellator = tessellator(fine);
         let mut changed = false;
-        for part in &mut self.parts {
-            let fresh = tessellator.units(board, part.piece, Some(&part.units));
-            for (unit, fresh) in part.units.iter_mut().zip(fresh) {
+        for set in &mut self.sets {
+            let fresh = tessellator.item_meshes(board, set.set, Some(&set.meshes));
+            for (item, fresh) in set.meshes.iter_mut().zip(fresh) {
                 if let Some(fresh) = fresh {
-                    *unit = fresh;
+                    *item = fresh;
                     changed = true;
                 }
             }
@@ -264,19 +263,19 @@ impl Scene {
         changed
     }
 
-    /// The meshes of `net`'s units in the `paint` run of `layer`, in the
+    /// The meshes of `net`'s units in the `paint` slice of `layer`, in the
     /// board's frame: what the highlight lays over the scene, from the
     /// same meshes the scene was stitched from.
     #[must_use]
     pub fn net_mesh(&self, layer: &Layer, paint: Paint, net: NetId) -> Mesh {
         let mut mesh = Mesh::default();
-        for part in self
-            .parts
+        for set in self
+            .sets
             .iter()
-            .filter(|part| part.layer == *layer && part.paint == paint)
+            .filter(|set| set.layer == *layer && set.paint == paint)
         {
-            for unit in part.units.iter().filter(|unit| unit.net == Some(net)) {
-                mesh.append(&unit.mesh);
+            for item in set.meshes.iter().filter(|item| item.net == Some(net)) {
+                mesh.append(&item.mesh);
             }
         }
         mesh
@@ -318,6 +317,27 @@ impl Scene {
         }
         draws
     }
+}
+
+/// The tessellator of a build: the floor tolerance everywhere, or finer
+/// inside the region of `fine`.
+pub(crate) fn tessellator(fine: Option<Fine>) -> Tessellator {
+    Tessellator::new(TOLERANCE).with_fine(fine)
+}
+
+/// Add `mesh` after what the buffers hold, positions made relative to
+/// `origin` and indices carried past the vertices already there.
+pub(crate) fn append_relative(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    mesh: &Mesh,
+    origin: Point,
+) {
+    let base = u32::try_from(vertices.len()).unwrap_or(u32::MAX);
+    vertices.extend(mesh.positions.iter().map(|position| Vertex {
+        position: relative(*position, origin),
+    }));
+    indices.extend(mesh.indices.iter().map(|index| index + base));
 }
 
 /// `position` (millimetres, f32) relative to `origin`: the difference is
@@ -396,7 +416,10 @@ mod tests {
         let before = scene.vertices.len();
         assert!(scene.refine(
             hand_off_board(),
-            Some((0.5 / 1024.0, around_first_via(5.0)))
+            Some(Fine {
+                tolerance: 0.5 / 1024.0,
+                region: around_first_via(5.0)
+            })
         ));
         assert!(scene.vertices.len() > before);
         // The slices still tile the index buffer.
@@ -410,7 +433,10 @@ mod tests {
         let refined = scene.clone();
         scene.refine(
             hand_off_board(),
-            Some((0.5 / 1024.0, around_first_via(5.0))),
+            Some(Fine {
+                tolerance: 0.5 / 1024.0,
+                region: around_first_via(5.0),
+            }),
         );
         assert_eq!(scene, refined);
         // Out of the region everything is as it was at load.
@@ -426,7 +452,13 @@ mod tests {
         let layer = Layer::Copper("F.Cu".to_owned());
         let mut scene = hand_off().clone();
         let floor = scene.net_mesh(&layer, Paint::Layer, net);
-        scene.refine(board, Some((0.5 / 1024.0, around_first_via(5.0))));
+        scene.refine(
+            board,
+            Some(Fine {
+                tolerance: 0.5 / 1024.0,
+                region: around_first_via(5.0),
+            }),
+        );
         let fine = scene.net_mesh(&layer, Paint::Layer, net);
         assert!(fine.positions.len() > floor.positions.len());
     }

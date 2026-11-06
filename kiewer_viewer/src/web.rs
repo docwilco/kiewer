@@ -19,6 +19,7 @@ use kicad_core::hit::{Hit, find_footprint, footprint_bounds, net_pads};
 use kicad_core::labels::LabelClass;
 use kicad_core::model::{Board, LayerId, Point};
 use kicad_core::schematic::hit::SheetHit;
+use kicad_core::tessellate::Fine;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -162,7 +163,7 @@ struct Gpu {
 }
 
 /// The milliseconds one `Scene::refine` of `scene` takes.
-fn timed_refine(scene: &mut Scene, board: &Board, fine: Option<(f64, Bounds)>) -> f64 {
+fn timed_refine(scene: &mut Scene, board: &Board, fine: Option<Fine>) -> f64 {
     let start = performance_now();
     scene.refine(board, fine);
     performance_now() - start
@@ -790,7 +791,7 @@ impl Viewer {
             return;
         };
         if let (Some(sheet), Some(highlight)) = (&mut self.sheet, &mut self.sheet_highlight) {
-            if highlight.refine(sheet, plan.fine()) {
+            if highlight.refine(sheet, plan.fine) {
                 self.renderer
                     .upload(&self.device, &sheet.vertices, &sheet.indices);
             }
@@ -798,7 +799,7 @@ impl Viewer {
         }
         let board = self.scene_board.as_ref().or(self.board.as_ref());
         if let (Some(board), Some(scene)) = (board, &mut self.scene)
-            && scene.refine(board, plan.fine())
+            && scene.refine(board, plan.fine)
         {
             self.renderer
                 .upload(&self.device, &scene.vertices, &scene.indices);
@@ -857,7 +858,7 @@ impl Viewer {
                         continue;
                     };
                     let mut scene = base.clone();
-                    worst = worst.max(timed_refine(&mut scene, board, plan.fine()));
+                    worst = worst.max(timed_refine(&mut scene, board, plan.fine));
                     // The coarsening back, from the refined state.
                     worst = worst.max(timed_refine(&mut scene.clone(), board, None));
                     // The worst placement: the step held is one finer than
@@ -878,9 +879,9 @@ impl Viewer {
                         continue;
                     };
                     let mut scene = base.clone();
-                    scene.refine(board, held.fine());
+                    scene.refine(board, held.fine);
                     if let Some(plan) = refiner.check(view, scale, 1e9) {
-                        worst = worst.max(timed_refine(&mut scene, board, plan.fine()));
+                        worst = worst.max(timed_refine(&mut scene, board, plan.fine));
                     }
                 }
             }

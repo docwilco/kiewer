@@ -22,6 +22,7 @@ use kicad_core::model::Point;
 use kicad_core::schematic::connect::{Connectivity, NetPin, SheetItem, SheetNetId, net_pins};
 use kicad_core::schematic::hit::{SheetHit, SheetIndex, find_symbol, symbol_bounds};
 use kicad_core::schematic::model::Sheet;
+use kicad_core::tessellate::Fine;
 use kicad_core::tessellate::schematic::SchematicLayer;
 
 use crate::camera::Camera;
@@ -109,7 +110,7 @@ impl SheetHighlight {
     /// Build `scene` again over `fine` (`SheetScene::refine`) from the
     /// sheet this holds. The lit nets' geometry is taken from the new
     /// meshes the next time [`SheetHighlight::geometry`] is called.
-    pub fn refine(&mut self, scene: &mut SheetScene, fine: Option<(f64, Bounds)>) -> bool {
+    pub fn refine(&mut self, scene: &mut SheetScene, fine: Option<Fine>) -> bool {
         let changed = scene.refine(&self.sheet, fine);
         if changed {
             self.tail.forget();
@@ -187,7 +188,7 @@ impl SheetHighlight {
             self.tail.cache(net, || {
                 connectivity
                     .net(net)
-                    .map_or_else(Vec::new, |net| scene.units.net(net))
+                    .map_or_else(Vec::new, |net| scene.meshes.net(net))
             });
         }
         self.tail.sync(
