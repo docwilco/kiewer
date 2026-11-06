@@ -60,6 +60,10 @@ pub const ZONE_FIT: f64 = 0.9;
 pub const ZONE_MAX_HEIGHT: f64 = 2.0;
 /// Segment ends this close, in millimetres, are one point.
 pub const JOIN_TOLERANCE: f64 = 0.01;
+
+/// How far a flattened arc of a zone fill may sit from the true one when
+/// a label is fitted into the fill; 10 micrometres, far below a label.
+const FILL_TOLERANCE: f64 = 0.01;
 /// Two segments meeting end to end continue one run when their
 /// directions differ by no more than this, in degrees.
 pub const RUN_BEND: f64 = 5.0;
@@ -818,8 +822,12 @@ impl Placer<'_> {
                     .iter()
                     .filter(|fill| fill.layer == layer)
                     .filter_map(|fill| {
-                        let points: Vec<Point> =
-                            fill.points.iter().map(|&p| frame.apply(p)).collect();
+                        let points: Vec<Point> = fill
+                            .points
+                            .flatten(FILL_TOLERANCE)
+                            .into_iter()
+                            .map(|p| frame.apply(p))
+                            .collect();
                         pole_of_inaccessibility(&points)
                     })
                     .max_by(|a, b| a.1.total_cmp(&b.1));

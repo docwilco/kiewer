@@ -100,6 +100,9 @@ fn an_unknown_layer_is_an_error_naming_it(item: &str) {
 #[test_case(r#"(zone (net "GND") (layer "F.Cu"))"#, "expected (polygon ...) in (zone ...)"; "zone without an outline")]
 #[test_case(r#"(zone (net "GND") (layer "F.Cu") (polygon (pts (xy 0 0) (xy 1 x))))"#, "to be a number, found \"x\""; "zone outline with a bad coordinate")]
 #[test_case(r#"(gr_arc (start 0 0) (end 1 1) (stroke (width 0.1) (type default)) (layer "F.Cu"))"#, "expected (mid ...) in (gr_arc ...)"; "arc without a mid point")]
+#[test_case(r#"(gr_curve (pts (xy 0 0) (xy 1 1) (xy 2 2)) (layer "Edge.Cuts"))"#, "expected four (xy ...) points in (gr_curve ...), found 3"; "curve with three points")]
+#[test_case(r#"(footprint "a:b" (layer "F.Cu") (at 0 0) (fp_curve (pts (xy 0 0) (xy 1 1) (xy 2 2) (xy 3 3) (xy 4 4)) (layer "F.Cu")))"#, "expected four (xy ...) points in (fp_curve ...), found 5"; "curve with five points")]
+#[test_case(r#"(gr_curve (pts (xy 0 0) (arc (start 1 1) (mid 2 2) (end 3 3)) (xy 4 4)) (layer "Edge.Cuts"))"#, "expected four (xy ...) points in (gr_curve ...), found an (arc ...)"; "curve with an arc")]
 #[test_case(r#"(gr_text "x" (at 0 0 abc) (layer "F.Cu"))"#, "expected value 3 of (at ...) to be a number, found \"abc\""; "text rotation not a number")]
 fn a_missing_or_malformed_field_is_an_error_naming_it(item: &str, message: &str) {
     let error = error_of(&tiny(MIN_BOARD_VERSION, item)).to_string();

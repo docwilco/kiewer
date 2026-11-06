@@ -298,7 +298,12 @@ impl Layers {
             ),
             SymbolShape::Bezier { points } => {
                 let control: Vec<Point> = points.iter().map(f).collect();
-                (bezier(&control), false)
+                // A symbol's curve of any other count draws as its points.
+                let curve = match <[Point; 4]>::try_from(control) {
+                    Ok(four) => bezier(four),
+                    Err(other) => other,
+                };
+                (curve, false)
             }
         };
         if let Some(bounds) = bounds {

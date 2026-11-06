@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 
 use crate::geometry::{Arc, Bounds, Transform};
 use crate::labels::signed_distance;
-use crate::model::{Board, Footprint, LayerId, NetId, Pad, Point};
+use crate::model::{Board, Chain, Footprint, LayerId, NetId, Pad, Point};
 use crate::tessellate::{graphic_bounds, pad_frame, pad_outline, spans, transformed};
 
 /// The side of a grid cell, in millimetres: a few items per cell on a
@@ -331,7 +331,13 @@ impl Index {
         if zone.keepout {
             return;
         }
-        let on_board = |points: &[Point]| points.iter().map(|&p| frame.apply(p)).collect();
+        let on_board = |chain: &Chain| {
+            chain
+                .flatten(TOLERANCE)
+                .into_iter()
+                .map(|p| frame.apply(p))
+                .collect()
+        };
         for fill in zone
             .fills
             .iter()
@@ -502,7 +508,13 @@ fn pad_polygons(pad: &Pad, frame: &Transform) -> Vec<Vec<Point>> {
         if let crate::model::Shape::Polygon { points } = &primitive.shape
             && primitive.filled
         {
-            polygons.push(points.iter().map(|&p| shape.apply(p)).collect());
+            polygons.push(
+                points
+                    .flatten(TOLERANCE)
+                    .into_iter()
+                    .map(|p| shape.apply(p))
+                    .collect(),
+            );
         }
     }
     polygons

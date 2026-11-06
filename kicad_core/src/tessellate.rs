@@ -35,8 +35,8 @@ pub mod schematic;
 use crate::font::{self, Placement, TextShape};
 use crate::geometry::{Arc, Bounds, Transform, segments_for};
 use crate::model::{
-    Board, Drawing, Drill, EDGE_CUTS, Footprint, LayerId, Pad, PadKind, PadShape, Point, Shape,
-    Size, Text, Via, Zone,
+    Board, Chain, ChainItem, Drawing, Drill, EDGE_CUTS, Footprint, LayerId, Pad, PadKind, PadShape,
+    Point, Shape, Size, Text, Via, Zone,
 };
 
 /// A polygon as `i_overlay` takes it: contours of `[x, y]` pairs, the first
@@ -635,27 +635,37 @@ pub(crate) fn transformed(drawing: &Drawing, frame: &Transform) -> Drawing {
             end: f(end),
         },
         Shape::Rect { start, end } => Shape::Polygon {
-            points: [
-                *start,
-                Point {
-                    x: end.x,
-                    y: start.y,
-                },
-                *end,
-                Point {
-                    x: start.x,
-                    y: end.y,
-                },
-            ]
-            .iter()
-            .map(f)
-            .collect(),
+            points: Chain::new(
+                [
+                    *start,
+                    Point {
+                        x: end.x,
+                        y: start.y,
+                    },
+                    *end,
+                    Point {
+                        x: start.x,
+                        y: end.y,
+                    },
+                ]
+                .iter()
+                .map(|p| ChainItem::Point(f(p)))
+                .collect(),
+            ),
         },
         Shape::Polygon { points } => Shape::Polygon {
-            points: points.iter().map(f).collect(),
+            points: points.map(|p| f(&p)),
         },
-        Shape::Curve { points } => Shape::Curve {
-            points: points.iter().map(f).collect(),
+        Shape::Curve {
+            start,
+            control1,
+            control2,
+            end,
+        } => Shape::Curve {
+            start: f(start),
+            control1: f(control1),
+            control2: f(control2),
+            end: f(end),
         },
     };
     Drawing {
@@ -739,13 +749,19 @@ fn outline_points(drawing: &Drawing, tolerance: f64) -> (Vec<Point>, bool) {
             ],
             true,
         ),
-        Shape::Polygon { points } => (points.clone(), true),
-        Shape::Curve { points } => (bezier(points), false),
+        Shape::Polygon { points } => (points.flatten(tolerance), true),
+        Shape::Curve {
+            start,
+            control1,
+            control2,
+            end,
+        } => (bezier([*start, *control1, *control2, *end]), false),
     }
 }
 
 /// The box around an outline drawing's centre line: exact for an arc and
-/// a circle, the flattened points (within `tolerance`) for a curve.
+/// a circle and a polygon's arcs, the flattened points (within
+/// `tolerance`) for a curve.
 pub(crate) fn graphic_bounds(drawing: &Drawing, tolerance: f64) -> Option<Bounds> {
     match &drawing.shape {
         Shape::Arc { start, mid, end } => Some(match Arc::through(*start, *mid, *end) {
@@ -765,7 +781,8 @@ pub(crate) fn graphic_bounds(drawing: &Drawing, tolerance: f64) -> Option<Bounds
                 },
             })
         }
-        Shape::Line { .. } | Shape::Rect { .. } | Shape::Polygon { .. } | Shape::Curve { .. } => {
+        Shape::Polygon { points } => points.bounds(),
+        Shape::Line { .. } | Shape::Rect { .. } | Shape::Curve { .. } => {
             let (points, _) = outline_points(drawing, tolerance);
             Bounds::around(points)
         }
@@ -776,13 +793,8 @@ pub(crate) fn graphic_bounds(drawing: &Drawing, tolerance: f64) -> Option<Bounds
 /// curve looks smooth at any zoom the outline is drawn at.
 const BEZIER_SEGMENTS: usize = 32;
 
-/// A cubic Bezier through its four control points as a polyline; fewer
-/// than four points come back as they are.
-fn bezier(points: &[Point]) -> Vec<Point> {
-    let [p0, p1, p2, p3] = match points {
-        [p0, p1, p2, p3] => [*p0, *p1, *p2, *p3],
-        _ => return points.to_vec(),
-    };
+/// A cubic Bezier through its four control points as a polyline.
+fn bezier([p0, p1, p2, p3]: [Point; 4]) -> Vec<Point> {
     (0..=BEZIER_SEGMENTS)
         .map(|i| {
             #[expect(clippy::cast_precision_loss, reason = "i is at most 32")]
@@ -1158,7 +1170,12 @@ impl MeshBuilder {
             return;
         }
         for fill in zone.fills.iter().filter(|fill| fill.layer == layer) {
-            let polygon: Vec<Point> = fill.points.iter().map(|&p| frame.apply(p)).collect();
+            let polygon: Vec<Point> = fill
+                .points
+                .flatten(self.tolerance)
+                .into_iter()
+                .map(|p| frame.apply(p))
+                .collect();
             self.fill(&[polygon], &[]);
         }
     }
@@ -1169,7 +1186,12 @@ impl MeshBuilder {
     /// `k`, so one passes through the origin and the pattern of two zones
     /// lines up.
     fn zone_hatch(&mut self, zone: &Zone, frame: &Transform) {
-        let outline: Vec<Point> = zone.outline.iter().map(|&p| frame.apply(p)).collect();
+        let outline: Vec<Point> = zone
+            .outline
+            .flatten(self.tolerance)
+            .into_iter()
+            .map(|p| frame.apply(p))
+            .collect();
         let Some(bounds) = Bounds::around(outline.iter().copied()) else {
             return;
         };

@@ -1114,3 +1114,98 @@ fn a_point_far_along_the_line_through_a_collinear_join_is_not_covered() {
         "the join's zero-area triangle lies across the stroke, on this line"
     );
 }
+
+/// A square of 10 whose right side bulges out through a semicircle
+/// (centre (10, 5), radius 5) to x = 15, as the entries of a point list.
+const BULGING_PTS: &str = "(pts (xy 0 0) (arc (start 10 0) (mid 15 5) (end 10 10)) (xy 0 10))";
+
+/// The area the bulging square covers: the square and a half disc.
+fn bulging_area() -> f64 {
+    100.0 + PI * 25.0 / 2.0
+}
+
+const ON_THE_ARC: Point = Point { x: 15.0, y: 5.0 };
+
+#[test]
+fn an_unfilled_zones_hatch_outline_follows_its_arc() {
+    let board = board(&format!(
+        r#"(zone (net "GND") (layers "F.Cu") (hatch edge 0.5) (fill yes)
+             (polygon {BULGING_PTS}))"#
+    ));
+    let mesh = f_cu(&board);
+    assert!(mesh.covers(ON_THE_ARC), "the arc's far side is stroked");
+    assert_bounds(&mesh, (-0.05, -0.05), (15.05, 10.05), 0.01);
+}
+
+#[test]
+fn a_zone_fill_follows_its_arc() {
+    let board = board(&format!(
+        r#"(zone (net "GND") (layers "F.Cu") (hatch edge 0.5) (fill yes)
+             (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+             (filled_polygon (layer "F.Cu") {BULGING_PTS}))"#
+    ));
+    let mesh = f_cu(&board);
+    assert_close(mesh.area(), bulging_area(), 0.001, "fill area");
+    assert!(mesh.covers(Point { x: 14.99, y: 5.0 }));
+    assert_bounds(&mesh, (0.0, 0.0), (15.0, 10.0), 0.002);
+}
+
+#[test]
+fn a_board_polygon_on_edge_cuts_follows_its_arc() {
+    let board = board(&format!(
+        r#"(gr_poly {BULGING_PTS} (stroke (width 0.1) (type default)) (fill no) (layer "Edge.Cuts"))"#
+    ));
+    let tessellator = Tessellator::new(TOLERANCE);
+    assert!(tessellator.outline(&board).covers(ON_THE_ARC));
+    let bounds = tessellator.outline_bounds(&board).expect("an outline");
+    assert_bounds_eq(bounds, (0.0, 0.0), (15.0, 10.0));
+}
+
+#[test]
+fn a_footprint_polygon_follows_its_arc_in_the_footprints_frame() {
+    // The footprint sits at (100, 0) turned 90 degrees: KiCad turns
+    // counter-clockwise on the screen, where y points down, so the
+    // footprint's (x, y) lands at (100 + y, -x).
+    let board = board(&format!(
+        r#"(footprint "X" (layer "F.Cu") (at 100 0 90)
+             (fp_poly {BULGING_PTS} (stroke (width 0.1) (type default)) (fill no) (layer "Edge.Cuts")))"#
+    ));
+    let tessellator = Tessellator::new(TOLERANCE);
+    assert!(
+        tessellator
+            .outline(&board)
+            .covers(Point { x: 105.0, y: -15.0 }),
+        "the arc's mid point, carried with the rest"
+    );
+}
+
+#[test]
+fn a_custom_pads_polygon_follows_its_arc() {
+    let board = board(&format!(
+        r#"(footprint "X" (layer "F.Cu") (at 0 0)
+             (pad "1" smd custom (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "GND")
+               (options (clearance outline) (anchor circle))
+               (primitives (gr_poly {BULGING_PTS} (width 0) (fill yes)))))"#
+    ));
+    let mesh = f_cu(&board);
+    assert_close(mesh.area(), bulging_area(), 0.001, "pad area");
+    assert!(mesh.covers(Point { x: 14.99, y: 5.0 }));
+}
+
+#[test]
+fn a_collinear_arc_in_an_outline_goes_through_its_mid_point() {
+    // Start, mid and end on one line, the mid beyond the end: no circle,
+    // so the outline runs start, mid, end and doubles back.
+    let board = board(
+        r#"(gr_poly (pts (xy 0 0) (arc (start 10 0) (mid 20 0) (end 14 0)) (xy 14 10) (xy 0 10))
+             (stroke (width 0.1) (type default)) (fill no) (layer "Edge.Cuts"))"#,
+    );
+    let tessellator = Tessellator::new(TOLERANCE);
+    assert!(
+        tessellator
+            .outline(&board)
+            .covers(Point { x: 19.0, y: 0.0 })
+    );
+    let bounds = tessellator.outline_bounds(&board).expect("an outline");
+    assert_bounds_eq(bounds, (0.0, 0.0), (20.0, 10.0));
+}

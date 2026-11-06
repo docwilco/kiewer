@@ -267,7 +267,8 @@ impl Metadata {
 }
 
 /// The box around the board-level outline, or `None` without one. Exact
-/// for lines, rectangles, polygons, arcs and circles; a Bezier curve
+/// for lines, rectangles, polygons (their arcs by the arcs' own bounds),
+/// arcs and circles; a Bezier curve
 /// contributes its control points, which contain the curve.
 fn outline_bounds(board: &Board) -> Option<Bounds> {
     board
@@ -298,9 +299,13 @@ fn shape_bounds(shape: &Shape) -> Option<Bounds> {
                 },
             })
         }
-        Shape::Polygon { points } | Shape::Curve { points } => {
-            Bounds::around(points.iter().copied())
-        }
+        Shape::Polygon { points } => points.bounds(),
+        Shape::Curve {
+            start,
+            control1,
+            control2,
+            end,
+        } => Bounds::around([*start, *control1, *control2, *end]),
     }
 }
 
@@ -453,6 +458,19 @@ mod tests {
         assert_eq!(details[1], ("Layers", "26 (4 copper)".to_owned()));
         assert!(details[2].1.ends_with(" mm"), "{:?}", details[2]);
         assert_eq!(details[3], ("Fonts", "Consolas, Newstroke".to_owned()));
+    }
+
+    #[test]
+    fn an_outline_polygon_bulging_through_an_arc_is_measured_to_the_bulge() {
+        let board = kicad_core::parse_board(
+            "(kicad_pcb (version 20241229) (generator \"test\") (layers (0 \"F.Cu\" signal) (44 \"Edge.Cuts\" user))
+               (gr_poly (pts (xy 0 0) (arc (start 10 0) (mid 15 5) (end 10 10)) (xy 0 10))
+                 (stroke (width 0.1) (type default)) (fill no) (layer \"Edge.Cuts\")))",
+        )
+        .expect("the board parses");
+        let (width, height) = Metadata::of(&board).board_size.expect("an outline");
+        assert!((width - 15.0).abs() < 1e-9, "{width}");
+        assert!((height - 10.0).abs() < 1e-9, "{height}");
     }
 
     #[test]

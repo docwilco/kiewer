@@ -11,10 +11,10 @@ use std::collections::BTreeMap;
 
 use crate::error::{Error, MIN_BOARD_VERSION, Result};
 use crate::model::{
-    Board, Clearances, Drawing, Drill, Fill, Font, Footprint, FootprintAttributes, Graphic,
-    Horizontal, Justify, Layer, LayerId, LayerKind, Net, NetId, Pad, PadKind, PadShape, Point,
-    Property, Segment, Shape, Size, Tenting, TentingOverride, Text, TextRole, TrackArc, Vertical,
-    Via, ViaKind, Zone,
+    Board, Chain, ChainItem, Clearances, Drawing, Drill, Fill, Font, Footprint,
+    FootprintAttributes, Graphic, Horizontal, Justify, Layer, LayerId, LayerKind, Net, NetId, Pad,
+    PadKind, PadShape, Point, Property, Segment, Shape, Size, Tenting, TentingOverride, Text,
+    TextRole, TrackArc, Vertical, Via, ViaKind, Zone,
 };
 use crate::sexpr::{self, Deadline, Node};
 
@@ -476,12 +476,12 @@ impl Parser {
             None => 0,
         };
         let filled = node.child("fill").is_some_and(|fill| fill.has_flag("yes"));
-        let outline = points(node.require("polygon")?.require("pts")?)?;
+        let outline = chain(node.require("polygon")?.require("pts")?)?;
         let mut fills = Vec::new();
         for fill in node.children("filled_polygon") {
             fills.push(Fill {
                 layer: self.layer(fill.require("layer")?)?,
-                points: points(fill.require("pts")?)?,
+                points: chain(fill.require("pts")?)?,
                 island: fill.child("island").is_some(),
             });
         }
@@ -706,22 +706,52 @@ fn is_shape(head: &str) -> bool {
     matches!(kind, "line" | "arc" | "circle" | "rect" | "poly" | "curve")
 }
 
-/// The points of a `(pts ...)`: each `(xy ...)` one point, each
-/// `(arc (start) (mid) (end))` its three.
-fn points(node: &Node) -> Result<Vec<Point>> {
-    let mut points = Vec::new();
+/// A `(pts ...)` that may hold arcs: each `(xy ...)` a point, each
+/// `(arc (start) (mid) (end))` an arc, in file order.
+fn chain(node: &Node) -> Result<Chain> {
+    let mut items = Vec::new();
     for item in node.lists() {
+        match item.head()? {
+            "xy" => items.push(ChainItem::Point(point(item)?)),
+            "arc" => items.push(ChainItem::Arc {
+                start: point(item.require("start")?)?,
+                mid: point(item.require("mid")?)?,
+                end: point(item.require("end")?)?,
+            }),
+            _ => {}
+        }
+    }
+    Ok(Chain::new(items))
+}
+
+/// A `gr_curve` or `fp_curve`: a cubic Bezier is exactly four `(xy ...)`
+/// points, as KiCad's reader insists.
+fn bezier(node: &Node) -> Result<Shape> {
+    let head = node.head()?;
+    let mut points = Vec::new();
+    for item in node.require("pts")?.lists() {
         match item.head()? {
             "xy" => points.push(point(item)?),
             "arc" => {
-                points.push(point(item.require("start")?)?);
-                points.push(point(item.require("mid")?)?);
-                points.push(point(item.require("end")?)?);
+                return Err(item.error(format!(
+                    "expected four (xy ...) points in ({head} ...), found an (arc ...)"
+                )));
             }
             _ => {}
         }
     }
-    Ok(points)
+    let [start, control1, control2, end] = points[..] else {
+        return Err(node.error(format!(
+            "expected four (xy ...) points in ({head} ...), found {}",
+            points.len()
+        )));
+    };
+    Ok(Shape::Curve {
+        start,
+        control1,
+        control2,
+        end,
+    })
 }
 
 /// A `gr_*` or `fp_*` shape with its stroke width and fill. The stroke is
@@ -754,11 +784,9 @@ fn drawing(node: &Node) -> Result<Drawing> {
             end: point(node.require("end")?)?,
         },
         "poly" => Shape::Polygon {
-            points: points(node.require("pts")?)?,
+            points: chain(node.require("pts")?)?,
         },
-        "curve" => Shape::Curve {
-            points: points(node.require("pts")?)?,
-        },
+        "curve" => bezier(node)?,
         _ => {
             return Err(node.error(format!(
                 "expected a shape (line, arc, circle, rect, poly, curve), found ({head} ...)"

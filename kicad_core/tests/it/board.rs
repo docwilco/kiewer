@@ -4,7 +4,8 @@
 use std::sync::OnceLock;
 
 use kicad_core::model::{
-    Board, Layer, LayerKind, NetId, PadKind, Shape, Tenting, TentingOverride, TextRole, ViaKind,
+    Board, Chain, ChainItem, Layer, LayerKind, NetId, PadKind, Point, Shape, Tenting,
+    TentingOverride, TextRole, ViaKind,
 };
 use kicad_core::parse_board;
 use kiewer_assert::assert_is_not_empty;
@@ -111,7 +112,7 @@ fn every_via_segment_and_zone_carries_a_net_that_resolves() {
                 zone.layers.contains(&fill.layer),
                 "a fill on one of the zone's layers"
             );
-            assert!(fill.points.len() >= 3);
+            assert!(fill.points.items().len() >= 3);
         }
     }
 }
@@ -388,7 +389,11 @@ fn a_kicad9_board_reads_its_zone_footprint_and_pads() {
     assert_eq!(zone.name.as_deref(), Some("ground"));
     assert_eq!(zone.priority, 1);
     assert_eq!(zone.layers.len(), 2, "F&B.Cu is both outer layers");
-    assert_eq!(zone.outline.len(), 5, "two points and an arc's three");
+    assert_eq!(
+        zone.outline.items().len(),
+        3,
+        "two points and an arc, which stays one entry"
+    );
     assert_eq!(zone.fills.len(), 1);
     assert!(zone.fills[0].island);
 
@@ -518,5 +523,94 @@ fn a_via_states_its_own_tenting(via: &str, front: Option<bool>, back: Option<boo
     assert_eq!(
         tenting_board("", via).vias[0].tenting,
         TentingOverride { front, back }
+    );
+}
+
+/// A bare board holding `items`.
+fn board_of(items: &str) -> Board {
+    parse_board(&format!(
+        r#"(kicad_pcb (version 20241229) (generator "pcbnew")
+  (layers (0 "F.Cu" signal) (25 "Edge.Cuts" user))
+  {items}
+)"#
+    ))
+    .expect("the test board parses")
+}
+
+fn at(x: f64, y: f64) -> Point {
+    Point { x, y }
+}
+
+/// A square whose right side bulges out through a semicircle to x = 15,
+/// as the entries of a point list: two points and an arc between them.
+fn bulging() -> Chain {
+    Chain::new(vec![
+        ChainItem::Point(at(0.0, 0.0)),
+        ChainItem::Arc {
+            start: at(10.0, 0.0),
+            mid: at(15.0, 5.0),
+            end: at(10.0, 10.0),
+        },
+        ChainItem::Point(at(0.0, 10.0)),
+    ])
+}
+
+const BULGING_PTS: &str = "(pts (xy 0 0) (arc (start 10 0) (mid 15 5) (end 10 10)) (xy 0 10))";
+
+#[test]
+fn a_zone_outline_and_its_fill_keep_their_arcs() {
+    let board = board_of(&format!(
+        r#"(zone (net "GND") (layer "F.Cu") (polygon {BULGING_PTS})
+             (filled_polygon (layer "F.Cu") {BULGING_PTS}))"#
+    ));
+    let zone = &board.zones[0];
+    assert_eq!(zone.outline, bulging());
+    assert_eq!(zone.fills[0].points, bulging());
+}
+
+#[test]
+fn a_board_and_a_footprint_polygon_keep_their_arcs() {
+    let board = board_of(&format!(
+        r#"(gr_poly {BULGING_PTS} (stroke (width 0.1) (type default)) (fill no) (layer "Edge.Cuts"))
+           (footprint "X" (layer "F.Cu") (at 0 0)
+             (fp_poly {BULGING_PTS} (stroke (width 0.1) (type default)) (fill no) (layer "Edge.Cuts")))"#
+    ));
+    let Shape::Polygon { points } = &board.graphics[0].drawing.shape else {
+        panic!("a polygon");
+    };
+    assert_eq!(*points, bulging());
+    let Shape::Polygon { points } = &board.footprints[0].graphics[0].drawing.shape else {
+        panic!("a polygon");
+    };
+    assert_eq!(*points, bulging());
+}
+
+#[test]
+fn a_custom_pads_polygon_keeps_its_arc() {
+    let board = board_of(&format!(
+        r#"(footprint "X" (layer "F.Cu") (at 0 0)
+             (pad "1" smd custom (at 0 0) (size 0.5 0.5) (layers "F.Cu")
+               (options (clearance outline) (anchor circle))
+               (primitives (gr_poly {BULGING_PTS} (width 0) (fill yes)))))"#
+    ));
+    let Shape::Polygon { points } = &board.footprints[0].pads[0].primitives[0].shape else {
+        panic!("a polygon");
+    };
+    assert_eq!(*points, bulging());
+}
+
+#[test]
+fn a_curve_is_its_four_named_points() {
+    let board = board_of(
+        r#"(gr_curve (pts (xy 0 0) (xy 1 2) (xy 3 4) (xy 5 6)) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))"#,
+    );
+    assert_eq!(
+        board.graphics[0].drawing.shape,
+        Shape::Curve {
+            start: at(0.0, 0.0),
+            control1: at(1.0, 2.0),
+            control2: at(3.0, 4.0),
+            end: at(5.0, 6.0),
+        }
     );
 }

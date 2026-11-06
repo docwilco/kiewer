@@ -8,6 +8,8 @@
 //! tables ([`LayerId`], [`NetId`]), resolved at parse time: a model never
 //! holds a reference to a layer or net that does not exist.
 
+use crate::geometry::{Arc, Bounds};
+
 /// A point in millimetres, y down.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Point {
@@ -148,16 +150,116 @@ pub enum Shape {
         /// The opposite corner.
         end: Point,
     },
-    /// A closed polygon.
+    /// A closed polygon, arcs among its edges.
     Polygon {
-        /// The vertices in order; the last joins the first.
-        points: Vec<Point>,
+        /// The entries in order; the last joins the first.
+        points: Chain,
     },
     /// A cubic Bezier curve.
     Curve {
-        /// The four control points.
-        points: Vec<Point>,
+        /// Where the curve starts.
+        start: Point,
+        /// The control point the curve leaves `start` towards.
+        control1: Point,
+        /// The control point the curve arrives at `end` from.
+        control2: Point,
+        /// Where the curve ends.
+        end: Point,
     },
+}
+
+/// One entry of a [`Chain`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChainItem {
+    /// A vertex.
+    Point(Point),
+    /// A circular arc through three points. Its start is its own vertex,
+    /// joined to the entry before it by a straight edge.
+    Arc {
+        /// Where the arc starts.
+        start: Point,
+        /// A point on the arc between the ends.
+        mid: Point,
+        /// Where the arc ends.
+        end: Point,
+    },
+}
+
+/// A KiCad point list that may hold arcs (`SHAPE_LINE_CHAIN`): its entries
+/// in file order, consecutive ones joined by straight edges, the last
+/// back to the first. The parser keeps the arcs as written; each reader
+/// flattens at its own tolerance ([`Chain::flatten`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Chain {
+    items: Vec<ChainItem>,
+}
+
+impl Chain {
+    /// The chain of `items`.
+    #[must_use]
+    pub fn new(items: Vec<ChainItem>) -> Self {
+        Self { items }
+    }
+
+    /// The entries in file order.
+    #[must_use]
+    pub fn items(&self) -> &[ChainItem] {
+        &self.items
+    }
+
+    /// The chain as a polygon, each arc flattened to within `tolerance`
+    /// like a track arc. An arc with no circle through its points (they
+    /// are collinear, or two are equal) gives straight edges start, mid,
+    /// end.
+    #[must_use]
+    pub fn flatten(&self, tolerance: f64) -> Vec<Point> {
+        let mut points = Vec::with_capacity(self.items.len());
+        for item in &self.items {
+            match *item {
+                ChainItem::Point(point) => points.push(point),
+                ChainItem::Arc { start, mid, end } => match Arc::through(start, mid, end) {
+                    Some(arc) => points.extend(arc.flatten(tolerance)),
+                    None => points.extend([start, mid, end]),
+                },
+            }
+        }
+        points
+    }
+
+    /// The box around the chain: each arc contributes its true bounds,
+    /// not its flattened points. `None` for an empty chain.
+    #[must_use]
+    pub fn bounds(&self) -> Option<Bounds> {
+        self.items
+            .iter()
+            .map(|item| match *item {
+                ChainItem::Point(point) => Bounds::of(point),
+                ChainItem::Arc { start, mid, end } => match Arc::through(start, mid, end) {
+                    Some(arc) => arc.bounds(),
+                    None => Bounds::of(start).including(mid).including(end),
+                },
+            })
+            .reduce(Bounds::union)
+    }
+
+    /// The chain with `f` applied to every point, an arc's mid included.
+    #[must_use]
+    pub fn map(&self, f: impl Fn(Point) -> Point) -> Self {
+        Self {
+            items: self
+                .items
+                .iter()
+                .map(|item| match *item {
+                    ChainItem::Point(point) => ChainItem::Point(f(point)),
+                    ChainItem::Arc { start, mid, end } => ChainItem::Arc {
+                        start: f(start),
+                        mid: f(mid),
+                        end: f(end),
+                    },
+                })
+                .collect(),
+        }
+    }
 }
 
 /// A shape with its stroke width and fill, without a layer: what a custom
@@ -620,7 +722,7 @@ pub struct Fill {
     /// The layer the fill is on.
     pub layer: LayerId,
     /// The outline; holes are spliced in as KiCad writes them.
-    pub points: Vec<Point>,
+    pub points: Chain,
     /// An island KiCad flagged.
     pub island: bool,
 }
@@ -640,9 +742,8 @@ pub struct Zone {
     pub keepout: bool,
     /// Whether KiCad was asked to fill it.
     pub filled: bool,
-    /// The outline the user drew. An arc in the outline contributes its
-    /// start, mid and end points.
-    pub outline: Vec<Point>,
+    /// The outline the user drew, arcs kept.
+    pub outline: Chain,
     /// The fills stored in the file; empty when the zone was never filled.
     pub fills: Vec<Fill>,
 }
