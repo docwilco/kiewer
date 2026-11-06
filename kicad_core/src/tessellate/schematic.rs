@@ -120,10 +120,10 @@ impl SheetMeshes {
     pub fn layers(&self) -> Vec<(SchematicLayer, Mesh)> {
         self.layers
             .iter()
-            .map(|(layer, units)| {
+            .map(|(layer, meshes)| {
                 let mut mesh = Mesh::default();
-                for unit in units {
-                    mesh.append(&unit.item_mesh.mesh);
+                for sheet_mesh in meshes {
+                    mesh.append(&sheet_mesh.item_mesh.mesh);
                 }
                 (*layer, mesh)
             })
@@ -131,22 +131,24 @@ impl SheetMeshes {
             .collect()
     }
 
-    /// The geometry of `net`, by layer in draw order: its items' units,
+    /// The geometry of `net`, by layer in draw order: its items' meshes,
     /// in the order the net lists the items.
     #[must_use]
     pub fn net(&self, net: &SheetNet) -> Vec<(SchematicLayer, Mesh)> {
         let mut by_item: BTreeMap<SheetItem, Vec<(SchematicLayer, &SheetMesh)>> = BTreeMap::new();
-        for (layer, units) in &self.layers {
-            for unit in units {
-                if let Some(key) = unit.net_item {
-                    by_item.entry(key).or_default().push((*layer, unit));
+        for (layer, meshes) in &self.layers {
+            for sheet_mesh in meshes {
+                if let Some(key) = sheet_mesh.net_item {
+                    by_item.entry(key).or_default().push((*layer, sheet_mesh));
                 }
             }
         }
         let mut out: BTreeMap<SchematicLayer, Mesh> = BTreeMap::new();
         for item in &net.items {
-            for (layer, unit) in by_item.get(item).into_iter().flatten() {
-                out.entry(*layer).or_default().append(&unit.item_mesh.mesh);
+            for (layer, sheet_mesh) in by_item.get(item).into_iter().flatten() {
+                out.entry(*layer)
+                    .or_default()
+                    .append(&sheet_mesh.item_mesh.mesh);
             }
         }
         out.into_iter()
@@ -160,30 +162,30 @@ impl Tessellator {
     /// (the [`SchematicLayer`] order).
     #[must_use]
     pub fn sheet(&self, sheet: &Sheet) -> Vec<(SchematicLayer, Mesh)> {
-        self.sheet_units(sheet).layers()
+        self.sheet_item_meshes(sheet).layers()
     }
 
-    /// Every item of `sheet` as the units it is drawn from.
+    /// Every item of `sheet` as the meshes it is drawn from.
     #[must_use]
-    pub fn sheet_units(&self, sheet: &Sheet) -> SheetMeshes {
+    pub fn sheet_item_meshes(&self, sheet: &Sheet) -> SheetMeshes {
         let mut layers = Layers::new(self);
         layers.sheet(sheet);
-        layers.into_units()
+        layers.into_meshes()
     }
 
-    /// Build again, in `units`, every curved item this tessellator's
+    /// Build again, in `meshes`, every curved item this tessellator's
     /// region reaches and every item built fine before: the rest keep
     /// their meshes. True when anything changed.
-    pub fn refine_sheet(&self, sheet: &Sheet, units: &mut SheetMeshes) -> bool {
+    pub fn refine_sheet(&self, sheet: &Sheet, meshes: &mut SheetMeshes) -> bool {
         let curves = Curves::of(self);
         // The items to build, with the tolerance a stroke's caps take.
         let mut only: BTreeMap<usize, f64> = BTreeMap::new();
-        for unit in units.layers.values().flatten() {
-            if !unit.item_mesh.wants(self.fine) {
+        for sheet_mesh in meshes.layers.values().flatten() {
+            if !sheet_mesh.item_mesh.wants(self.fine) {
                 continue;
             }
-            let round = curves.round_for(unit.item_mesh.bounds.as_ref());
-            let entry = only.entry(unit.item).or_insert(round);
+            let round = curves.round_for(sheet_mesh.item_mesh.bounds.as_ref());
+            let entry = only.entry(sheet_mesh.item).or_insert(round);
             *entry = entry.min(round);
         }
         if only.is_empty() {
@@ -192,21 +194,21 @@ impl Tessellator {
         let mut layers = Layers::new(self);
         layers.only = Some(only);
         layers.sheet(sheet);
-        let fresh = layers.into_units();
+        let fresh = layers.into_meshes();
         let built: BTreeSet<usize> = fresh
             .layers
             .values()
             .flatten()
-            .map(|unit| unit.item)
+            .map(|sheet_mesh| sheet_mesh.item)
             .collect();
-        for list in units.layers.values_mut() {
-            list.retain(|unit| !built.contains(&unit.item));
+        for list in meshes.layers.values_mut() {
+            list.retain(|sheet_mesh| !built.contains(&sheet_mesh.item));
         }
         for (layer, list) in fresh.layers {
-            units.layers.entry(layer).or_default().extend(list);
+            meshes.layers.entry(layer).or_default().extend(list);
         }
-        for list in units.layers.values_mut() {
-            list.sort_by_key(|unit| unit.item);
+        for list in meshes.layers.values_mut() {
+            list.sort_by_key(|sheet_mesh| sheet_mesh.item);
         }
         true
     }
@@ -260,7 +262,7 @@ impl From<Frame> for Carried {
     }
 }
 
-/// One mesh builder per layer, filled in any order, and the units each
+/// One mesh builder per layer, filled in any order, and the meshes each
 /// item of the sheet made of them.
 struct Layers {
     tessellator: Tessellator,
@@ -273,7 +275,7 @@ struct Layers {
     /// When building again: the items to build, by ordinal, with the
     /// tolerance for their caps. The others are not drawn at all.
     only: Option<BTreeMap<usize, f64>>,
-    units: Vec<(SchematicLayer, SheetMesh)>,
+    meshes: Vec<(SchematicLayer, SheetMesh)>,
 }
 
 impl Layers {
@@ -283,11 +285,9 @@ impl Layers {
             curves: Curves::of(tessellator),
             builders: BTreeMap::new(),
             item: 0,
-            round: tessellator
-                .fine
-                .map_or(tessellator.tolerance, |fine| fine.tolerance),
+            round: tessellator.tolerance,
             only: None,
-            units: Vec::new(),
+            meshes: Vec::new(),
         }
     }
 
@@ -303,7 +303,7 @@ impl Layers {
     }
 
     /// One item of the sheet: what `draw` adds, on whatever layers, is
-    /// a unit on each. `key` is the net item it is, when it is one.
+    /// a mesh on each. `key` is the net item it is, when it is one.
     fn item(&mut self, key: Option<SheetItem>, draw: impl FnOnce(&mut Self)) {
         let ordinal = self.item;
         self.item += 1;
@@ -317,26 +317,26 @@ impl Layers {
         draw(self);
         let curved = self.curves.take_touched();
         for (layer, builder) in &mut self.builders {
-            let unit = builder.close_item(None, curved);
-            if !unit.mesh.positions.is_empty() {
-                self.units.push((
+            let closed = builder.close_item(None, curved);
+            if !closed.mesh.positions.is_empty() {
+                self.meshes.push((
                     *layer,
                     SheetMesh {
                         item: ordinal,
                         net_item: key,
-                        item_mesh: unit,
+                        item_mesh: closed,
                     },
                 ));
             }
         }
     }
 
-    fn into_units(self) -> SheetMeshes {
-        let mut units = SheetMeshes::default();
-        for (layer, unit) in self.units {
-            units.layers.entry(layer).or_default().push(unit);
+    fn into_meshes(self) -> SheetMeshes {
+        let mut meshes = SheetMeshes::default();
+        for (layer, sheet_mesh) in self.meshes {
+            meshes.layers.entry(layer).or_default().push(sheet_mesh);
         }
-        units
+        meshes
     }
 
     /// Every item of `sheet`, in the order it draws them.

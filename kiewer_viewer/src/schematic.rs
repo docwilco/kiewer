@@ -115,7 +115,7 @@ impl SheetScene {
 /// a sheet with nothing drawn on it.
 #[must_use]
 pub fn build(sheet: &Sheet, format: wgpu::TextureFormat) -> Option<SheetScene> {
-    let meshes = tessellator(None).sheet_units(sheet);
+    let meshes = tessellator(None).sheet_item_meshes(sheet);
     let drawn = meshes
         .layers()
         .iter()

@@ -531,8 +531,10 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::OnceLock;
 
+    use kicad_core::geometry::Bounds;
     use kicad_core::hit::{find_footprint, footprint_bounds, net_pads};
     use kicad_core::model::LayerId;
+    use kicad_core::tessellate::Fine;
     use kiewer_assert::assert_is_not_empty;
     use test_case::test_case;
 
@@ -688,6 +690,42 @@ mod tests {
             highlight.geometry(scene),
             None,
             "nothing lit, nothing to give"
+        );
+    }
+
+    #[test]
+    fn the_lit_nets_geometry_after_a_refinement_carries_the_refined_via() {
+        let (board, scene) = hand_off();
+        let (_, via) = gnd_pad_and_vdd_via(board, &Highlight::new(board));
+        let mut highlight = pinned(board, &[via]);
+        let floor = highlight.geometry(scene).expect("the net is appended");
+        let at = board.vias.first().expect("a via").at;
+        let mut refined = scene.clone();
+        assert!(refined.refine(
+            board,
+            Some(Fine {
+                tolerance: 0.5 / 1024.0,
+                region: Bounds {
+                    min: Point {
+                        x: at.x - 5.0,
+                        y: at.y - 5.0,
+                    },
+                    max: Point {
+                        x: at.x + 5.0,
+                        y: at.y + 5.0,
+                    },
+                },
+            })
+        ));
+        highlight.rebuilt();
+        let fine = highlight
+            .geometry(&refined)
+            .expect("the GPU is given the net again");
+        assert!(
+            fine.vertices.len() > floor.vertices.len(),
+            "the refined via, not the cached chords: {} against {}",
+            fine.vertices.len(),
+            floor.vertices.len()
         );
     }
 

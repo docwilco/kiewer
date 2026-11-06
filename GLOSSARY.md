@@ -143,7 +143,7 @@ The triangles of one board item (a track, a via, a pad, a graphic, a text, one z
 _Avoid_: unit (a symbol's unit), part
 
 **Item set**:
-The item meshes one slice of a scene is built from, in a fixed order: the board fill, the outline, a layer's holes, its copper other than zones, its zones, its mask, its paste, its graphics or its text.
+The item meshes one slice of a scene is built from, in a fixed order: the board fill, the outline, a layer's holes, its copper other than zones, its zones, its mask, its paste, its graphics or its text; and, for the holes layer, the rims and the all-holes set.
 _Avoid_: part, run (a chain of track segments)
 
 **Refined region**:

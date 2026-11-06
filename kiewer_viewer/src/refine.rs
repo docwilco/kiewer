@@ -117,15 +117,16 @@ impl Refiner {
             // rebuild, once.
             return (stepped && self.region.take().is_some()).then_some(Plan { fine: None });
         }
-        // A view that left the region is only worth a rebuild where the
-        // floor would show: past 500 px/mm, where half a pixel is finer
-        // than the floor. Zooming out within a step takes the view past
-        // the region (a step is four times the scale, the region three
-        // times the view) with nothing to see for it.
+        // A view that left the region, or a pan that stopped off its
+        // centre, is only worth a rebuild where the floor would show: past
+        // 500 px/mm, where half a pixel is finer than the floor. Zooming
+        // out within a step takes the view past the region (a step is four
+        // times the scale, the region three times the view) with nothing
+        // to see for it; below that only a step change rebuilds.
         let shows = 0.5 / scale < TOLERANCE;
         let due = stepped
             || self.region.is_none_or(|region| {
-                (shows && !region.contains_bounds(&view)) || self.pan_stopped(&view, &region, now)
+                shows && (!region.contains_bounds(&view) || self.pan_stopped(&view, &region, now))
             });
         due.then(|| {
             // The view plus one view on every side.
@@ -150,9 +151,13 @@ impl Refiner {
 
     /// The milliseconds from `now` until a pan stop could make a rebuild
     /// due, when one is waiting for it: the view is in the region and off
-    /// its centre, and input came lately. `None` when nothing waits.
+    /// its centre, and input came lately, at a scale where the floor
+    /// shows. `None` when nothing waits.
     #[must_use]
-    pub fn wait(&self, view: &Bounds, now: f64) -> Option<f64> {
+    pub fn wait(&self, view: &Bounds, scale: f64, now: f64) -> Option<f64> {
+        if 0.5 / scale >= TOLERANCE {
+            return None;
+        }
         let region = self.region.as_ref()?;
         let last = self.last_input?;
         let left = PAN_STOP - (now - last);
@@ -309,42 +314,60 @@ mod tests {
     fn a_pan_that_stops_off_centre_builds_after_250_ms_and_a_burst_builds_once() {
         let mut refiner = Refiner::default();
         refiner
-            .check(view(0.0, 0.0, 2.0), 300.0, 0.0)
+            .check(view(0.0, 0.0, 2.0), 600.0, 0.0)
             .expect("step 5");
         // A burst of pans, each inside the region.
         for (i, x) in [0.25, 0.5, 0.75, 1.0].into_iter().enumerate() {
             #[expect(clippy::cast_precision_loss, reason = "at most 3")]
             let now = 100.0 + 20.0 * i as f64;
             refiner.input(now);
-            assert_eq!(refiner.check(view(x, 0.0, 2.0), 300.0, now), None);
+            assert_eq!(refiner.check(view(x, 0.0, 2.0), 600.0, now), None);
         }
         // 249 ms after the last input: not yet.
         assert_eq!(
-            refiner.check(view(1.0, 0.0, 2.0), 300.0, 160.0 + 249.0),
+            refiner.check(view(1.0, 0.0, 2.0), 600.0, 160.0 + 249.0),
             None
         );
         let plan = refiner
-            .check(view(1.0, 0.0, 2.0), 300.0, 160.0 + 250.0)
+            .check(view(1.0, 0.0, 2.0), 600.0, 160.0 + 250.0)
             .expect("the pan stopped");
         assert_eq!(
             plan.fine.map(|fine| fine.region),
             Some(view(-1.0, -2.0, 6.0))
         );
         // Centred now: nothing more.
-        assert_eq!(refiner.check(view(1.0, 0.0, 2.0), 300.0, 1000.0), None);
+        assert_eq!(refiner.check(view(1.0, 0.0, 2.0), 600.0, 1000.0), None);
+    }
+
+    #[test]
+    fn a_pan_stop_below_500_pixels_per_millimetre_builds_nothing_while_the_step_holds() {
+        let mut refiner = Refiner::default();
+        refiner
+            .check(view(0.0, 0.0, 2.0), 65.0 * 4.0, 0.0)
+            .expect("step 5");
+        // Held at step 5 and zoomed out to 65 px/mm: the view is off the
+        // region's centre, inside it, and idle for long.
+        refiner.input(1.0);
+        assert_eq!(refiner.check(view(0.5, 0.0, 2.0), 65.0, 1000.0), None);
+        // A step change still rebuilds.
+        assert!(refiner.check(view(0.5, 0.0, 2.0), 1500.0, 2000.0).is_some());
     }
 
     #[test]
     fn the_wait_names_the_time_left_to_a_pan_stop_only_when_one_is_pending() {
         let mut refiner = Refiner::default();
         refiner
-            .check(view(0.0, 0.0, 2.0), 300.0, 0.0)
+            .check(view(0.0, 0.0, 2.0), 600.0, 0.0)
             .expect("step 5");
         refiner.input(100.0);
         let off = view(0.5, 0.0, 2.0);
-        assert_eq!(refiner.wait(&off, 150.0), Some(200.0));
-        assert_eq!(refiner.wait(&off, 350.0), None, "due: check builds it");
+        assert_eq!(refiner.wait(&off, 600.0, 150.0), Some(200.0));
+        assert_eq!(
+            refiner.wait(&off, 600.0, 350.0),
+            None,
+            "due: check builds it"
+        );
         let centred = view(0.0, 0.0, 2.0);
-        assert_eq!(refiner.wait(&centred, 150.0), None, "nothing waits");
+        assert_eq!(refiner.wait(&centred, 600.0, 150.0), None, "nothing waits");
     }
 }

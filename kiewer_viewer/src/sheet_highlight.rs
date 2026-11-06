@@ -367,6 +367,37 @@ mod tests {
     }
 
     #[test]
+    fn refining_the_sheet_drops_the_lit_nets_cached_meshes() {
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let sheet = parsed(HAND_OFF);
+        let mut scene = crate::schematic::build(&sheet, format).expect("a sheet with content");
+        let mut highlight = SheetHighlight::new(sheet);
+        let gnd = highlight
+            .hit_at(at(92.71, 160.0), 0.0)
+            .expect("the ground wire");
+        highlight.pick_mut().press(Gesture::Click, Some(gnd));
+        let floor = highlight.geometry(&scene).expect("the net is appended");
+        assert_eq!(highlight.geometry(&scene), None, "uploaded once");
+        // Nothing to refine: the cache and what the GPU holds stay.
+        assert!(!highlight.refine(&mut scene, None));
+        assert_eq!(highlight.geometry(&scene), None);
+        let fine = Fine {
+            tolerance: 0.5 / 1024.0,
+            region: scene.bounds,
+        };
+        assert!(highlight.refine(&mut scene, Some(fine)));
+        let refined = highlight
+            .geometry(&scene)
+            .expect("the GPU is given the net again");
+        assert!(
+            refined.vertices.len() > floor.vertices.len(),
+            "the refined meshes, not the cached ones: {} against {}",
+            refined.vertices.len(),
+            floor.vertices.len()
+        );
+    }
+
+    #[test]
     fn a_pin_dims_the_sheet_and_adds_its_geometry_by_layer() {
         let (fixture, scene) = root();
         let format = wgpu::TextureFormat::Rgba8Unorm;

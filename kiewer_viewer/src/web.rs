@@ -813,7 +813,11 @@ impl Viewer {
     #[must_use]
     pub fn refine_wait(&self) -> f64 {
         self.refiner
-            .wait(&self.camera.world_bounds(), self.last_frame)
+            .wait(
+                &self.camera.world_bounds(),
+                self.camera.scale(),
+                self.last_frame,
+            )
             .unwrap_or(0.0)
     }
 
@@ -823,7 +827,8 @@ impl Viewer {
     /// slowest region rebuild over a grid of placements at four scales
     /// up to the camera's ceiling, each from the board as built at load:
     /// the first refinement, the coarsening back from it, and a rebuild
-    /// with the held step one finer than the scale asks for.
+    /// with the held step one finer than the scale asks for, and a pan stop
+    /// at 65 px/mm with step 5 held (which builds nothing).
     /// Empty before a board.
     #[must_use]
     pub fn refine_timing(&self) -> Vec<f64> {
@@ -884,6 +889,36 @@ impl Viewer {
                         worst = worst.max(timed_refine(&mut scene, board, plan.fine));
                     }
                 }
+            }
+        }
+        // Step 5 held, the view zoomed out to 65 px/mm and panned off the
+        // region's centre: the floor shows nothing there, so a pan stop
+        // builds nothing (the refiner answers `None`, which costs nothing).
+        let scale = 65.0;
+        let around = |at: Point, scale: f64| Bounds {
+            min: Point {
+                x: at.x - width / scale / 2.0,
+                y: at.y - height / scale / 2.0,
+            },
+            max: Point {
+                x: at.x + width / scale / 2.0,
+                y: at.y + height / scale / 2.0,
+            },
+        };
+        let middle = Point {
+            x: base.bounds.min.x + base.bounds.width() / 2.0,
+            y: base.bounds.min.y + base.bounds.height() / 2.0,
+        };
+        let mut refiner = Refiner::default();
+        if let Some(held) = refiner.check(around(middle, 1_000.0), 1_000.0, 0.0) {
+            let mut scene = base.clone();
+            scene.refine(board, held.fine);
+            let off = Point {
+                x: middle.x + width / scale / 8.0,
+                y: middle.y,
+            };
+            if let Some(plan) = refiner.check(around(off, scale), scale, 1e9) {
+                worst = worst.max(timed_refine(&mut scene, board, plan.fine));
             }
         }
         vec![whole, worst]
@@ -1405,9 +1440,9 @@ impl Viewer {
             self.scene = Some(scene);
             self.scene_board = Some(stroke);
             self.refiner.reset();
-            // The scene alone is on the GPU now; the next frame appends
-            // the highlighted net's copper again.
-            self.highlight.invalidate();
+            // The scene alone is on the GPU now, and the lit nets' meshes
+            // came from the old one: the next frame takes them again.
+            self.highlight.rebuilt();
         }
     }
 }

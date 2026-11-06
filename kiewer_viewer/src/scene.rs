@@ -263,7 +263,7 @@ impl Scene {
         changed
     }
 
-    /// The meshes of `net`'s units in the `paint` slice of `layer`, in the
+    /// The meshes of `net`'s items in the `paint` slice of `layer`, in the
     /// board's frame: what the highlight lays over the scene, from the
     /// same meshes the scene was stitched from.
     #[must_use]

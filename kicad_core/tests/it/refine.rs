@@ -148,7 +148,7 @@ fn a_beziers_chords_grow_as_the_tolerance_shrinks() {
 
 /// Two vias, one at (10, 10) and one at (100, 100), a track beside the
 /// first, and a zone fill of plain points over the first.
-fn units_board() -> Board {
+fn curved_board() -> Board {
     board(
         r#"(via (at 10 10) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net "GND"))
   (via (at 100 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net "GND"))
@@ -162,15 +162,19 @@ fn units_board() -> Board {
 }
 
 #[test]
-fn a_rebuild_makes_again_only_the_curved_units_the_region_reaches() {
-    let board = units_board();
+fn a_rebuild_makes_again_only_the_curved_items_the_region_reaches() {
+    let board = curved_board();
     let layer = board.layer_named("F.Cu").expect("F.Cu");
     let floor = Tessellator::new(FLOOR);
     let copper = floor.item_meshes(&board, ItemSet::CopperRest(layer), None);
     let copper: Vec<ItemMesh> = copper.into_iter().map(|u| u.expect("built")).collect();
     // Two vias and a track, all with a round part.
     assert_eq!(copper.len(), 3);
-    assert!(copper.iter().all(|unit| unit.curved && !unit.fine));
+    assert!(
+        copper
+            .iter()
+            .all(|item_mesh| item_mesh.curved && !item_mesh.fine)
+    );
     let refined = floor.refined(0.5 / 1024.0, around(10.0, 10.0, 10.0));
     let again = refined.item_meshes(&board, ItemSet::CopperRest(layer), Some(&copper));
     // The order is the board's: segments, then vias.
@@ -180,7 +184,7 @@ fn a_rebuild_makes_again_only_the_curved_units_the_region_reaches() {
     let via = again[1].as_ref().expect("rebuilt");
     assert!(via.fine && via.curved);
     assert!(via.mesh.positions.len() > copper[1].mesh.positions.len());
-    // The region leaves: the unit built fine is built again, at the floor.
+    // The region leaves: the item mesh built fine is built again, at the floor.
     let kept: Vec<ItemMesh> = copper
         .iter()
         .zip(&again)
@@ -197,7 +201,7 @@ fn a_rebuild_makes_again_only_the_curved_units_the_region_reaches() {
 
 #[test]
 fn a_zone_fill_of_plain_points_is_never_made_again() {
-    let board = units_board();
+    let board = curved_board();
     let layer = board.layer_named("F.Cu").expect("F.Cu");
     let floor = Tessellator::new(FLOOR);
     let zones: Vec<ItemMesh> = floor
@@ -217,11 +221,16 @@ fn a_zone_fill_of_plain_points_is_never_made_again() {
 }
 
 #[test]
-fn a_unit_is_tagged_with_its_net() {
-    let board = units_board();
+fn an_item_mesh_is_tagged_with_its_net() {
+    let board = curved_board();
     let layer = board.layer_named("F.Cu").expect("F.Cu");
     let copper = Tessellator::new(FLOOR).item_meshes(&board, ItemSet::CopperRest(layer), None);
-    assert!(copper.iter().flatten().all(|unit| unit.net.is_some()));
+    assert!(
+        copper
+            .iter()
+            .flatten()
+            .all(|item_mesh| item_mesh.net.is_some())
+    );
 }
 
 #[test]
@@ -233,21 +242,21 @@ fn a_sheet_refines_over_a_region_and_comes_back_to_the_floor() {
     .expect("the hand-off schematic is in the repo");
     let sheet = kicad_core::parse_schematic(&source).expect("it parses");
     let floor = Tessellator::new(FLOOR);
-    let mut units = floor.sheet_units(&sheet);
+    let mut item_meshes = floor.sheet_item_meshes(&sheet);
     let at = sheet.junctions.first().expect("a junction").at;
     let fine = floor.refined(0.5 / 1024.0, around(at.x, at.y, 5.0));
     assert!(
-        fine.refine_sheet(&sheet, &mut units),
+        fine.refine_sheet(&sheet, &mut item_meshes),
         "the junction is curved"
     );
-    assert_ne!(units.layers(), floor.sheet(&sheet));
+    assert_ne!(item_meshes.layers(), floor.sheet(&sheet));
     assert!(
-        floor.refine_sheet(&sheet, &mut units),
-        "the fine units go back"
+        floor.refine_sheet(&sheet, &mut item_meshes),
+        "the fine item meshes go back"
     );
-    assert_eq!(units.layers(), floor.sheet(&sheet));
+    assert_eq!(item_meshes.layers(), floor.sheet(&sheet));
     assert!(
-        !floor.refine_sheet(&sheet, &mut units),
+        !floor.refine_sheet(&sheet, &mut item_meshes),
         "and nothing is left to do"
     );
 }
@@ -273,7 +282,7 @@ fn a_fill_piece_holding_an_arc_is_made_again_where_a_plain_one_is_not() {
     let zones: Vec<ItemMesh> = floor
         .item_meshes(&board, ItemSet::Zones(layer), None)
         .into_iter()
-        .map(|unit| unit.expect("built"))
+        .map(|item_mesh| item_mesh.expect("built"))
         .collect();
     assert_eq!(zones.len(), 2);
     assert!(!zones[0].curved, "a piece of plain points");
@@ -312,7 +321,7 @@ fn pad_vertices(region: Option<Bounds>) -> usize {
         .item_meshes(&board, ItemSet::CopperRest(layer), None)
         .into_iter()
         .flatten()
-        .map(|unit| unit.mesh.positions.len())
+        .map(|item_mesh| item_mesh.mesh.positions.len())
         .sum()
 }
 

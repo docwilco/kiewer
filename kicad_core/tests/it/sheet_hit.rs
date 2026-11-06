@@ -200,7 +200,7 @@ fn a_nets_geometry_is_its_wires_junctions_labels_and_pins_by_layer() {
         .net_of(SheetItem::Label(1))
         .and_then(|id| connectivity.net(id))
         .expect("VIN");
-    let layers = Tessellator::new(0.01).sheet_units(sheet).net(vin);
+    let layers = Tessellator::new(0.01).sheet_item_meshes(sheet).net(vin);
     let names: Vec<SchematicLayer> = layers.iter().map(|(layer, _)| *layer).collect();
     assert_eq!(
         names,
@@ -230,7 +230,7 @@ fn a_nets_geometry_is_its_wires_junctions_labels_and_pins_by_layer() {
         .net_of(SheetItem::Wire(1))
         .and_then(|id| connectivity.net(id))
         .expect("GND");
-    let layers = Tessellator::new(0.01).sheet_units(sheet).net(gnd);
+    let layers = Tessellator::new(0.01).sheet_item_meshes(sheet).net(gnd);
     let names: Vec<SchematicLayer> = layers.iter().map(|(layer, _)| *layer).collect();
     assert_eq!(names, [SchematicLayer::Wire, SchematicLayer::Pin]);
 }

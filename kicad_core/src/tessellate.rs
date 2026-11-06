@@ -1358,9 +1358,7 @@ impl<'p> MeshBuilder<'p> {
     fn new(tessellator: &Tessellator) -> Self {
         Self {
             curves: Curves::of(tessellator),
-            round: tessellator
-                .fine
-                .map_or(tessellator.tolerance, |f| f.tolerance),
+            round: tessellator.tolerance,
             fill: FillTessellator::new(),
             stroke: StrokeTessellator::new(),
             buffers: VertexBuffers::new(),
@@ -1385,16 +1383,16 @@ impl<'p> MeshBuilder<'p> {
         if let Some(prior) = self.prior {
             let wanted = prior
                 .get(self.items.len())
-                .filter(|unit| unit.wants(self.curves.fine));
-            let Some(unit) = wanted else {
+                .filter(|item_mesh| item_mesh.wants(self.curves.fine));
+            let Some(item_mesh) = wanted else {
                 self.items.push(None);
                 return;
             };
-            self.round = self.curves.round_for(unit.bounds.as_ref());
+            self.round = self.curves.round_for(item_mesh.bounds.as_ref());
         }
         draw(self);
-        let unit = self.close_item(net, false);
-        self.items.push(Some(unit));
+        let item_mesh = self.close_item(net, false);
+        self.items.push(Some(item_mesh));
     }
 
     /// Take what has been drawn since the last item as one: `curved`
