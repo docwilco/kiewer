@@ -251,3 +251,41 @@ fn a_sheet_refines_over_a_region_and_comes_back_to_the_floor() {
         "and nothing is left to do"
     );
 }
+
+/// Two fill pieces of a zone on F.Cu: a square of plain points, and a
+/// square whose right side bulges out through a semicircle of radius 5
+/// around (30, 5), the arc kept in its point list (#30).
+fn fills_board() -> Board {
+    board(
+        r#"(zone (net "GND") (layers "F.Cu") (hatch edge 0.5) (fill yes)
+             (polygon (pts (xy 0 0) (xy 40 0) (xy 40 20) (xy 0 20)))
+             (filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))
+             (filled_polygon (layer "F.Cu")
+               (pts (xy 20 0) (arc (start 30 0) (mid 35 5) (end 30 10)) (xy 20 10))))"#,
+    )
+}
+
+#[test]
+fn a_fill_piece_holding_an_arc_is_made_again_where_a_plain_one_is_not() {
+    let board = fills_board();
+    let layer = board.layer_named("F.Cu").expect("F.Cu");
+    let floor = Tessellator::new(FLOOR);
+    let zones: Vec<Unit> = floor
+        .units(&board, Part::Zones(layer), None)
+        .into_iter()
+        .map(|unit| unit.expect("built"))
+        .collect();
+    assert_eq!(zones.len(), 2);
+    assert!(!zones[0].curved, "a piece of plain points");
+    assert!(zones[1].curved, "a piece holding an arc");
+    // A region over both.
+    let refined = floor.refined(0.5 / 1024.0, around(20.0, 5.0, 30.0));
+    let again = refined.units(&board, Part::Zones(layer), Some(&zones));
+    assert!(again[0].is_none());
+    let piece = again[1].as_ref().expect("the arc's piece");
+    assert!(piece.mesh.positions.len() > zones[1].mesh.positions.len());
+    // The half disc is the same shape either way, finer: its area is
+    // nearer the true one.
+    let truth = 100.0 + std::f64::consts::PI * 25.0 / 2.0;
+    assert!((piece.mesh.area() - truth).abs() < (zones[1].mesh.area() - truth).abs());
+}

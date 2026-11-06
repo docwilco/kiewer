@@ -30,12 +30,17 @@ const FLOOR_STEP: i32 = 4;
 /// the least power of four that holds it.
 #[must_use]
 pub fn step_of(scale: f64) -> i32 {
-    // The scale ranges over 1e-3 to 1e5, so the exponent is small.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the log of a scale between 1e-3 and 1e5 is a small integer"
-    )]
-    let step = (scale.ln() / 4.0_f64.ln()).ceil() as i32;
+    // Walked in exact multiples of four, so a power of four is its own
+    // step and not the next one by a rounding of a logarithm.
+    let (mut step, mut top) = (0, 1.0_f64);
+    while top < scale {
+        top *= 4.0;
+        step += 1;
+    }
+    while top / 4.0 >= scale {
+        top /= 4.0;
+        step -= 1;
+    }
     step
 }
 
@@ -145,9 +150,15 @@ impl Refiner {
                 region: None,
             });
         }
+        // A view that left the region is only worth a rebuild where the
+        // floor would show: past 500 px/mm, where half a pixel is finer
+        // than the floor. Zooming out within a step takes the view past
+        // the region (a step is four times the scale, the region three
+        // times the view) with nothing to see for it.
+        let shows = 0.5 / scale < TOLERANCE;
         let due = stepped
             || self.region.is_none_or(|region| {
-                !within(&view, &region) || self.pan_stopped(&view, &region, now)
+                (shows && !within(&view, &region)) || self.pan_stopped(&view, &region, now)
             });
         due.then(|| {
             let region = region_of(view);
@@ -195,7 +206,12 @@ mod tests {
         }
     }
 
+    #[test_case(0.001, -4; "the camera's least scale")]
     #[test_case(1.0, 0; "one pixel per millimetre")]
+    #[test_case(4.0, 1; "four")]
+    #[test_case(4096.0, 6; "the top of the sixth step")]
+    #[test_case(16384.0, 7; "the seventh")]
+    #[test_case(65536.0, 8; "the eighth")]
     #[test_case(256.0, 4; "the top of the fourth step")]
     #[test_case(257.0, 5; "just past it")]
     #[test_case(1024.0, 5; "the top of the fifth")]
@@ -266,16 +282,31 @@ mod tests {
     }
 
     #[test]
+    fn zooming_out_within_a_step_past_the_region_builds_nothing_where_the_floor_shows_nothing() {
+        let mut refiner = Refiner::default();
+        refiner
+            .check(view(0.0, 0.0, 2.0), 1000.0, 0.0)
+            .expect("step 5");
+        refiner.input(1.0);
+        // 300 px/mm: the view is 3.3 times as big, past the region's 3,
+        // and the floor is within half a pixel of the curve still.
+        assert_eq!(refiner.check(view(-1.5, -1.5, 6.6), 300.0, 1.0), None);
+        // At 600 px/mm the floor shows, and the view past the region builds.
+        let plan = refiner.check(view(-3.0, -3.0, 3.3), 600.0, 2.0);
+        assert!(plan.is_some());
+    }
+
+    #[test]
     fn the_view_leaving_the_region_builds_a_new_one_centred_on_it() {
         let mut refiner = Refiner::default();
         refiner
-            .check(view(0.0, 0.0, 2.0), 300.0, 0.0)
+            .check(view(0.0, 0.0, 2.0), 1000.0, 0.0)
             .expect("step 5");
         refiner.input(1.0);
         // The region is x from -2 to 4: a pan to 1.9 still has the view in.
-        assert_eq!(refiner.check(view(1.9, 0.0, 2.0), 300.0, 1.0), None);
+        assert_eq!(refiner.check(view(1.9, 0.0, 2.0), 1000.0, 1.0), None);
         let plan = refiner
-            .check(view(2.5, 0.0, 2.0), 300.0, 2.0)
+            .check(view(2.5, 0.0, 2.0), 1000.0, 2.0)
             .expect("left");
         assert_eq!(plan.region, Some(view(0.5, -2.0, 6.0)));
     }

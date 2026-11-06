@@ -12,7 +12,7 @@
 //! over its body. Widths and sizes of 0 in the file mean KiCad's defaults,
 //! named below.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     Curves, Mesh, MeshBuilder, Tessellator, Unit as MeshUnit, arc_points, bezier, circle, touches,
@@ -201,7 +201,7 @@ impl Tessellator {
         layers.only = Some(only);
         layers.sheet(sheet);
         let fresh = layers.into_units();
-        let built: Vec<usize> = fresh
+        let built: BTreeSet<usize> = fresh
             .layers
             .values()
             .flatten()
