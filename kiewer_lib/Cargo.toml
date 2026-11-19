@@ -79,7 +79,10 @@ sqlx = { version = "0.9", default-features = false, features = ["macros", "migra
 # axum-extra does not re-export). Nothing else: the clock is Postgres's.
 time = { version = "0.3", default-features = false }
 # fs and io-util: the upload's parts streamed into temporary files.
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "signal", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+# Service::call, to hand a request to the router once it is built (web::serve_staged);
+# already in the tree under axum.
+tower-service = "0.3"
 tracing = "0.1"
 
 [build-dependencies]

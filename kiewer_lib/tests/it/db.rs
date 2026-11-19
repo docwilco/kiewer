@@ -38,7 +38,7 @@ async fn health_is_ok_with_a_database() {
     let dir = scratch_dir!();
     let state = http::state(db, Arc::new(FsBlobStore::new(dir.path())));
     let addr = http::serve_on_free_port(state).await;
-    let (status, body) = http::get(addr, "/healthz").await;
+    let (status, body) = http::get(addr, "/health").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body.trim(), "ok");
 }

@@ -28,7 +28,7 @@ viewer is not built in), then `cargo run`. The first line on stdout is the
 build line; the page is at http://localhost:8090/, the viewer with the
 hand-off board at http://localhost:8090/viewer, its schematic at
 http://localhost:8090/schematic, the upload form at
-http://localhost:8090/upload once signed in, and `/healthz` says `ok` once
+http://localhost:8090/upload once signed in, and `/health` says `ok` once
 the database answers.
 `kiewer_lib::config` is the list of variables the server reads and their
 defaults; the blob store writes under `blobs/` (git-ignored) unless

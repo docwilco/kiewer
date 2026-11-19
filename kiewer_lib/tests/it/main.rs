@@ -33,6 +33,7 @@ mod pre_commit;
 mod prune_images;
 mod release_cut;
 mod roles;
+mod routes;
 mod schematic;
 mod sign_in;
 mod slugs;

@@ -19,9 +19,19 @@ pub static MIGRATOR: Migrator = sqlx::migrate!("../migrations");
 ///
 /// When Postgres cannot be reached or a migration fails.
 pub async fn connect(url: &str) -> Result<PgPool> {
-    let pool = PgPoolOptions::new().connect(url).await?;
+    let pool = pool(url).await?;
     migrate(&pool).await?;
     Ok(pool)
+}
+
+/// A pool connected to `url`, its migrations not run: the first half of
+/// [`connect`], for a server that says which half it is in.
+///
+/// # Errors
+///
+/// When Postgres cannot be reached.
+pub async fn pool(url: &str) -> Result<PgPool> {
+    Ok(PgPoolOptions::new().connect(url).await?)
 }
 
 /// Apply every migration not yet recorded in `_sqlx_migrations`. A second

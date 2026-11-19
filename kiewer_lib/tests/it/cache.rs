@@ -417,7 +417,7 @@ fn caching(response: &http::Response) -> (Option<&str>, Option<&str>) {
 #[test_case("/api/me", 200, Policy::Personal, None; "who is signed in")]
 #[test_case("{path}/people", 200, Policy::Personal, None; "the people page")]
 #[test_case("{path}/branches/allowed", 200, Policy::Personal, None; "what the viewer may do")]
-#[test_case("/healthz", 200, Policy::Personal, None; "the health route")]
+#[test_case("/health", 200, Policy::Personal, None; "the health route")]
 #[tokio::test]
 async fn a_route_names_its_policy_and_its_keys(
     template: &str,

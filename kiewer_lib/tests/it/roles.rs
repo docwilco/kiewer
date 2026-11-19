@@ -728,7 +728,7 @@ async fn the_home_page_and_a_persons_page_list_public_designs_and_never_unlisted
 #[test_case("/upload", 303; "the upload form, which sends a stranger home")]
 #[test_case("/settings", 303; "the settings page, the same")]
 #[test_case("/viewer", 200; "the hand-off viewer")]
-#[test_case("/healthz", 200; "the health route")]
+#[test_case("/health", 200; "the health route")]
 #[tokio::test]
 async fn static_routes_keep_priority_over_a_persons_page(path: &str, status: u16) {
     let Some(db) = pool_from_env().await else {

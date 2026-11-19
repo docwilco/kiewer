@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use kiewer_lib::blob::fs::FsBlobStore;
-use kiewer_lib::web::{AppState, serve};
+use kiewer_lib::web::{AppState, Stage, router, serve, serve_staged};
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use tokio::net::TcpListener;
 
@@ -37,9 +37,57 @@ async fn an_unknown_path_is_not_found() {
 }
 
 #[tokio::test]
+async fn the_old_health_path_is_not_found() {
+    let (addr, _dir) = start().await;
+    let (status, _) = http::get(addr, "/healthz").await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn every_path_answers_503_with_the_step_until_the_server_is_ready() {
+    let (state, _dir) = state();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let (steps, watching) = tokio::sync::watch::channel(Stage::Connecting);
+    tokio::spawn(serve_staged(listener, watching, std::future::pending()));
+    for path in ["/health", "/about"] {
+        let (status, body) = http::get(addr, path).await;
+        assert_eq!((status, body.as_str()), (503, "connecting\n"), "{path}");
+    }
+    steps.send_replace(Stage::Migrating);
+    let (status, body) = http::get(addr, "/health").await;
+    assert_eq!((status, body.as_str()), (503, "migrating\n"));
+    steps.send_replace(Stage::Ready(router(state)));
+    let (status, body) = http::get(addr, "/about").await;
+    assert_eq!(status, 200, "{body}");
+}
+
+#[tokio::test]
+async fn a_start_on_an_unreachable_database_returns_its_error() {
+    let config = kiewer_lib::config::Config::from_vars(|name| {
+        match name {
+            "PORT" => Some("0"),
+            // Refused as a connection string, so the error is immediate;
+            // a closed port would be retried until the pool's timeout.
+            "DATABASE_URL" => Some("not a connection string"),
+            _ => None,
+        }
+        .map(str::to_owned)
+    })
+    .expect("a configuration");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        kiewer_lib::server::run(config),
+    )
+    .await
+    .expect("run returns instead of serving on");
+    result.expect_err("the failed start is run's error");
+}
+
+#[tokio::test]
 async fn health_reports_an_unreachable_database() {
     let (addr, _dir) = start().await;
-    let (status, body) = http::get(addr, "/healthz").await;
+    let (status, body) = http::get(addr, "/health").await;
     assert_eq!(status, 503, "{body}");
 }
 

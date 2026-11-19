@@ -2093,6 +2093,7 @@ dependencies = [
  "test-case",
  "time",
  "tokio",
+ "tower-service",
  "tracing",
  "tracing-stackdriver",
  "tracing-subscriber",

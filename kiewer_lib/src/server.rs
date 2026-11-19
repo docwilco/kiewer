@@ -1,9 +1,11 @@
 //! The server from configuration to shutdown: what the executable calls
 //! after its build line.
 
+use std::pin::pin;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 
 use crate::auth::Auth;
 use crate::blob::BlobStore;
@@ -13,7 +15,7 @@ use crate::cache::{Fastly, NoPurge, Purge};
 use crate::config::{BlobStoreConfig, Config};
 use crate::error::Result;
 use crate::thumbnail::{CloudTasks, NoTasks, TaskAuth, Thumbnails};
-use crate::web::{AppState, serve, shutdown_signal};
+use crate::web::{AppState, Stage, router, serve_staged, shutdown_signal};
 
 /// The sign-in flow from the configuration: one app per provider whose
 /// variables are set. With none, the server runs and every sign-in link
@@ -81,32 +83,55 @@ fn purge(config: &Config) -> Result<Arc<dyn Purge>> {
     })
 }
 
-/// Connect, migrate, open the blob store, listen on `config.port` and
-/// serve until SIGTERM or ctrl-c.
+/// Listen on `config.port`, then connect, migrate, open the blob store
+/// and serve the real router, until SIGTERM or ctrl-c. Until the router
+/// is up every path answers 503 with the step ([`Stage`]).
+///
+/// The database work runs in this future beside the listener, never in a
+/// detached task: a failure there stops the listener and returns here, so
+/// the process exits non-zero, the one quick "failed" Cloud Run reads.
 ///
 /// # Errors
 ///
-/// When Postgres cannot be reached or migrated, the GCS client cannot be
-/// built, the port cannot be bound, or the listener fails while serving.
+/// When the port cannot be bound, Postgres cannot be reached or migrated,
+/// the GCS client cannot be built, or the listener fails while serving.
 pub async fn run(config: Config) -> Result<()> {
-    let db = crate::db::connect(&config.database_url).await?;
-    tracing::info!("database connected and migrated");
-    let blobs = blob_store(&config.blobs).await?;
-    let state = AppState::new(
-        db,
-        blobs,
-        Arc::new(auth(&config)?),
-        Arc::new(thumbnails(&config)?),
-        purge(&config)?,
-    )
-    .with_key_prefix(config.surrogate_key_prefix.clone());
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
     tracing::info!(
         addr = %listener.local_addr()?,
         blobs = %config.blobs,
         "listening"
     );
-    serve(listener, state, shutdown_signal()).await
+    let (steps, watching) = watch::channel(Stage::Connecting);
+    let mut server = pin!(serve_staged(listener, watching, shutdown_signal()));
+    let mut start = pin!(start(&config, &steps));
+    tokio::select! {
+        result = &mut server => result,
+        started = &mut start => {
+            started?;
+            server.await
+        }
+    }
+}
+
+/// The database work and the rest of the state, publishing each step on
+/// `steps`, ending with the router.
+async fn start(config: &Config, steps: &watch::Sender<Stage>) -> Result<()> {
+    let db = crate::db::pool(&config.database_url).await?;
+    steps.send_replace(Stage::Migrating);
+    crate::db::migrate(&db).await?;
+    tracing::info!("database connected and migrated");
+    let blobs = blob_store(&config.blobs).await?;
+    let state = AppState::new(
+        db,
+        blobs,
+        Arc::new(auth(config)?),
+        Arc::new(thumbnails(config)?),
+        purge(config)?,
+    )
+    .with_key_prefix(config.surrogate_key_prefix.clone());
+    steps.send_replace(Stage::Ready(router(state)));
+    Ok(())
 }
 
 /// The store the configuration names. The GCS client finds its

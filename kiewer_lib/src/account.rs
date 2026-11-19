@@ -39,19 +39,25 @@ pub const RESERVED: &[&str] = &[
     "b",
     "blob",
     "blobs",
+    "debugz",
     "design",
     "designs",
     "docs",
+    "eventlogs",
     "explore",
     "f",
+    "health",
     "healthz",
     "help",
     "kiewer",
+    "livez",
     "login",
     "logout",
     "me",
+    "metricz",
     "new",
     "r",
+    "readyz",
     "recent",
     "root",
     "schematic",
@@ -63,7 +69,9 @@ pub const RESERVED: &[&str] = &[
     "signout",
     "static",
     "status",
+    "statusz",
     "upload",
+    "varz",
     "viewer",
     "welcome",
     "www",
@@ -463,7 +471,15 @@ mod tests {
     #[test_case("a23456789b23456789c23456789d23456789e234"; "forty characters")]
     #[test_case("api"; "the api route")]
     #[test_case("auth"; "the auth route")]
-    #[test_case("healthz"; "the health route")]
+    #[test_case("health"; "the health route")]
+    #[test_case("healthz"; "the health route's old word")]
+    #[test_case("debugz"; "a word Cloud Run may answer: debugz")]
+    #[test_case("eventlogs"; "a word Cloud Run may answer: eventlogs")]
+    #[test_case("livez"; "a word Cloud Run may answer: livez")]
+    #[test_case("metricz"; "a word Cloud Run may answer: metricz")]
+    #[test_case("readyz"; "a word Cloud Run may answer: readyz")]
+    #[test_case("statusz"; "a word Cloud Run may answer: statusz")]
+    #[test_case("varz"; "a word Cloud Run may answer: varz")]
     #[test_case("blob"; "the blob route")]
     #[test_case("welcome"; "the welcome page")]
     #[test_case("settings"; "the settings page")]

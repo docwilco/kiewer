@@ -51,6 +51,8 @@ Read the plan before the apply: on the first run it creates everything; after th
 
 3. The values that exist only once the services have hostnames: register the OAuth applications per environment and provider (callback URLs on the hostnames), make a Fastly API token with purge scope on the `kiewer` service, put them in `terraform.tfvars` (`oauth_clients`, `fastly_api_token`; the example file shows the shape), and apply again. Until then the services get no variables for them and the server runs with sign-in off and no purges.
 
+4. The front end lets `/health` through: Cloud Run sends its startup probe straight to the container, so a passing probe cannot show it. From outside (a laptop, not the container), open `https://<host>/health` on the staging service's `run.app` host (`gcloud run services describe kiewer-staging --region europe-west4 --format 'value(status.url)'`). Done when it says `ok`.
+
 ## What a plan shows after a CI deploy
 
 Nothing. CI changes only the image and what `gcloud run deploy` writes with it, and `run.tf` ignores those fields. A plan that wants to change a service after a deploy means gcloud began writing a new field: add it to the `ignore_changes` list rather than applying the plan, which would roll the service back to the placeholder image.

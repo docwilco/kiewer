@@ -148,6 +148,22 @@ resource "google_cloud_run_v2_service" "app" {
       # back.
       image = "us-docker.pkg.dev/cloudrun/container/hello"
 
+      # The server opens its port first and answers 503 on every path until
+      # the migrations are done, so this probe passes only once it is
+      # really up. 5 s x 48 = 240 s, Cloud Run's default budget without a
+      # probe, which also bounds how long a startup migration may run.
+      # No liveness probe: it would restart every instance during a
+      # database outage. Google's placeholder image answers 200 on every
+      # path, so the first revision passes too.
+      startup_probe {
+        period_seconds    = 5
+        timeout_seconds   = 3
+        failure_threshold = 48
+        http_get {
+          path = "/health"
+        }
+      }
+
       resources {
         limits = {
           cpu    = "1"

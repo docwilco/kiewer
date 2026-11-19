@@ -42,13 +42,15 @@ use std::time::Duration;
 
 use askama::Template;
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::map_response_with_state;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use sqlx::PgPool;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
+use tower_service::Service;
 
 use crate::blob::BlobStore;
 use crate::cache::{self, Key, KeyPrefix, Policy, Purge};
@@ -111,7 +113,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/about", get(about::page))
-        .route("/healthz", get(healthz))
+        .route("/health", get(health))
         .route("/api/me", get(auth::me))
         .route("/auth/sign-out", post(auth::sign_out))
         .route("/auth/{provider}", get(auth::begin))
@@ -177,6 +179,58 @@ pub async fn serve(
         .with_graceful_shutdown(shutdown)
         .await?;
     Ok(())
+}
+
+/// Where the server is in starting: what the port answers while the
+/// database work runs, then the router that takes over.
+#[derive(Clone)]
+pub enum Stage {
+    /// The pool is not up yet.
+    Connecting,
+    /// The pool is up and the migrations run.
+    Migrating,
+    /// Started: every request goes to this router.
+    Ready(Router),
+}
+
+/// Like [`serve`], over a [`Stage`] that changes while it runs: until it
+/// is `Ready` every path, `/health` included, answers 503 with the step
+/// as one word, so the port is open (and a startup probe has something
+/// to ask) before the database work is done.
+///
+/// # Errors
+///
+/// When the listener fails: a closed socket, a dropped interface.
+pub async fn serve_staged(
+    listener: TcpListener,
+    stage: watch::Receiver<Stage>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    let app = Router::new().fallback(staged).with_state(stage);
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
+    Ok(())
+}
+
+async fn staged(State(stage): State<watch::Receiver<Stage>>, request: Request) -> Response {
+    let current = stage.borrow().clone();
+    let step = match current {
+        Stage::Connecting => "connecting\n",
+        Stage::Migrating => "migrating\n",
+        Stage::Ready(mut router) => {
+            return match router.call(request).await {
+                Ok(response) => response,
+                Err(never) => match never {},
+            };
+        }
+    };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [Policy::Personal.header()],
+        step,
+    )
+        .into_response()
 }
 
 /// Resolves on SIGTERM (what Cloud Run sends at shutdown, forwarded by
@@ -248,7 +302,7 @@ fn unreachable_database() -> Response {
 
 /// `ok` when the database answers; 503 when it does not, so a deploy's
 /// health check and a dev box's first run both say which half is up.
-async fn healthz(State(state): State<AppState>) -> Response {
+async fn health(State(state): State<AppState>) -> Response {
     let ping = sqlx::query_scalar!(r#"SELECT 1 AS "one!""#).fetch_one(&state.db);
     match tokio::time::timeout(HEALTH_TIMEOUT, ping).await {
         Ok(Ok(_)) => (StatusCode::OK, [Policy::Personal.header()], "ok\n").into_response(),
