@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use kiewer_lib::blob::fs::FsBlobStore;
+use kiewer_lib::cache::Policy;
 use kiewer_lib::web::{AppState, Stage, router, serve, serve_staged};
 use kiewer_test_support::{TempDir, http, scratch_dir};
 use tokio::net::TcpListener;
@@ -51,12 +52,28 @@ async fn every_path_answers_503_with_the_step_until_the_server_is_ready() {
     let (steps, watching) = tokio::sync::watch::channel(Stage::Connecting);
     tokio::spawn(serve_staged(listener, watching, std::future::pending()));
     for path in ["/health", "/about"] {
-        let (status, body) = http::get(addr, path).await;
-        assert_eq!((status, body.as_str()), (503, "connecting\n"), "{path}");
+        let response = http::request(addr, "GET", path, &[], "").await;
+        assert_eq!(
+            (response.status, response.body.as_str()),
+            (503, "connecting\n"),
+            "{path}"
+        );
+        assert_eq!(
+            response.header("cache-control"),
+            Some(Policy::Personal.value()),
+            "{path}"
+        );
     }
     steps.send_replace(Stage::Migrating);
-    let (status, body) = http::get(addr, "/health").await;
-    assert_eq!((status, body.as_str()), (503, "migrating\n"));
+    let response = http::request(addr, "GET", "/health", &[], "").await;
+    assert_eq!(
+        (response.status, response.body.as_str()),
+        (503, "migrating\n")
+    );
+    assert_eq!(
+        response.header("cache-control"),
+        Some(Policy::Personal.value())
+    );
     steps.send_replace(Stage::Ready(router(state)));
     let (status, body) = http::get(addr, "/about").await;
     assert_eq!(status, 200, "{body}");
