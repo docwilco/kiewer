@@ -1309,10 +1309,15 @@ window.addEventListener("kiewer-board", function (e) { window.kiewerViewer = e.d
 // the viewer in the same run. The 33 ms of the budget is a release build
 // in Chromium on the dev machine, measured by hand and reported on the
 // issue; the stage's debug build under SwiftShader has only the ratio.
-const REBUILD_BUDGET: f64 = 0.25;
+// On the GitHub-hosted ubuntu-24.04 runner (13 samples, #139) the rebuild
+// is steady at 100 to 167 ms, the whole build noisy at 383 to 912 ms, and
+// the ratio spans 0.109 to 0.334; 0.5 is 1.5 times the worst of those.
+// If it trips again the next step is a steadier denominator (the best of
+// several whole builds), not a higher number.
+const REBUILD_BUDGET: f64 = 0.5;
 
 #[tokio::test]
-async fn a_region_rebuild_of_the_hand_off_board_costs_a_quarter_of_a_whole_build_at_most() {
+async fn a_region_rebuild_of_the_hand_off_board_costs_half_of_a_whole_build_at_most() {
     let Some(executable) = executable() else {
         return;
     };

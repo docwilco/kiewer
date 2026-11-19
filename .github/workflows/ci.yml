@@ -182,33 +182,6 @@ jobs:
             cargo install wasm-bindgen-cli --version "$(scripts/wasm-bindgen-version.sh)" --locked
             ./scripts/checks.sh test
             ./scripts/checks.sh browser
-      # Temporary, until the budget is set from it: what the region rebuild
-      # costs on this runner. The browser test that times it
-      # (a_region_rebuild_of_the_hand_off_board_costs_a_quarter_of_a_whole_build_at_most,
-      # kiewer_lib/tests/it/browser.rs) missed its 0.25 on its first run
-      # here with 117.5 ms against 461.9 ms, one sample on a shared
-      # runner. Ten runs of the browser stage's own command, the other
-      # browser tests beside it as in the stage, each printing the test's
-      # line with the two times; the ratio's spread over the ten is what
-      # the budget is set from. always(): the times are wanted from a run
-      # whose stage went red on that very test. The first cargo call
-      # builds what a stage that stopped early left unbuilt.
-      - name: The region rebuild's times on this runner, ten runs
-        if: always()
-        shell: bash
-        env:
-          SQLX_OFFLINE: true
-        run: |
-          target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
-          [ -d "$target_dir/viewer-probe" ] || scripts/build-viewer.sh probe "$target_dir/viewer-probe"
-          export KIEWER_VIEWER_DIST="$target_dir/viewer-probe"
-          export KIEWER_BROWSER="$(scripts/browser.sh path)"
-          cargo test --workspace --test it --no-run
-          for i in $(seq 1 10); do
-            echo "run $i"
-            cargo test --workspace --test it browser:: -- --nocapture 2>&1 \
-              | grep -E "^region rebuild|a_region_rebuild.*(ok|FAILED)$|^test result: .* [1-9][0-9]* passed" || true
-          done
 
   # Temporary, until the cause is known: the kiewer_lib `it` binary on
   # ubuntu-26.04 (Mesa 26.0.8), where it died of SIGSEGV with no test
