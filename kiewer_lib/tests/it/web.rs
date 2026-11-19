@@ -67,17 +67,17 @@ async fn a_start_on_an_unreachable_database_returns_its_error() {
     let config = kiewer_lib::config::Config::from_vars(|name| {
         match name {
             "PORT" => Some("0"),
-            // Refused as a connection string, so the error is immediate;
-            // a closed port would be retried until the pool's timeout.
-            "DATABASE_URL" => Some("not a connection string"),
+            // A reachable host with a closed port: a real refused connect.
+            "DATABASE_URL" => Some("postgres://nobody@127.0.0.1:1/none"),
             _ => None,
         }
         .map(str::to_owned)
     })
     .expect("a configuration");
+    // sqlx retries a refused connect until the pool's 30 s acquire timeout.
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        kiewer_lib::server::run(config),
+        std::time::Duration::from_secs(45),
+        kiewer_lib::server::run_until(config, std::future::pending()),
     )
     .await
     .expect("run returns instead of serving on");

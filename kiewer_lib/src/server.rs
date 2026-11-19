@@ -96,6 +96,19 @@ fn purge(config: &Config) -> Result<Arc<dyn Purge>> {
 /// When the port cannot be bound, Postgres cannot be reached or migrated,
 /// the GCS client cannot be built, or the listener fails while serving.
 pub async fn run(config: Config) -> Result<()> {
+    run_until(config, shutdown_signal()).await
+}
+
+/// [`run`] with the stop signal handed in, so a test serves without
+/// installing the process's SIGINT and SIGTERM handlers.
+///
+/// # Errors
+///
+/// As [`run`].
+pub async fn run_until(
+    config: Config,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
     tracing::info!(
         addr = %listener.local_addr()?,
@@ -103,7 +116,7 @@ pub async fn run(config: Config) -> Result<()> {
         "listening"
     );
     let (steps, watching) = watch::channel(Stage::Connecting);
-    let mut server = pin!(serve_staged(listener, watching, shutdown_signal()));
+    let mut server = pin!(serve_staged(listener, watching, shutdown));
     let mut start = pin!(start(&config, &steps));
     tokio::select! {
         result = &mut server => result,

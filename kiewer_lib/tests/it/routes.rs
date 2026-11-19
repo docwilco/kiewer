@@ -11,9 +11,10 @@ use test_case::test_case;
 
 /// What is wrong with `path` as a fixed route, if anything.
 fn broken_by(path: &str) -> Option<&'static str> {
+    let path = path.to_ascii_lowercase();
     if path.starts_with("/_ah/") {
         Some("Cloud Run reserves paths starting with /_ah/")
-    } else if path.ends_with('z') {
+    } else if path.trim_end_matches('/').ends_with('z') {
         Some("Cloud Run's front end may answer paths ending in z itself")
     } else {
         None
@@ -30,7 +31,9 @@ fn path_literals(source: &str) -> Vec<(usize, String)> {
             let Some(close) = after.find('"') else {
                 break;
             };
-            found.push((index + 1, after[..close].to_owned()));
+            // An escaped quote ends the literal early, leaving its backslash.
+            let literal = after[..close].trim_end_matches('\\');
+            found.push((index + 1, literal.to_owned()));
             rest = &after[close + 1..];
         }
     }
@@ -52,6 +55,9 @@ fn rust_files(dir: &Path, into: &mut Vec<std::path::PathBuf>) {
 #[test_case("/_ah/", true; "the /_ah/ root")]
 #[test_case("/healthz", true; "ends in z")]
 #[test_case("/{handle}/quiz", true; "ends in z under a parameter")]
+#[test_case("/healthZ", true; "ends in uppercase Z")]
+#[test_case("/quiz/", true; "ends in z and a slash")]
+#[test_case("/_AH/x", true; "uppercase /_ah/")]
 #[test_case("/health", false; "the health route")]
 #[test_case("/_ahead", false; "starts like /_ah/ but is not")]
 #[test_case("/zed/{id}", false; "a z inside")]
@@ -63,6 +69,12 @@ fn the_rule_catches_what_cloud_run_reserves(path: &str, broken: bool) {
 fn literals_are_read_with_their_line() {
     let found = path_literals("a\nroute(\"/x\", y).route(\"/z\")\n");
     assert_eq!(found, [(2, "/x".to_owned()), (2, "/z".to_owned())]);
+}
+
+#[test]
+fn a_literal_after_an_escaped_quote_loses_its_backslash() {
+    let found = path_literals(r#"say(\"/quiz\") "#);
+    assert_eq!(found, [(1, "/quiz".to_owned())]);
 }
 
 #[test]
