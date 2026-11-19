@@ -314,7 +314,11 @@ jobs:
         run: echo "hash=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
       # --provenance=false: one manifest and no attestation, so the registry
       # lists one image per push.
-      - run: docker build --provenance=false --build-arg "BUILD_VERSION=${{ steps.short.outputs.hash }}" -t "$IMAGE:ci" .
+      #
+      # kiewer:<short hash> is the image's name on the runner only, what the
+      # push step below finds it by. It holds no registry path, so the build
+      # needs no GCP variable.
+      - run: docker build --provenance=false --build-arg "BUILD_VERSION=${{ steps.short.outputs.hash }}" -t "kiewer:${{ steps.short.outputs.hash }}" .
       # A project's smoke test goes here, between the build and the push:
       # a run of the image against what it needs, so what is pushed is
       # what ran. Without one, the push follows the build.
@@ -339,7 +343,7 @@ jobs:
         shell: bash
         run: |
           short="${{ steps.short.outputs.hash }}"
-          docker tag "$IMAGE:ci" "$IMAGE:$short"
+          docker tag "kiewer:$short" "$IMAGE:$short"
           docker push "$IMAGE:$short"
           digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$short")"
           echo "pushed $digest"
