@@ -24,7 +24,11 @@ env:
 # for the prune's deletes, and Cloud Run developer on the two services).
 #
 # Every check job delegates to scripts/checks.sh, the same script the
-# pre-commit hook runs, so CI and local checks cannot drift. Every cargo job runs its
+# pre-commit hook runs, so CI and local checks cannot drift. Every
+# job runs on ubuntu-24.04, the Dockerfile's base, named and not
+# ubuntu-latest: what is checked, tested and shipped sees one system, and
+# the label moves in one commit with the base (the Dockerfile's comment has
+# the rule; the test job's has what waits on 26.04). Every cargo job runs its
 # command through .github/actions/cargo-cached, which restores a rust-cache
 # carrying the workspace crates, marks what the restored build already
 # covers as fresh, runs the command and trims the target to what the
@@ -32,7 +36,7 @@ env:
 jobs:
   fmt:
     name: Formatting
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -42,7 +46,7 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -63,7 +67,7 @@ jobs:
   # A program only the checks run, so the Dockerfile does not gain it.
   sqlx:
     name: Query cache
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16
@@ -91,13 +95,22 @@ jobs:
 
   test:
     name: Test
-    # Pinned to the Dockerfile's base, not ubuntu-latest: the thumbnail
-    # tests draw on the Mesa this runner's apt gives, and the image draws
-    # on its base's, so the tests cover the lavapipe production runs. On
-    # ubuntu-26.04 (Mesa 26.0.8) the kiewer_lib `it` binary died of SIGSEGV
-    # in both runs it had, at a different test each time; on 24.04 (Mesa
-    # 25.2.8) ten runs of ten passed. The pin moves with the Dockerfile's
-    # base. The crash job below runs that binary on ubuntu-26.04.
+    # The Dockerfile's base, as every job: the thumbnail tests draw on the
+    # Mesa this runner's apt gives, and the image draws on its base's, so
+    # the tests cover the lavapipe production runs.
+    #
+    # Before the label moves to ubuntu-26.04: there the kiewer_lib `it`
+    # binary died of SIGSEGV in every run it had (four, 2026-11-18 and
+    # 2026-11-19, runs 44312588196 to 44576728135), at a different test
+    # each time, and never on 24.04. The core of one says where: inside the
+    # Vulkan loader (libvulkan.so.1) in vkSetDebugUtilsObjectNameEXT, the
+    # debug label wgpu gives an object in a debug build, called from
+    # Headless::new (kiewer_viewer/src/headless.rs) on one thread while
+    # another test's Headless::new was in vkCreateInstance. Every test app
+    # builds its own renderer, so the tests create instances side by side;
+    # the server builds one and a release build sends no labels. The cause
+    # inside the loader is not known, and nothing is fixed: the move to
+    # 26.04 starts with a run of this job there.
     runs-on: ubuntu-24.04
     # Postgres beside the job, as compose.yaml gives a dev box: the same
     # major and the same role, password and database triple, so the
@@ -183,115 +196,9 @@ jobs:
             ./scripts/checks.sh test
             ./scripts/checks.sh browser
 
-  # Temporary, until the cause is known: the kiewer_lib `it` binary on
-  # ubuntu-26.04 (Mesa 26.0.8), where it died of SIGSEGV with no test
-  # failing (the test job's comment has the runs), with a core file and
-  # gdb's backtrace of it. No single test is the trigger, so the job runs
-  # the whole binary and nothing else of the workspace. Its command is the
-  # test stage's own for that binary: SQLX_OFFLINE as scripts/checks.sh
-  # sets it, Postgres as in the test job, lavapipe from the same package.
-  # The GCS and browser tests return at once without their variables, as
-  # they did in the test stage's run of this binary when it crashed with
-  # the browser unset; the crash came before the GCS tests.
-  #
-  # continue-on-error: the job is expected red, and its red must not make
-  # the run red. The release job does not need it, for the same reason.
-  # With the cause found, this job goes and its fix comes with a test.
-  crash:
-    name: Crash on Mesa 26
-    runs-on: ubuntu-26.04
-    continue-on-error: true
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: kiewer
-          POSTGRES_PASSWORD: kiewer
-          POSTGRES_DB: kiewer
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U kiewer -d kiewer"
-          --health-interval 2s
-          --health-timeout 2s
-          --health-retries 15
-    env:
-      DATABASE_URL: postgres://kiewer:kiewer@127.0.0.1:5432/kiewer
-      SQLX_OFFLINE: true
-    steps:
-      - uses: actions/checkout@v5
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers gdb
-      # A process that dies on a signal leaves its core in /tmp/cores, for
-      # the backtrace step at the end of this job. The kernel writes the
-      # file itself: %E is the executable's path with `!` for `/`, %p the
-      # pid. The size limit is per shell, so `ulimit -c` is in the run
-      # below.
-      - name: Core files go to /tmp/cores
-        run: |
-          sudo mkdir -p /tmp/cores
-          sudo chmod 1777 /tmp/cores
-          sudo sysctl -w kernel.core_pattern='/tmp/cores/%E.%p.core'
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: ./.github/actions/cargo-cached
-        with:
-          run: |
-            # The core size limit, as far as the runner's hard limit lets it
-            # go: a refusal must not fail the job before the tests run.
-            ulimit -c unlimited || ulimit -c "$(ulimit -Hc)" || true
-            cargo test -p kiewer_lib --test it
-      # A red run whose process died on a signal says only the signal; the
-      # core says where. gdb reads each core against its executable and
-      # prints every thread's stack, the crashed thread's first. Two
-      # passes: the plain one always lands, with the workspace's own frames
-      # by line (the dev profile keeps line tables) and a library's frames
-      # by library and exported symbol; the second asks Ubuntu's debuginfod
-      # for the libraries' symbols (Mesa, LLVM), which is a large download,
-      # so it runs under a time limit and its failure costs nothing. Only
-      # this step runs gdb: no test does, so the Dockerfile and the dev box
-      # do not gain it. The backtraces leave the job as a workflow artifact
-      # and are printed in the log.
-      - name: Where a crashed process stopped
-        if: failure()
-        shell: bash
-        run: |
-          shopt -s nullglob
-          ls -l /tmp/cores
-          df -h /tmp
-          cores=(/tmp/cores/*.core)
-          if [ "${#cores[@]}" -eq 0 ]; then
-            echo "no core file: no process died on a signal"
-            exit 0
-          fi
-          out="$RUNNER_TEMP/backtraces"
-          mkdir -p "$out"
-          n=0
-          for core in "${cores[@]}"; do
-            n=$((n + 1))
-            name="$(basename "$core" .core)"
-            exe="${name%.*}"
-            exe="${exe//!//}"
-            [ -x "$exe" ] || echo "::warning::no executable at $exe, read from $core; the backtrace has no symbols"
-            echo "::group::$exe (pid ${name##*.})"
-            gdb -batch -ex bt -ex 'thread apply all bt' -ex 'info sharedlibrary' \
-              "$exe" "$core" 2>&1 | tee "$out/$n-plain.txt" || true
-            echo "::endgroup::"
-            echo "::group::$exe (pid ${name##*.}), with the libraries' symbols"
-            DEBUGINFOD_URLS=https://debuginfod.ubuntu.com timeout 600 \
-              gdb -batch -ex 'set debuginfod enabled on' -ex bt -ex 'thread apply all bt' \
-              "$exe" "$core" 2>&1 | tee "$out/$n-symbols.txt" || true
-            echo "::endgroup::"
-          done
-      - if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: backtraces
-          path: ${{ runner.temp }}/backtraces
-          if-no-files-found: ignore
-          retention-days: 7
-
   docs:
     name: Docs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -308,7 +215,7 @@ jobs:
   # the first run; the release-build job does the same.
   wasm:
     name: Viewer for wasm32
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -323,7 +230,7 @@ jobs:
 
   msrv:
     name: MSRV
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       # Read rust-version from the manifest(s) so this job never drifts from
@@ -502,8 +409,7 @@ jobs:
   # ran.
   release:
     name: Release
-    # Every other job of this workflow but crash, which is expected red: a
-    # job added above joins this list.
+    # Every other job of this workflow: a job added above joins this list.
     needs: [fmt, clippy, sqlx, test, docs, wasm, msrv, release-build, image]
     # The GCP variables as in the image job: until they exist nothing was
     # pushed, so there is nothing to name and no Release to record.

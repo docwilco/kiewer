@@ -19,9 +19,10 @@
 #   objdump -T target/release/kiewer | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
 # prints at most the base's glibc version.
 #
-# The test job is pinned to this base too, for another reason: its
-# thumbnail tests draw on the runner's Mesa, and the image draws on this
-# base's (the apt layer below), so the two move in the same commit.
+# Every other CI job names this base too, so one label moves. The test
+# job needs it for a reason of its own: its thumbnail tests draw on the
+# runner's Mesa, and the image draws on this base's (the apt layer below).
+# Its comment in ci.yml has what to run before the move to 26.04.
 #
 # Layer order: the apt layer first, the binaries last, so a pull after a
 # code change fetches the binaries layer alone.
