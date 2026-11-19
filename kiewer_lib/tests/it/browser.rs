@@ -1311,9 +1311,12 @@ window.addEventListener("kiewer-board", function (e) { window.kiewerViewer = e.d
 // issue; the stage's debug build under SwiftShader has only the ratio.
 // On the GitHub-hosted ubuntu-24.04 runner (13 samples, #139) the rebuild
 // is steady at 100 to 167 ms, the whole build noisy at 383 to 912 ms, and
-// the ratio spans 0.109 to 0.334; 0.5 is 1.5 times the worst of those.
-// If it trips again the next step is a steadier denominator (the best of
-// several whole builds), not a higher number.
+// the ratio spans 0.109 to 0.334; 0.5 is about 1.5 times the worst of
+// those. A run pairs one rebuild with one cold whole build, and the whole
+// build is the noisy side: the slowest rebuild over the fastest whole build
+// seen is 0.436, a pairing no single run showed, so 0.5 leaves about 1.15
+// times there. If it trips again the next step is a steadier denominator
+// (the best of several whole builds), not a higher number.
 const REBUILD_BUDGET: f64 = 0.5;
 
 #[tokio::test]
