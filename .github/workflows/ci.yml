@@ -4,6 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
+  # By hand, to run the test job on another runner image than its pin:
+  #   gh workflow run CI -f test-runner=ubuntu-26.04
+  # Every step that ships is for a push, so a run by hand ships nothing.
+  workflow_dispatch:
+    inputs:
+      test-runner:
+        description: The runner image of the test job
+        # A choice, so a run by hand names a GitHub-hosted image and no
+        # other runner label.
+        type: choice
+        options: [ubuntu-24.04, ubuntu-26.04, ubuntu-latest]
+        default: ubuntu-24.04
 
 env:
   CARGO_TERM_COLOR: always
@@ -91,7 +103,14 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    # Pinned to the Dockerfile's base, not ubuntu-latest: the thumbnail
+    # tests draw on the Mesa this runner's apt gives, and the image draws
+    # on its base's, so the tests cover the lavapipe production runs. On
+    # ubuntu-26.04 (Mesa 26.0.8) the kiewer_lib `it` binary died of SIGSEGV
+    # in both runs it had, at a different test each time; on 24.04 (Mesa
+    # 25.2.8) ten runs of ten passed. The pin moves with the Dockerfile's
+    # base. A run by hand (workflow_dispatch above) names another image.
+    runs-on: ${{ inputs.test-runner || 'ubuntu-24.04' }}
     # Postgres beside the job, as compose.yaml gives a dev box: the same
     # major and the same role, password and database triple, so the
     # DATABASE_URL below is .env.example's. The tests gated on DATABASE_URL
@@ -161,6 +180,16 @@ jobs:
           ./fake-gcs-server -scheme http -host 127.0.0.1 -port 8092 -backend memory -public-host 127.0.0.1 &
           for _ in $(seq 1 20); do curl -fs http://127.0.0.1:8092/storage/v1/b >/dev/null && break; sleep 0.5; done
           rm -f "fake-gcs-server_${version}_Linux_amd64.tar.gz" checksums.txt
+      # A process that dies on a signal leaves its core in /tmp/cores, for
+      # the backtrace step at the end of this job. The kernel writes the
+      # file itself: %E is the executable's path with `!` for `/`, %p the
+      # pid. The size limit is per shell, so `ulimit -c` is in the run
+      # below.
+      - name: Core files go to /tmp/cores
+        run: |
+          sudo mkdir -p /tmp/cores
+          sudo chmod 1777 /tmp/cores
+          sudo sysctl -w kernel.core_pattern='/tmp/cores/%E.%p.core'
       # The browser stage runs here, after the test stage, on the native
       # build that stage leaves: it needs the server and the viewer for
       # the browser, so the wasm32 target and wasm-bindgen-cli come as in
@@ -172,9 +201,62 @@ jobs:
       - uses: ./.github/actions/cargo-cached
         with:
           run: |
+            # The core size limit, as far as the runner's hard limit lets it
+            # go: a refusal must not fail the checks.
+            ulimit -c unlimited || ulimit -c "$(ulimit -Hc)" || true
             cargo install wasm-bindgen-cli --version "$(scripts/wasm-bindgen-version.sh)" --locked
             ./scripts/checks.sh test
             ./scripts/checks.sh browser
+      # A red run whose process died on a signal says only the signal; the
+      # core says where. gdb reads each core against its executable and
+      # prints every thread's stack, the crashed thread's first. Two
+      # passes: the plain one always lands, with the workspace's own frames
+      # by line (the dev profile keeps line tables) and a library's frames
+      # by library and exported symbol; the second asks Ubuntu's debuginfod
+      # for the libraries' symbols (Mesa, LLVM), which is a large download,
+      # so it runs under a time limit and its failure costs nothing. gdb is
+      # installed here because only this step runs it: no test does, so the
+      # Dockerfile and the dev box do not gain it. The backtraces leave the
+      # job as a workflow artifact and are printed in the log.
+      - name: Where a crashed process stopped
+        if: failure()
+        shell: bash
+        run: |
+          shopt -s nullglob
+          ls -l /tmp/cores
+          df -h /tmp
+          cores=(/tmp/cores/*.core)
+          if [ "${#cores[@]}" -eq 0 ]; then
+            echo "no core file: no process died on a signal"
+            exit 0
+          fi
+          sudo apt-get install -y --no-install-recommends gdb
+          out="$RUNNER_TEMP/backtraces"
+          mkdir -p "$out"
+          n=0
+          for core in "${cores[@]}"; do
+            n=$((n + 1))
+            name="$(basename "$core" .core)"
+            exe="${name%.*}"
+            exe="${exe//!//}"
+            [ -x "$exe" ] || echo "::warning::no executable at $exe, read from $core; the backtrace has no symbols"
+            echo "::group::$exe (pid ${name##*.})"
+            gdb -batch -ex bt -ex 'thread apply all bt' -ex 'info sharedlibrary' \
+              "$exe" "$core" 2>&1 | tee "$out/$n-plain.txt" || true
+            echo "::endgroup::"
+            echo "::group::$exe (pid ${name##*.}), with the libraries' symbols"
+            DEBUGINFOD_URLS=https://debuginfod.ubuntu.com timeout 600 \
+              gdb -batch -ex 'set debuginfod enabled on' -ex bt -ex 'thread apply all bt' \
+              "$exe" "$core" 2>&1 | tee "$out/$n-symbols.txt" || true
+            echo "::endgroup::"
+          done
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtraces
+          path: ${{ runner.temp }}/backtraces
+          if-no-files-found: ignore
+          retention-days: 7
 
   docs:
     name: Docs

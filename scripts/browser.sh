@@ -18,8 +18,8 @@ version=156.0.8078.80
 sha256=547dcd374e02961bf998f6046a267644f8502225c36bb78ca307dab32a0b3eb4
 # The shared libraries the executable needs that a bare Ubuntu 24.04 lacks
 # (`ldd` lists them as not found), by their 24.04 package names; CI's test
-# job installs these on ubuntu-latest, so a runner image whose names differ
-# fails its apt step until this list follows.
+# job installs these on its pinned ubuntu-24.04, so a runner image whose names
+# differ fails its apt step until this list follows.
 packages=(
   libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64
   libgbm1 libnspr4 libnss3 libxcomposite1 libxdamage1 libxfixes3

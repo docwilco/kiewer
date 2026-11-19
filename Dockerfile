@@ -19,6 +19,10 @@
 #   objdump -T target/release/kiewer | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
 # prints at most the base's glibc version.
 #
+# The test job is pinned to this base too, for another reason: its
+# thumbnail tests draw on the runner's Mesa, and the image draws on this
+# base's (the apt layer below), so the two move in the same commit.
+#
 # Layer order: the apt layer first, the binaries last, so a pull after a
 # code change fetches the binaries layer alone.
 
