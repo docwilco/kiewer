@@ -28,7 +28,7 @@ env:
 # job runs on ubuntu-24.04, the Dockerfile's base, named and not
 # ubuntu-latest: what is checked, tested and shipped sees one system, and
 # the label moves in one commit with the base (the Dockerfile's comment has
-# the rule; the test job's has what waits on 26.04). Every cargo job runs its
+# the rule; #141 is what waits on 26.04). Every cargo job runs its
 # command through .github/actions/cargo-cached, which restores a rust-cache
 # carrying the workspace crates, marks what the restored build already
 # covers as fresh, runs the command and trims the target to what the
@@ -97,20 +97,8 @@ jobs:
     name: Test
     # The Dockerfile's base, as every job: the thumbnail tests draw on the
     # Mesa this runner's apt gives, and the image draws on its base's, so
-    # the tests cover the lavapipe production runs.
-    #
-    # Before the label moves to ubuntu-26.04: there the kiewer_lib `it`
-    # binary died of SIGSEGV in every run it had (four, 2026-11-18 and
-    # 2026-11-19, runs 44312588196 to 44576728135), at a different test
-    # each time, and never on 24.04. The core of one says where: inside the
-    # Vulkan loader (libvulkan.so.1) in vkSetDebugUtilsObjectNameEXT, the
-    # debug label wgpu gives an object in a debug build, called from
-    # Headless::new (kiewer_viewer/src/headless.rs) on one thread while
-    # another test's Headless::new was in vkCreateInstance. Every test app
-    # builds its own renderer, so the tests create instances side by side;
-    # the server builds one and a release build sends no labels. The cause
-    # inside the loader is not known, and nothing is fixed: the move to
-    # 26.04 starts with a run of this job there.
+    # the tests cover the lavapipe production runs. On ubuntu-26.04 the
+    # kiewer_lib `it` binary segfaults (#141): the label moves after that.
     runs-on: ubuntu-24.04
     # Postgres beside the job, as compose.yaml gives a dev box: the same
     # major and the same role, password and database triple, so the

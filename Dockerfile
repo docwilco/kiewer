@@ -22,7 +22,7 @@
 # Every other CI job names this base too, so one label moves. The test
 # job needs it for a reason of its own: its thumbnail tests draw on the
 # runner's Mesa, and the image draws on this base's (the apt layer below).
-# Its comment in ci.yml has what to run before the move to 26.04.
+# Before the move to 26.04: #141, the test binary's segfault there.
 #
 # Layer order: the apt layer first, the binaries last, so a pull after a
 # code change fetches the binaries layer alone.
